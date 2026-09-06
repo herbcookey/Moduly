@@ -38,6 +38,7 @@ void main() {
       'events',
       'audit_logs',
       'invite_join_attempts',
+      'event_members',
     ]) {
       expect(
         migrations,

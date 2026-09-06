@@ -183,11 +183,13 @@ void main() {
 
       controller.setMemberFilter('other-member');
       expect(controller.visibleEvents, isEmpty);
-      controller.setMemberFilter('owner');
+      controller.setMemberFilter('member');
       expect(
         controller.visibleEvents.map((value) => value.id),
         contains('cross-midnight'),
       );
+      controller.setMemberFilter('owner');
+      expect(controller.visibleEvents, isEmpty);
     },
   );
 

@@ -1,5 +1,21 @@
 import 'package:flutter/foundation.dart';
 
+/// Returns a defensive, duplicate-free participant list while preserving the
+/// caller's order.  Repositories perform the authorization check that every
+/// id belongs to an active membership in the event's group.
+List<String> canonicalEventMemberIds(Iterable<String> memberIds) {
+  final result = <String>[];
+  final seen = <String>{};
+  for (final raw in memberIds) {
+    final id = raw.trim();
+    if (id.isEmpty) {
+      throw const FormatException('일정 멤버를 확인해 주세요.');
+    }
+    if (seen.add(id)) result.add(id);
+  }
+  return List<String>.unmodifiable(result);
+}
+
 @immutable
 class PlannerUser {
   const PlannerUser({required this.id, required this.email, this.displayName});
@@ -177,7 +193,7 @@ class InviteCode {
 
 @immutable
 class PlannerEvent {
-  const PlannerEvent({
+  PlannerEvent({
     required this.id,
     required this.groupId,
     required this.title,
@@ -186,7 +202,7 @@ class PlannerEvent {
     required this.ownerId,
     this.note = '',
     this.allDay = false,
-    this.memberIds = const <String>[],
+    List<String> memberIds = const <String>[],
     this.colorValue = 0xff476a6f,
     this.timezone = 'UTC',
     this.allDayStartDate,
@@ -194,7 +210,8 @@ class PlannerEvent {
     this.version = 1,
     DateTime? updatedAt,
     this.deletedAt,
-  }) : updatedAt = updatedAt ?? startAt;
+  }) : _memberIds = canonicalEventMemberIds(memberIds),
+       updatedAt = updatedAt ?? startAt;
 
   final String id;
   final String groupId;
@@ -204,7 +221,16 @@ class PlannerEvent {
   final DateTime endAt; // 종일 일정에서는 UTC 날짜 범위의 끝(미포함) 경계다.
   final bool allDay;
   final String ownerId;
-  final List<String> memberIds;
+  // Keep a private immutable snapshot; callers cannot mutate event state by
+  // retaining and changing the list passed to the constructor.
+  final List<String> _memberIds;
+
+  /// Assigned users in deterministic application order.
+  ///
+  /// The returned view is intentionally unmodifiable.  This getter rather
+  /// than a mutable public field preserves the old constructor shape without
+  /// allowing event state to be changed behind ChangeNotifier guards.
+  List<String> get memberIds => List<String>.unmodifiable(_memberIds);
   final int colorValue;
   final String timezone;
   final DateTime? allDayStartDate;
@@ -258,31 +284,145 @@ class PlannerEvent {
       deletedAt: clearDeletedAt ? null : (deletedAt ?? this.deletedAt),
     );
   }
+
+  @override
+  bool operator ==(Object other) {
+    return other is PlannerEvent &&
+        other.id == id &&
+        other.groupId == groupId &&
+        other.title == title &&
+        other.note == note &&
+        other.startAt == startAt &&
+        other.endAt == endAt &&
+        other.allDay == allDay &&
+        other.ownerId == ownerId &&
+        listEquals(other.memberIds, memberIds) &&
+        other.colorValue == colorValue &&
+        other.timezone == timezone &&
+        other.allDayStartDate == allDayStartDate &&
+        other.allDayEndDate == allDayEndDate &&
+        other.version == version &&
+        other.updatedAt == updatedAt &&
+        other.deletedAt == deletedAt;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    groupId,
+    title,
+    note,
+    startAt,
+    endAt,
+    allDay,
+    ownerId,
+    Object.hashAll(memberIds),
+    colorValue,
+    timezone,
+    allDayStartDate,
+    allDayEndDate,
+    version,
+    updatedAt,
+    deletedAt,
+  );
 }
 
 @immutable
 class EventDraft {
-  const EventDraft({
+  EventDraft({
     required this.title,
     required this.startAt,
     required this.endAt,
     this.note = '',
     this.allDay = false,
-    this.memberIds = const <String>[],
+    List<String>? memberIds,
     this.colorValue = 0xff476a6f,
     this.timezone = 'UTC',
     this.allDayStartDate,
     this.allDayEndDate,
-  });
+  }) : hasExplicitMemberIds = memberIds != null,
+       _memberIds = canonicalEventMemberIds(memberIds ?? const <String>[]);
 
   final String title;
   final String note;
   final DateTime startAt;
   final DateTime endAt;
   final bool allDay;
-  final List<String> memberIds;
+
+  /// Whether the caller supplied a participant field at all.  The public
+  /// [memberIds] getter intentionally remains non-null and immutable; this
+  /// bit preserves the distinction between an omitted create field (the
+  /// repository defaults it to the creator) and an explicit empty assignment.
+  final bool hasExplicitMemberIds;
+  final List<String> _memberIds;
+  List<String> get memberIds => List<String>.unmodifiable(_memberIds);
   final int colorValue;
   final String timezone;
   final DateTime? allDayStartDate;
   final DateTime? allDayEndDate;
+
+  EventDraft copyWith({
+    String? title,
+    String? note,
+    DateTime? startAt,
+    DateTime? endAt,
+    bool? allDay,
+    List<String>? memberIds,
+    int? colorValue,
+    String? timezone,
+    DateTime? allDayStartDate,
+    DateTime? allDayEndDate,
+    bool clearAllDayDates = false,
+  }) {
+    final nextHasExplicitMemberIds = memberIds != null || hasExplicitMemberIds;
+    return EventDraft(
+      title: title ?? this.title,
+      note: note ?? this.note,
+      startAt: startAt ?? this.startAt,
+      endAt: endAt ?? this.endAt,
+      allDay: allDay ?? this.allDay,
+      memberIds: nextHasExplicitMemberIds
+          ? (memberIds ?? this.memberIds)
+          : null,
+      colorValue: colorValue ?? this.colorValue,
+      timezone: timezone ?? this.timezone,
+      allDayStartDate: clearAllDayDates
+          ? null
+          : (allDayStartDate ?? this.allDayStartDate),
+      allDayEndDate: clearAllDayDates
+          ? null
+          : (allDayEndDate ?? this.allDayEndDate),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is EventDraft &&
+        other.title == title &&
+        other.note == note &&
+        other.startAt == startAt &&
+        other.endAt == endAt &&
+        other.allDay == allDay &&
+        other.hasExplicitMemberIds == hasExplicitMemberIds &&
+        listEquals(other.memberIds, memberIds) &&
+        other.colorValue == colorValue &&
+        other.timezone == timezone &&
+        other.allDayStartDate == allDayStartDate &&
+        other.allDayEndDate == allDayEndDate;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    title,
+    note,
+    startAt,
+    endAt,
+    allDay,
+    hasExplicitMemberIds,
+    Object.hashAll(memberIds),
+    colorValue,
+    timezone,
+    allDayStartDate,
+    allDayEndDate,
+  );
 }

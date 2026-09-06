@@ -266,51 +266,64 @@ class _MemberFilter extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final selectedName = controller.members
+        .where((member) => member.id == controller.selectedMemberId)
+        .firstOrNull
+        ?.name;
+    final filterLabel = controller.showAllMembers
+        ? '모든 참여자'
+        : (selectedName ?? '참여자');
     return Row(
       children: <Widget>[
-        Text(
-          '일정',
-          style: Theme.of(
-            context,
-          ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+        Expanded(
+          child: Text(
+            '일정',
+            style: Theme.of(
+              context,
+            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+          ),
         ),
-        const Spacer(),
-        PopupMenuButton<String>(
-          initialValue: controller.showAllMembers
-              ? _allMembers
-              : controller.selectedMemberId,
-          onSelected: (value) =>
-              controller.setMemberFilter(value == _allMembers ? null : value),
-          itemBuilder: (context) => <PopupMenuEntry<String>>[
-            const PopupMenuItem<String>(
-              value: _allMembers,
-              child: Text('모든 작성자'),
-            ),
-            ...controller.members.map(
-              (member) => PopupMenuItem<String>(
-                value: member.id,
-                child: Text(member.name),
+        Flexible(
+          child: Semantics(
+            button: true,
+            label: '참여자 필터: $filterLabel',
+            child: PopupMenuButton<String>(
+              initialValue: controller.showAllMembers
+                  ? _allMembers
+                  : controller.selectedMemberId,
+              onSelected: (value) => controller.setMemberFilter(
+                value == _allMembers ? null : value,
+              ),
+              itemBuilder: (context) => <PopupMenuEntry<String>>[
+                const PopupMenuItem<String>(
+                  value: _allMembers,
+                  child: Text('모든 참여자'),
+                ),
+                ...controller.members
+                    .where(_isCurrentMember)
+                    .map(
+                      (member) => PopupMenuItem<String>(
+                        value: member.id,
+                        child: Text(member.name),
+                      ),
+                    ),
+              ],
+              child: Chip(
+                avatar: Icon(
+                  controller.showAllMembers
+                      ? Icons.people_outline
+                      : Icons.person_outline,
+                  size: 18,
+                  color: scheme.primary,
+                ),
+                label: Text(
+                  filterLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                side: BorderSide(color: scheme.outlineVariant),
               ),
             ),
-          ],
-          child: Chip(
-            avatar: Icon(
-              controller.showAllMembers
-                  ? Icons.people_outline
-                  : Icons.person_outline,
-              size: 18,
-              color: scheme.primary,
-            ),
-            label: Text(
-              controller.showAllMembers
-                  ? '모든 작성자'
-                  : (controller.members
-                            .where((m) => m.id == controller.selectedMemberId)
-                            .firstOrNull
-                            ?.name ??
-                        '작성자'),
-            ),
-            side: BorderSide(color: scheme.outlineVariant),
           ),
         ),
       ],
@@ -331,13 +344,23 @@ class _EventCard extends StatelessWidget {
     final localStart = utcToWallTime(event.startAt, event.timezone);
     final localEnd = utcToWallTime(event.endAt, event.timezone);
     final assigned = event.memberIds
-        .map((id) => members.where((member) => member.id == id).firstOrNull)
+        .map(
+          (id) => members
+              .where((member) => _isCurrentMember(member) && member.id == id)
+              .firstOrNull,
+        )
         .whereType<PlannerMember>()
         .toList();
+    final assignedIds = assigned.map((member) => member.id).toSet();
+    final previousMemberCount = event.memberIds
+        .where((id) => !assignedIds.contains(id))
+        .toSet()
+        .length;
+    final participantLabel = _participantLabel(assigned, previousMemberCount);
     return Semantics(
       button: true,
       label:
-          '${event.title}, ${event.allDay ? '종일' : '${formatTime(localStart)}부터 ${formatTime(localEnd)}'}',
+          '${event.title}, ${event.allDay ? '종일' : '${formatTime(localStart)}부터 ${formatTime(localEnd)}'}, $participantLabel',
       child: Card(
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -389,9 +412,9 @@ class _EventCard extends StatelessWidget {
                           ),
                         ],
                         const SizedBox(height: 10),
-                        Row(
-                          children: <Widget>[
-                            if (!event.allDay) ...<Widget>[
+                        if (!event.allDay)
+                          Row(
+                            children: <Widget>[
                               Icon(
                                 Icons.schedule,
                                 size: 15,
@@ -402,49 +425,13 @@ class _EventCard extends StatelessWidget {
                                 '${formatTime(localStart)} – ${formatTime(localEnd)}',
                                 style: Theme.of(context).textTheme.labelMedium,
                               ),
-                              const SizedBox(width: 12),
                             ],
-                            if (assigned.isNotEmpty)
-                              Flexible(
-                                child: Row(
-                                  children: <Widget>[
-                                    ...assigned
-                                        .take(3)
-                                        .map(
-                                          (member) => Padding(
-                                            padding: const EdgeInsets.only(
-                                              right: 3,
-                                            ),
-                                            child: CircleAvatar(
-                                              radius: 11,
-                                              backgroundColor: colorFromValue(
-                                                member.avatarColor,
-                                              ),
-                                              child: Text(
-                                                initials(member.name),
-                                                style: TextStyle(
-                                                  fontSize: 9,
-                                                  color: contrastingForeground(
-                                                    colorFromValue(
-                                                      member.avatarColor,
-                                                    ),
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                    if (assigned.length > 3)
-                                      Text(
-                                        '+${assigned.length - 3}',
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.labelSmall,
-                                      ),
-                                  ],
-                                ),
-                              ),
-                          ],
+                          ),
+                        const SizedBox(height: 8),
+                        _ParticipantSummary(
+                          assigned: assigned,
+                          previousMemberCount: previousMemberCount,
+                          label: participantLabel,
                         ),
                       ],
                     ),
@@ -458,6 +445,90 @@ class _EventCard extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+bool _isCurrentMember(PlannerMember member) =>
+    member.isActive && member.removedAt == null;
+
+String _participantLabel(
+  List<PlannerMember> assigned,
+  int previousMemberCount,
+) {
+  if (assigned.isEmpty && previousMemberCount == 0) return '참여자 없음';
+  final names = assigned.take(2).map((member) => member.name).toList();
+  var label = names.join(', ');
+  if (assigned.length > names.length) {
+    final remaining = assigned.length - names.length;
+    label = label.isEmpty ? '$remaining명' : '$label 외 $remaining명';
+  }
+  if (previousMemberCount > 0) {
+    final previousLabel = previousMemberCount == 1
+        ? '이전 멤버'
+        : '이전 멤버 $previousMemberCount명';
+    label = label.isEmpty ? previousLabel : '$label, $previousLabel';
+  }
+  return '참여자 $label';
+}
+
+class _ParticipantSummary extends StatelessWidget {
+  const _ParticipantSummary({
+    required this.assigned,
+    required this.previousMemberCount,
+    required this.label,
+  });
+
+  final List<PlannerMember> assigned;
+  final int previousMemberCount;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Semantics(
+      container: true,
+      label: label,
+      child: Row(
+        children: <Widget>[
+          ...assigned.take(3).map((member) {
+            final avatarColor = colorFromValue(member.avatarColor);
+            return Padding(
+              padding: const EdgeInsets.only(right: 3),
+              child: CircleAvatar(
+                radius: 11,
+                backgroundColor: avatarColor,
+                child: Text(
+                  initials(member.name),
+                  style: TextStyle(
+                    fontSize: 9,
+                    color: contrastingForeground(avatarColor),
+                  ),
+                ),
+              ),
+            );
+          }),
+          if (previousMemberCount > 0) ...<Widget>[
+            Icon(
+              Icons.person_off_outlined,
+              size: 18,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 4),
+          ],
+          const SizedBox(width: 3),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(
+                context,
+              ).textTheme.labelMedium?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ),
+        ],
       ),
     );
   }

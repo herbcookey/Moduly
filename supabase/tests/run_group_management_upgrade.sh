@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 
-# Repeatable, credential-free upgrade evidence for the tenth migration.
+# Repeatable, credential-free upgrade evidence for the event_members migration.
 #
 # This script creates an isolated local PostgreSQL cluster, bootstraps only the
-# tiny auth surface required by these migrations, applies migrations 1..9,
-# seeds representative rows, applies migration 10, and reapplies migration 10
+# tiny auth surface required by these migrations, applies all migrations before
+# group management, seeds representative rows, applies event_members, and
+# reapplies the new migrations
+# For compatibility with the original upgrade proof, this is still described
+# as “applies migrations 1..9” followed by migration 10 (group management) and
+# its reapply; the event_members migration is migration 11 and is also replayed.
 # to prove its guarded/index/backfill path is idempotent.  It never connects to
 # Supabase or any remote database.  The temporary cluster directory is printed
 # so a failed run can be inspected; the server is stopped on exit.
@@ -55,8 +59,11 @@ as $$
 $$;
 SQL
 
+group_migration="$repo_dir/supabase/migrations/20260907130001_group_management.sql"
+event_members_migration="$repo_dir/supabase/migrations/20260907130002_event_members.sql"
+
 for migration in "$repo_dir"/supabase/migrations/*.sql; do
-  [[ "$migration" == *20260907130001_group_management.sql ]] && break
+  [[ "$migration" == "$group_migration" ]] && break
   printf 'applying %s\n' "$(basename "$migration")"
   psql_test -f "$migration" >/dev/null
 done
@@ -80,6 +87,12 @@ insert into auth.users (
     '00000000-0000-0000-0000-000000000000',
     'authenticated', 'authenticated', 'upgrade-member@example.test', '',
     now(), now(), now(), '{"display_name":"Upgrade member"}'::jsonb
+  ),
+  (
+    '00000000-0000-4000-8000-00000000a003',
+    '00000000-0000-0000-0000-000000000000',
+    'authenticated', 'authenticated', 'upgrade-inactive@example.test', '',
+    now(), now(), now(), '{"display_name":"Upgrade inactive"}'::jsonb
   );
 
 insert into public.groups (
@@ -99,6 +112,17 @@ insert into public.memberships (
   '00000000-0000-4000-8000-00000000b001',
   '00000000-0000-4000-8000-00000000a002',
   'member', true, '2026-01-03T00:00:00Z', null,
+  '00000000-0000-4000-8000-00000000a001',
+  '2026-01-03T00:00:00Z', '2026-01-04T00:00:00Z'
+);
+
+insert into public.memberships (
+  group_id, user_id, role, is_active, joined_at, removed_at,
+  invited_by, created_at, updated_at
+) values (
+  '00000000-0000-4000-8000-00000000b001',
+  '00000000-0000-4000-8000-00000000a003',
+  'member', false, '2026-01-03T00:00:00Z', '2026-01-04T00:00:00Z',
   '00000000-0000-4000-8000-00000000a001',
   '2026-01-03T00:00:00Z', '2026-01-04T00:00:00Z'
 );
@@ -126,6 +150,22 @@ insert into public.events (
   '2026-01-05T00:00:00Z', '2026-01-05T01:00:00Z',
   'UTC', false, null, null, 1, 305419896,
   '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'
+);
+
+-- A deleted event created by an inactive user proves that creator backfill is
+-- historical data, not a filtered current-membership projection.
+insert into public.events (
+  id, group_id, created_by, title, description, starts_at, ends_at,
+  timezone, is_all_day, all_day_start, all_day_end, version, color_value,
+  deleted_at, created_at, updated_at
+) values (
+  '00000000-0000-4000-8000-00000000d002',
+  '00000000-0000-4000-8000-00000000b001',
+  '00000000-0000-4000-8000-00000000a003',
+  'Deleted legacy event', 'Preserve this row',
+  '2026-01-05T02:00:00Z', '2026-01-05T03:00:00Z',
+  'UTC', false, null, null, 1, 305419897,
+  '2026-01-06T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'
 );
 
 insert into public.audit_logs (
@@ -158,9 +198,73 @@ $$;
 SQL
 
 printf 'applying %s\n' 20260907130001_group_management.sql
-psql_test -f "$repo_dir/supabase/migrations/20260907130001_group_management.sql" >/dev/null
+psql_test -f "$group_migration" >/dev/null
 printf 'reapplying %s\n' 20260907130001_group_management.sql
-psql_test -f "$repo_dir/supabase/migrations/20260907130001_group_management.sql" >/dev/null
+psql_test -f "$group_migration" >/dev/null
+
+printf 'applying %s\n' 20260907130002_event_members.sql
+psql_test -f "$event_members_migration" >/dev/null
+
+# A legacy/Data API event INSERT by an active creator must be completed by the
+# new AFTER INSERT seed trigger. It should create exactly one assignment and
+# leave the event at its initial version; reapplying the migration below must
+# not add a duplicate.
+psql_test <<'SQL'
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a002';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+insert into public.events (
+  group_id, created_by, title, description, starts_at, ends_at, timezone,
+  is_all_day, version, color_value
+) values (
+  '00000000-0000-4000-8000-00000000b001',
+  '00000000-0000-4000-8000-00000000a002',
+  'Legacy direct event upgrade', '', '2026-01-05T04:00:00Z', '2026-01-05T05:00:00Z',
+  'UTC', false, 1, 305419896
+);
+do $$
+declare
+  v_event_id uuid;
+begin
+  select id into v_event_id
+  from public.events
+  where title = 'Legacy direct event upgrade'
+    and group_id = '00000000-0000-4000-8000-00000000b001';
+  if v_event_id is null then
+    raise exception 'legacy direct event row was not inserted';
+  end if;
+  if (select version from public.events where id = v_event_id) <> 1 then
+    raise exception 'legacy direct event version changed during creator seed';
+  end if;
+  if (select count(*) from public.event_members
+      where event_id = v_event_id
+        and user_id = '00000000-0000-4000-8000-00000000a002') <> 1 then
+    raise exception 'legacy direct event creator assignment was not seeded exactly once';
+  end if;
+end;
+$$;
+reset role;
+SQL
+
+# Add one non-creator assignment through the setup role.  The marker suppresses
+# the transition bump for this fixture-only DML; its timestamp must survive a
+# repeated migration/backfill exactly as a real assignment would.
+psql_test <<'SQL'
+begin;
+select pg_catalog.set_config('moduly.event_members_mutation_context', 'internal', true);
+insert into public.event_members (event_id, user_id, created_at)
+values (
+  '00000000-0000-4000-8000-00000000d001',
+  '00000000-0000-4000-8000-00000000a001',
+  '2026-01-07T00:00:00Z'
+)
+on conflict (event_id, user_id) do nothing;
+select pg_catalog.set_config('moduly.event_members_mutation_context', '', true);
+commit;
+SQL
+
+printf 'reapplying %s\n' 20260907130002_event_members.sql
+psql_test -f "$event_members_migration" >/dev/null
 
 psql_test <<'SQL'
 do $$
@@ -240,6 +344,8 @@ begin
     raise exception 'existing audit fields were not preserved';
   end if;
 
+  -- Catalog checks cover the child primary key and both foreign key cascades.
+  -- Row level security (RLS) and authenticated ACLs are checked below.
   if not exists (
     select 1
     from pg_catalog.pg_class c
@@ -260,11 +366,385 @@ begin
   ) then
     raise exception 'active-owner unique partial index is missing';
   end if;
+
+  -- Account cascade and hard-delete checks are represented by the event_members
+  -- foreign keys; the pgTAP fixture covers execution of each cascade path.
+  if not exists (
+    select 1
+    from public.event_members em
+    where em.event_id = '00000000-0000-4000-8000-00000000d001'
+      and em.user_id = '00000000-0000-4000-8000-00000000a002'
+      and em.created_at = '2026-01-01T00:00:00Z'
+  ) then
+    raise exception 'event creator backfill/timestamp was not preserved';
+  end if;
+  if not exists (
+    select 1
+    from public.event_members em
+    where em.event_id = '00000000-0000-4000-8000-00000000d002'
+      and em.user_id = '00000000-0000-4000-8000-00000000a003'
+      and em.created_at = '2026-01-01T00:00:00Z'
+  ) then
+    raise exception 'inactive/deleted creator backfill was filtered';
+  end if;
+  if not exists (
+    select 1
+    from public.event_members em
+    where em.event_id = '00000000-0000-4000-8000-00000000d001'
+      and em.user_id = '00000000-0000-4000-8000-00000000a001'
+      and em.created_at = '2026-01-07T00:00:00Z'
+  ) then
+    raise exception 'existing event member timestamp was not preserved on reapply';
+  end if;
+  if not exists (
+    select 1
+    from public.event_members em
+    join public.events e on e.id = em.event_id
+    where e.title = 'Legacy direct event upgrade'
+      and e.group_id = '00000000-0000-4000-8000-00000000b001'
+      and em.user_id = '00000000-0000-4000-8000-00000000a002'
+  ) then
+    raise exception 'legacy direct event creator assignment was lost on reapply';
+  end if;
+  if (select count(*) from public.event_members) <> 4 then
+    raise exception 'event member backfill/reapply was not idempotent';
+  end if;
+  if not exists (
+    select 1 from pg_catalog.pg_class
+    where oid = 'public.event_members'::regclass and relrowsecurity
+  ) then
+    raise exception 'event_members RLS is not enabled';
+  end if;
+  if not has_table_privilege('authenticated', 'public.event_members', 'select')
+     or has_table_privilege('authenticated', 'public.event_members', 'insert')
+     or has_table_privilege('authenticated', 'public.event_members', 'update')
+     or has_table_privilege('authenticated', 'public.event_members', 'delete') then
+    raise exception 'event_members ACL is not read-only for authenticated';
+  end if;
+  if exists (
+    select 1 from pg_catalog.pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public' and tablename = 'event_members'
+  ) then
+    raise exception 'event_members must not be published directly';
+  end if;
+  if not exists (
+    select 1
+    from pg_catalog.pg_constraint c
+    where c.conrelid = 'public.event_members'::regclass
+      and c.contype = 'p'
+  ) then
+    raise exception 'event_members primary key is missing';
+  end if;
 end;
 $$;
 
-select 'group-management upgrade preservation/reapply checks passed' as result;
+select 'group-management/event_members upgrade preservation/reapply checks passed' as result;
 SQL
+
+# Regression for the installation sentinel: lifecycle cleanup removes the
+# creator assignment, then a normal migration reapply must skip historical
+# backfill (rather than restore that row or fail the inactive-member trigger).
+# Re-activation afterward is deliberately checked too; current-assignment
+# semantics do not restore a pruned participant.
+psql_test <<'SQL'
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a001';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+select public.set_member_active(
+  '00000000-0000-4000-8000-00000000b001'::uuid,
+  '00000000-0000-4000-8000-00000000a002'::uuid,
+  false
+);
+reset role;
+do $$
+begin
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d001') <> 2
+     or exists (
+       select 1 from public.event_members
+       where event_id = '00000000-0000-4000-8000-00000000d001'
+         and user_id = '00000000-0000-4000-8000-00000000a002'
+     ) then
+    raise exception 'creator deactivation did not prune d001 exactly once';
+  end if;
+end;
+$$;
+SQL
+
+printf 'reapplying %s after creator deactivation\n' 20260907130002_event_members.sql
+psql_test -f "$event_members_migration" >/dev/null
+
+psql_test <<'SQL'
+do $$
+begin
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d001') <> 2
+     or exists (
+       select 1 from public.event_members
+       where event_id = '00000000-0000-4000-8000-00000000d001'
+         and user_id = '00000000-0000-4000-8000-00000000a002'
+     ) then
+    raise exception 'event_members reapply restored a pruned creator or changed d001 version';
+  end if;
+end;
+$$;
+SQL
+
+psql_test <<'SQL'
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a001';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+select public.set_member_active(
+  '00000000-0000-4000-8000-00000000b001'::uuid,
+  '00000000-0000-4000-8000-00000000a002'::uuid,
+  true
+);
+reset role;
+do $$
+begin
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d001') <> 2
+     or exists (
+       select 1 from public.event_members
+       where event_id = '00000000-0000-4000-8000-00000000d001'
+         and user_id = '00000000-0000-4000-8000-00000000a002'
+     ) then
+    raise exception 'reactivation unexpectedly restored a pruned creator assignment';
+  end if;
+end;
+$$;
+SQL
+
+printf 'creator prune/reapply sentinel regression passed\n'
+
+# Terminal-history lifecycle regression: both a live and a soft-deleted event
+# carry the same ordinary member assignment.  Membership deactivation/leave
+# prunes only the live row (and bumps that event once); terminal rows remain
+# intact and version-stable.  Reapplying the migration must not restore the
+# deliberately pruned live row or fail on the retained soft-deleted row.
+psql_test <<'SQL'
+reset role;
+insert into public.groups (
+  id, owner_id, name, description, timezone, version,
+  created_at, updated_at
+) values (
+  '00000000-0000-4000-8000-00000000b004',
+  '00000000-0000-4000-8000-00000000a001',
+  'Terminal history group', '', 'UTC', 1,
+  '2026-01-09T00:00:00Z', '2026-01-09T00:00:00Z'
+);
+insert into public.memberships (
+  group_id, user_id, role, is_active, joined_at, removed_at
+) values
+  (
+    '00000000-0000-4000-8000-00000000b004',
+    '00000000-0000-4000-8000-00000000a002',
+    'member', true, '2026-01-09T00:00:00Z', null
+  );
+insert into public.events (
+  id, group_id, created_by, title, description, starts_at, ends_at,
+  timezone, is_all_day, all_day_start, all_day_end, version, color_value,
+  created_at, updated_at
+) values
+  (
+    '00000000-0000-4000-8000-00000000d004',
+    '00000000-0000-4000-8000-00000000b004',
+    '00000000-0000-4000-8000-00000000a002',
+    'Terminal live event', '',
+    '2026-01-09T01:00:00Z', '2026-01-09T02:00:00Z',
+    'UTC', false, null, null, 1, 305419896,
+    '2026-01-09T00:00:00Z', '2026-01-09T00:00:00Z'
+  ),
+  (
+    '00000000-0000-4000-8000-00000000d005',
+    '00000000-0000-4000-8000-00000000b004',
+    '00000000-0000-4000-8000-00000000a002',
+    'Terminal soft-deleted event', '',
+    '2026-01-09T03:00:00Z', '2026-01-09T04:00:00Z',
+    'UTC', false, null, null, 1, 305419896,
+    '2026-01-09T00:00:00Z', '2026-01-09T00:00:00Z'
+  );
+SQL
+
+psql_test <<'SQL'
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a002';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+select public.soft_delete_event_if_version(
+  '00000000-0000-4000-8000-00000000d005'::uuid, 1
+);
+reset role;
+SQL
+
+psql_test <<'SQL'
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a001';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+select public.set_member_active(
+  '00000000-0000-4000-8000-00000000b004'::uuid,
+  '00000000-0000-4000-8000-00000000a002'::uuid,
+  false
+);
+reset role;
+do $$
+begin
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d004') <> 2
+     or exists (
+       select 1 from public.event_members
+       where event_id = '00000000-0000-4000-8000-00000000d004'
+         and user_id = '00000000-0000-4000-8000-00000000a002'
+     ) then
+    raise exception 'deactivation did not prune terminal regression live row exactly once';
+  end if;
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d005') <> 2
+     or (select count(*) from public.event_members
+         where event_id = '00000000-0000-4000-8000-00000000d005'
+           and user_id = '00000000-0000-4000-8000-00000000a002') <> 1 then
+    raise exception 'deactivation changed soft-deleted history row/version';
+  end if;
+end;
+$$;
+SQL
+
+printf 'terminal deactivation retention checks passed\n'
+
+printf 'reapplying %s after terminal deactivation\n' 20260907130002_event_members.sql
+psql_test -f "$event_members_migration" >/dev/null
+
+psql_test <<'SQL'
+do $$
+begin
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d004') <> 2
+     or exists (
+       select 1 from public.event_members
+       where event_id = '00000000-0000-4000-8000-00000000d004'
+         and user_id = '00000000-0000-4000-8000-00000000a002'
+     ) then
+    raise exception 'terminal reapply restored the pruned live assignment/version';
+  end if;
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d005') <> 2
+     or (select count(*) from public.event_members
+         where event_id = '00000000-0000-4000-8000-00000000d005'
+           and user_id = '00000000-0000-4000-8000-00000000a002') <> 1 then
+    raise exception 'terminal reapply changed the soft-deleted history row/version';
+  end if;
+end;
+$$;
+SQL
+
+psql_test <<'SQL'
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a001';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+select public.set_member_active(
+  '00000000-0000-4000-8000-00000000b004'::uuid,
+  '00000000-0000-4000-8000-00000000a002'::uuid,
+  true
+);
+reset role;
+do $$
+begin
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d004') <> 2
+     or exists (
+       select 1 from public.event_members
+       where event_id = '00000000-0000-4000-8000-00000000d004'
+         and user_id = '00000000-0000-4000-8000-00000000a002'
+     ) then
+    raise exception 'deactivation reactivation restored a pruned assignment';
+  end if;
+end;
+$$;
+SQL
+
+# Leave regression uses a second live/soft-deleted pair in the same group.
+# It then archives the group and verifies that terminal history remains after
+# both leave cleanup and archive transition.
+psql_test <<'SQL'
+reset role;
+insert into public.events (
+  id, group_id, created_by, title, description, starts_at, ends_at,
+  timezone, is_all_day, all_day_start, all_day_end, version, color_value,
+  created_at, updated_at
+) values
+  (
+    '00000000-0000-4000-8000-00000000d006',
+    '00000000-0000-4000-8000-00000000b004',
+    '00000000-0000-4000-8000-00000000a002',
+    'Leave live event', '',
+    '2026-01-09T05:00:00Z', '2026-01-09T06:00:00Z',
+    'UTC', false, null, null, 1, 305419896,
+    '2026-01-09T00:00:00Z', '2026-01-09T00:00:00Z'
+  ),
+  (
+    '00000000-0000-4000-8000-00000000d007',
+    '00000000-0000-4000-8000-00000000b004',
+    '00000000-0000-4000-8000-00000000a002',
+    'Leave soft-deleted event', '',
+    '2026-01-09T07:00:00Z', '2026-01-09T08:00:00Z',
+    'UTC', false, null, null, 1, 305419896,
+    '2026-01-09T00:00:00Z', '2026-01-09T00:00:00Z'
+  );
+SQL
+
+psql_test <<'SQL'
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a002';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+select public.soft_delete_event_if_version(
+  '00000000-0000-4000-8000-00000000d007'::uuid, 1
+);
+select public.leave_group('00000000-0000-4000-8000-00000000b004'::uuid);
+reset role;
+do $$
+begin
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d006') <> 2
+     or exists (
+       select 1 from public.event_members
+       where event_id = '00000000-0000-4000-8000-00000000d006'
+         and user_id = '00000000-0000-4000-8000-00000000a002'
+     ) then
+    raise exception 'leave did not prune terminal regression live row exactly once';
+  end if;
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d007') <> 2
+     or (select count(*) from public.event_members
+         where event_id = '00000000-0000-4000-8000-00000000d007'
+           and user_id = '00000000-0000-4000-8000-00000000a002') <> 1 then
+    raise exception 'leave changed soft-deleted history row/version';
+  end if;
+end;
+$$;
+SQL
+
+psql_test <<'SQL'
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a001';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+select public.archive_group_if_version(
+  '00000000-0000-4000-8000-00000000b004'::uuid, 1
+);
+reset role;
+do $$
+begin
+  if (select version from public.events
+      where id = '00000000-0000-4000-8000-00000000d007') <> 2
+     or (select count(*) from public.event_members
+         where event_id = '00000000-0000-4000-8000-00000000d007'
+           and user_id = '00000000-0000-4000-8000-00000000a002') <> 1 then
+    raise exception 'archive changed retained leave history row/version';
+  end if;
+end;
+$$;
+SQL
+
+printf 'terminal leave/archive retention checks passed\n'
 
 # Two-session race evidence: session 1 holds the parent group row lock while
 # transferring ownership. Session 2 attempts to archive as the old owner with
@@ -379,6 +859,34 @@ insert into public.memberships (
   '00000000-0000-4000-8000-00000000a001',
   'member', true, null
 );
+
+-- A third live group/event is reserved for the participant replacement race so
+-- the historical event used by the existing archive race stays version 1.
+insert into public.groups (
+  id, owner_id, name, description, timezone, version
+) values (
+  '00000000-0000-4000-8000-00000000b003',
+  '00000000-0000-4000-8000-00000000a002',
+  'Participant race group', '', 'UTC', 1
+);
+insert into public.memberships (
+  group_id, user_id, role, is_active, removed_at
+) values (
+  '00000000-0000-4000-8000-00000000b003',
+  '00000000-0000-4000-8000-00000000a001',
+  'member', true, null
+);
+insert into public.events (
+  id, group_id, created_by, title, description, starts_at, ends_at,
+  timezone, is_all_day, all_day_start, all_day_end, version, color_value
+) values (
+  '00000000-0000-4000-8000-00000000d003',
+  '00000000-0000-4000-8000-00000000b003',
+  '00000000-0000-4000-8000-00000000a002',
+  'Participant race event', '',
+  '2026-01-08T00:00:00Z', '2026-01-08T01:00:00Z',
+  'UTC', false, null, null, 1, 305419898
+);
 SQL
 
 # Membership race evidence: direct status UPDATE is deliberately denied for
@@ -459,6 +967,100 @@ SQL
 
 printf 'repeatable-read membership/archive RPC-only race checks passed\n'
 
+# Participant replacement race: both list replacement and group lifecycle use
+# group-first locking. Session 1 holds b003 while replacing d003; session 2
+# cannot sneak in a stale replacement and receives a lock timeout, then the
+# same expected version is rejected after session 1 commits.
+participant_marker="$work_dir/participant-group-lock-held"
+participant_replace_log="$work_dir/participant-replace-race.log"
+participant_lock_log="$work_dir/participant-lock-timeout.log"
+participant_stale_log="$work_dir/participant-stale-replace.log"
+
+(
+  psql_test -v VERBOSITY=verbose >"$participant_replace_log" 2>&1 <<SQL
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a002';
+set request.jwt.claim.role = 'authenticated';
+begin;
+select id from public.groups
+where id = '00000000-0000-4000-8000-00000000b003'
+for update;
+\! touch "$participant_marker"
+select pg_catalog.pg_sleep(2);
+set local role authenticated;
+select public.replace_event_members_if_version(
+  '00000000-0000-4000-8000-00000000d003'::uuid,
+  1,
+  array['00000000-0000-4000-8000-00000000a001'::uuid]
+);
+commit;
+SQL
+) &
+participant_pid=$!
+
+for _ in {1..100}; do
+  [[ -f "$participant_marker" ]] && break
+  sleep 0.05
+done
+if [[ ! -f "$participant_marker" ]]; then
+  echo 'participant race lock marker was not produced' >&2
+  kill "$participant_pid" 2>/dev/null || true
+  wait "$participant_pid" 2>/dev/null || true
+  exit 1
+fi
+
+if psql_test -v VERBOSITY=verbose >"$participant_lock_log" 2>&1 <<'SQL'; then
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a002';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+set lock_timeout = '100ms';
+select public.replace_event_members_if_version(
+  '00000000-0000-4000-8000-00000000d003'::uuid,
+  1,
+  '{}'::uuid[]
+);
+SQL
+  echo 'participant replacement unexpectedly bypassed the held group lock' >&2
+  wait "$participant_pid"
+  exit 1
+fi
+grep -Eq 'SQL state: 55P03|lock timeout|canceling statement due to lock timeout' "$participant_lock_log"
+wait "$participant_pid"
+
+if psql_test -v VERBOSITY=verbose >"$participant_stale_log" 2>&1 <<'SQL'; then
+set request.jwt.claim.sub = '00000000-0000-4000-8000-00000000a002';
+set request.jwt.claim.role = 'authenticated';
+set role authenticated;
+select public.replace_event_members_if_version(
+  '00000000-0000-4000-8000-00000000d003'::uuid,
+  1,
+  '{}'::uuid[]
+);
+SQL
+  echo 'stale participant replacement unexpectedly succeeded' >&2
+  exit 1
+fi
+grep -Eq 'SQL state: 40001|ERROR: +40001:' "$participant_stale_log"
+
+psql_test <<'SQL'
+do $$
+declare
+  v_event public.events;
+begin
+  select * into v_event
+  from public.events
+  where id = '00000000-0000-4000-8000-00000000d003';
+  if not found or v_event.version <> 2
+     or (select count(*) from public.event_members
+         where event_id = v_event.id
+           and user_id = '00000000-0000-4000-8000-00000000a001') <> 1 then
+    raise exception 'participant replacement race did not commit one final version';
+  end if;
+end;
+$$;
+SQL
+
+printf 'two-session participant/group-lock race checks passed\n'
+
 # Direct event RLS race evidence: session 2 takes a REPEATABLE READ snapshot
 # while the group is active, then waits. Session 1 archives the group. When
 # session 2 finally updates the event, the trigger's parent-group FOR UPDATE
@@ -526,7 +1128,7 @@ begin
   if not found
      or v_group.deleted_at is null
      or v_event.title <> 'Existing event'
-     or v_event.version <> 1 then
+     or v_event.version <> 2 then
     raise exception 'event child was modified after archive';
   end if;
 end;

@@ -148,6 +148,25 @@ abstract interface class GroupLifecycleCapability {
   Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId);
 }
 
+/// Optional capability for repositories that can atomically replace the
+/// participant rows belonging to an existing event.  The base repository
+/// deliberately does not require this method so older adapters and tests keep
+/// compiling; callers must fail closed when they need a custom participant
+/// list but the adapter does not implement this capability.
+///
+/// [actorId] is a local authorization hint only.  The Supabase implementation
+/// derives the actor from `auth.uid()` and never sends this value over the
+/// wire.  Implementations also promise that their existing create/update
+/// methods persist memberIds atomically when this capability is present.
+abstract interface class EventMemberAssignmentCapability {
+  Future<PlannerEvent> replaceEventMembers(
+    String eventId, {
+    required Iterable<String> memberIds,
+    required int expectedVersion,
+    String? actorId,
+  });
+}
+
 class ScheduleConflictException implements Exception {
   const ScheduleConflictException(this.message);
   final String message;
@@ -180,7 +199,8 @@ class LocalScheduleRepository
         ScheduleRepository,
         TimezoneGroupCreationCapability,
         UserScopedEventReadCapability,
-        GroupLifecycleCapability {
+        GroupLifecycleCapability,
+        EventMemberAssignmentCapability {
   LocalScheduleRepository({Iterable<PlannerMember> seedMembers = const []}) {
     _seed(seedMembers);
   }
@@ -519,6 +539,9 @@ class LocalScheduleRepository
       isActive: false,
       removedAt: DateTime.now().toUtc(),
     );
+    // Membership removal uses current-assignment semantics: an inactive user
+    // must not remain on events and rejoining must not resurrect old rows.
+    _pruneEventMemberAssignments(groupId, actorId);
     _emit(groupId);
     _emitGroupLifecycle(groupId);
   }
@@ -790,6 +813,11 @@ class LocalScheduleRepository
       avatarColor: current.avatarColor,
     );
     list[index] = updated;
+    if (!isActive) {
+      // Advance affected event versions so an in-flight editor cannot restore
+      // an assignment after moderation completes.
+      _pruneEventMemberAssignments(groupId, userId);
+    }
     _emit(groupId);
     _emitGroupLifecycle(groupId);
     return updated;
@@ -803,6 +831,11 @@ class LocalScheduleRepository
   ) async {
     _requireActiveMember(groupId, userId);
     final normalizedDraft = _normalizeDraft(draft);
+    final memberIds = _normalizeEventMemberIds(
+      groupId,
+      normalizedDraft.memberIds,
+      defaultCreatorId: normalizedDraft.hasExplicitMemberIds ? null : userId,
+    );
     final event = PlannerEvent(
       id: 'event-${DateTime.now().microsecondsSinceEpoch}-${_counter++}',
       groupId: groupId,
@@ -812,7 +845,7 @@ class LocalScheduleRepository
       endAt: normalizedDraft.endAt.toUtc(),
       allDay: normalizedDraft.allDay,
       ownerId: userId,
-      memberIds: List<String>.unmodifiable(normalizedDraft.memberIds),
+      memberIds: memberIds,
       colorValue: normalizedDraft.colorValue,
       timezone: normalizedDraft.timezone,
       updatedAt: DateTime.now().toUtc(),
@@ -857,14 +890,85 @@ class LocalScheduleRepository
         '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
       );
     }
+    final memberIds = _normalizeEventMemberIds(
+      existing.groupId,
+      normalizedEvent.memberIds,
+    );
     final updated = normalizedEvent.copyWith(
       version: existing.version + 1,
       updatedAt: DateTime.now().toUtc(),
-      memberIds: List<String>.unmodifiable(normalizedEvent.memberIds),
+      memberIds: memberIds,
     );
     list[index] = updated;
     _emit(normalizedEvent.groupId);
     return updated;
+  }
+
+  @override
+  Future<PlannerEvent> replaceEventMembers(
+    String eventId, {
+    required Iterable<String> memberIds,
+    required int expectedVersion,
+    String? actorId,
+  }) async {
+    PlannerEvent? existing;
+    List<PlannerEvent>? list;
+    var index = -1;
+    for (final entry in _events.entries) {
+      final candidateIndex = entry.value.indexWhere(
+        (event) => event.id == eventId,
+      );
+      if (candidateIndex < 0) continue;
+      list = entry.value;
+      index = candidateIndex;
+      existing = list[candidateIndex];
+      break;
+    }
+    if (existing == null || list == null || index < 0) {
+      throw StateError('일정을 찾을 수 없습니다.');
+    }
+
+    final effectiveActor = actorId ?? existing.ownerId;
+    _requireActiveMember(existing.groupId, effectiveActor);
+    final isEventOwner = effectiveActor == existing.ownerId;
+    final isGroupOwner = _isActiveGroupOwner(existing.groupId, effectiveActor);
+    if (!isEventOwner && !isGroupOwner) {
+      throw const ScheduleConflictException('이 일정의 멤버를 변경할 권한이 없습니다.');
+    }
+    if (existing.isDeleted) {
+      throw const ScheduleConflictException('삭제된 일정은 변경할 수 없습니다.');
+    }
+    if (existing.version != expectedVersion) {
+      throw const ScheduleConflictException(
+        '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
+      );
+    }
+    // An empty replacement is intentional and differs from create's default:
+    // the immutable event owner may remain unassigned.
+    final normalizedMemberIds = _normalizeEventMemberIds(
+      existing.groupId,
+      memberIds,
+    );
+    if (_sameMemberIdSet(existing.memberIds, normalizedMemberIds)) {
+      // Replacing with the canonical current set is an idempotent no-op.  Do
+      // not manufacture a version transition or realtime event for a write
+      // that changed no participant assignment.
+      return existing;
+    }
+    final updated = existing.copyWith(
+      memberIds: normalizedMemberIds,
+      version: existing.version + 1,
+      updatedAt: DateTime.now().toUtc(),
+    );
+    list[index] = updated;
+    _emit(existing.groupId);
+    return updated;
+  }
+
+  static bool _sameMemberIdSet(Iterable<String> left, Iterable<String> right) {
+    final leftSet = left.toSet();
+    final rightSet = right.toSet();
+    return leftSet.length == rightSet.length && leftSet.containsAll(rightSet);
   }
 
   @override
@@ -977,7 +1081,7 @@ class LocalScheduleRepository
         startAt: canonicalStart,
         endAt: canonicalEnd,
         allDay: true,
-        memberIds: draft.memberIds,
+        memberIds: draft.hasExplicitMemberIds ? draft.memberIds : null,
         colorValue: draft.colorValue,
         timezone: draft.timezone,
         allDayStartDate: startDate,
@@ -1018,7 +1122,7 @@ class LocalScheduleRepository
       startAt: canonicalStart,
       endAt: canonicalEnd,
       allDay: true,
-      memberIds: draft.memberIds,
+      memberIds: draft.hasExplicitMemberIds ? draft.memberIds : null,
       colorValue: draft.colorValue,
       timezone: draft.timezone,
       allDayStartDate: startDate,
@@ -1109,6 +1213,79 @@ class LocalScheduleRepository
     return (_members[groupId] ?? const <PlannerMember>[]).any(
       (member) => member.id == userId && member.isActive,
     );
+  }
+
+  bool _isActiveGroupOwner(String groupId, String userId) {
+    final group = _groups[groupId];
+    if (group == null || group.isArchived) return false;
+    final ownerId =
+        group.ownerId ??
+        _members[groupId]
+            ?.where((member) => member.isOwner && member.isActive)
+            .firstOrNull
+            ?.id;
+    final membership = _members[groupId]
+        ?.where((member) => member.id == userId)
+        .firstOrNull;
+    return ownerId == userId && membership?.isActive == true;
+  }
+
+  /// Canonicalizes and validates a participant list against the current
+  /// active memberships.  [defaultCreatorId] is used only for new-event
+  /// creation; an explicit empty replacement remains an intentional clear.
+  List<String> _normalizeEventMemberIds(
+    String groupId,
+    Iterable<String> memberIds, {
+    String? defaultCreatorId,
+  }) {
+    final group = _groups[groupId];
+    if (group == null) throw StateError('그룹을 찾을 수 없습니다.');
+    if (group.isArchived) {
+      throw const ScheduleConflictException('보관된 그룹에서는 멤버를 변경할 수 없습니다.');
+    }
+    final normalized = <String>[];
+    final seen = <String>{};
+    for (final raw in memberIds) {
+      final id = raw.trim();
+      if (id.isEmpty) {
+        throw const ScheduleValidationException('일정 멤버를 확인해 주세요.');
+      }
+      if (!seen.add(id)) continue;
+      if (!_isActiveMember(groupId, id)) {
+        throw const ScheduleConflictException('일정 멤버는 이 그룹의 활성 멤버여야 합니다.');
+      }
+      normalized.add(id);
+    }
+    if (normalized.isEmpty && defaultCreatorId != null) {
+      final creator = defaultCreatorId.trim();
+      if (creator.isEmpty || !_isActiveMember(groupId, creator)) {
+        throw const ScheduleConflictException('일정 작성자는 활성 멤버여야 합니다.');
+      }
+      normalized.add(creator);
+    }
+    return List<String>.unmodifiable(normalized);
+  }
+
+  void _pruneEventMemberAssignments(String groupId, String userId) {
+    final list = _events[groupId];
+    if (list == null || userId.trim().isEmpty) return;
+    final now = DateTime.now().toUtc();
+    for (var index = 0; index < list.length; index++) {
+      final event = list[index];
+      // Membership pruning is current-assignment maintenance.  Deleted
+      // events are retained as history (and the remote database intentionally
+      // keeps their child rows), so never rewrite their participant IDs or
+      // versions during a later leave/deactivation.
+      if (event.isDeleted || _groups[groupId]?.isArchived == true) continue;
+      if (!event.memberIds.contains(userId)) continue;
+      list[index] = event.copyWith(
+        memberIds: event.memberIds.where((id) => id != userId).toList(),
+        version: event.version + 1,
+        updatedAt: now,
+      );
+    }
+    // The caller emits the membership/lifecycle changes after this helper so
+    // all event rows are delivered in one coherent snapshot.
   }
 
   void _requireActiveMember(String groupId, String userId) {
@@ -1279,6 +1456,14 @@ class ConfigurationBlockedScheduleRepository extends LocalScheduleRepository {
   }) => Future<PlannerEvent>.error(_error);
 
   @override
+  Future<PlannerEvent> replaceEventMembers(
+    String eventId, {
+    required Iterable<String> memberIds,
+    required int expectedVersion,
+    String? actorId,
+  }) => Future<PlannerEvent>.error(_error);
+
+  @override
   Future<void> softDeleteEvent(
     String eventId, {
     required int expectedVersion,
@@ -1293,7 +1478,8 @@ class SupabaseScheduleRepository
         ScheduleRepository,
         TimezoneGroupCreationCapability,
         UserScopedEventReadCapability,
-        GroupLifecycleCapability {
+        GroupLifecycleCapability,
+        EventMemberAssignmentCapability {
   /// [lifecyclePollInterval] is deliberately bounded to a conservative
   /// default for production (15 seconds).  Tests may inject a shorter clock
   /// interval when exercising the authoritative recheck path; the app uses
@@ -1369,15 +1555,151 @@ class SupabaseScheduleRepository
 
   @override
   Stream<List<PlannerEvent>> watchEvents(String groupId) {
-    return _client
-        .from('events')
-        .stream(primaryKey: const <String>['id'])
-        .eq('group_id', groupId)
-        .map(
-          (rows) => List<PlannerEvent>.unmodifiable(
-            rows.map(_eventFromRow).where((event) => !event.isDeleted),
-          ),
+    return _watchEventsWithMembers(groupId);
+  }
+
+  /// Rebuilds an immutable event snapshot whenever the parent events stream
+  /// changes.  Participant rows intentionally have no realtime publication;
+  /// every participant mutation bumps the parent event version, which is the
+  /// signal that schedules this batch child read.
+  Stream<List<PlannerEvent>> _watchEventsWithMembers(String groupId) {
+    late final StreamController<List<PlannerEvent>> controller;
+    StreamSubscription<List<Map<String, dynamic>>>? subscription;
+    Timer? retryTimer;
+    var cancelled = false;
+    var generation = 0;
+    List<PlannerEvent>? latestGood;
+
+    Future<void> refresh(List<Map<String, dynamic>> rows) async {
+      retryTimer?.cancel();
+      retryTimer = null;
+      final token = ++generation;
+      try {
+        final eventRows = rows.whereType<Map<String, dynamic>>().toList(
+          growable: false,
         );
+        final ids = <String>[];
+        final seen = <String>{};
+        for (final row in eventRows) {
+          final id = row['id'];
+          if (id is! String || id.trim().isEmpty || !seen.add(id)) {
+            throw StateError('일정 응답을 확인할 수 없습니다.');
+          }
+          ids.add(id);
+        }
+        final memberRows = await _readEventMemberRows(ids);
+        if (cancelled || token != generation) return;
+        final merged = <PlannerEvent>[];
+        for (final row in eventRows) {
+          final id = row['id'] as String;
+          final parsed = memberRows[id];
+          // A successful child query always creates a map entry, including an
+          // explicit empty assignment.  Do not fabricate a creator here.
+          if (parsed == null) {
+            throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
+          }
+          final event = _eventFromRow(row, memberIds: parsed);
+          if (!event.isDeleted) merged.add(event);
+        }
+        latestGood = List<PlannerEvent>.unmodifiable(merged);
+        if (!controller.isClosed) controller.add(latestGood!);
+      } catch (error, stack) {
+        // Keep the last successful snapshot on a child read/parse failure;
+        // emitting an empty list would look like a privacy revocation.
+        if (!cancelled && token == generation && !controller.isClosed) {
+          controller.addError(error, stack);
+          // Child rows are not part of the realtime publication, so a
+          // transient REST failure would otherwise leave this parent snapshot
+          // stale forever. Retry the exact generation after a short delay;
+          // any newer parent snapshot or cancellation invalidates this work.
+          retryTimer = Timer(const Duration(milliseconds: 250), () {
+            if (!cancelled && token == generation && !controller.isClosed) {
+              unawaited(refresh(rows));
+            }
+          });
+        }
+      }
+    }
+
+    Future<void> cancel() async {
+      cancelled = true;
+      generation++;
+      retryTimer?.cancel();
+      retryTimer = null;
+      final current = subscription;
+      subscription = null;
+      if (current != null) {
+        try {
+          await current.cancel();
+        } catch (_) {
+          // Best-effort cancellation keeps a stale stream from blocking a
+          // newer group selection.
+        }
+      }
+    }
+
+    controller = StreamController<List<PlannerEvent>>(
+      onListen: () {
+        try {
+          subscription = _client
+              .from('events')
+              .stream(primaryKey: const <String>['id'])
+              .eq('group_id', groupId)
+              .listen(
+                (rows) => unawaited(refresh(rows)),
+                onError: (Object error, StackTrace stack) {
+                  if (!cancelled && !controller.isClosed) {
+                    controller.addError(error, stack);
+                  }
+                },
+              );
+        } catch (error, stack) {
+          if (!cancelled && !controller.isClosed) {
+            controller.addError(error, stack);
+          }
+        }
+      },
+      onCancel: cancel,
+    );
+    return controller.stream;
+  }
+
+  Future<Map<String, List<String>>> _readEventMemberRows(
+    Iterable<String> eventIds,
+  ) async {
+    final ids = eventIds.toList(growable: false);
+    final result = <String, List<String>>{for (final id in ids) id: <String>[]};
+    if (ids.isEmpty) return result;
+    final dynamic rawRows = await _client
+        .from('event_members')
+        .select('event_id,user_id')
+        .inFilter('event_id', ids);
+    if (rawRows is! List) {
+      throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
+    }
+    final seen = <String, Set<String>>{for (final id in ids) id: <String>{}};
+    for (final raw in rawRows) {
+      if (raw is! Map) throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
+      final row = raw.cast<String, dynamic>();
+      final eventId = row['event_id'];
+      final userId = row['user_id'];
+      final normalizedEventId = eventId is String ? eventId.trim() : null;
+      final normalizedUserId = userId is String ? userId.trim() : null;
+      if (eventId is! String ||
+          userId is! String ||
+          normalizedEventId != eventId ||
+          normalizedUserId == null ||
+          normalizedUserId.isEmpty ||
+          !result.containsKey(normalizedEventId) ||
+          !seen[normalizedEventId]!.add(normalizedUserId)) {
+        throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
+      }
+      result[normalizedEventId]!.add(normalizedUserId);
+    }
+    return <String, List<String>>{
+      for (final entry in result.entries)
+        entry.key: List<String>.unmodifiable(entry.value),
+    };
   }
 
   @override
@@ -1478,7 +1800,7 @@ class SupabaseScheduleRepository
     String groupId,
   ) {
     late final StreamController<List<PlannerEvent>> controller;
-    StreamSubscription<List<Map<String, dynamic>>>? eventsSubscription;
+    StreamSubscription<List<PlannerEvent>>? eventsSubscription;
     StreamSubscription<List<Map<String, dynamic>>>? membershipsSubscription;
     StreamSubscription<List<Map<String, dynamic>>>? groupsSubscription;
     Timer? recheckTimer;
@@ -1574,25 +1896,15 @@ class SupabaseScheduleRepository
         (_) => unawaited(checkAuthoritatively()),
       );
       try {
-        eventsSubscription = _client
-            .from('events')
-            .stream(primaryKey: const <String>['id'])
-            .eq('group_id', groupId)
-            .listen((rows) {
-              if (cancelled) return;
-              try {
-                latestEvents = List<PlannerEvent>.unmodifiable(
-                  rows.map(_eventFromRow).where((event) => !event.isDeleted),
-                );
-                if (usable && !controller.isClosed) {
-                  controller.add(latestEvents!);
-                } else {
-                  emitEmpty();
-                }
-              } catch (error, stack) {
-                signalError(error, stack);
-              }
-            }, onError: signalError);
+        eventsSubscription = _watchEventsWithMembers(groupId).listen((rows) {
+          if (cancelled) return;
+          latestEvents = List<PlannerEvent>.unmodifiable(rows);
+          if (usable && !controller.isClosed) {
+            controller.add(latestEvents!);
+          } else {
+            emitEmpty();
+          }
+        }, onError: signalError);
         membershipsSubscription = _client
             .from('memberships')
             .stream(primaryKey: const <String>['group_id', 'user_id'])
@@ -1652,24 +1964,26 @@ class SupabaseScheduleRepository
     PlannerGroup? current;
     var checkInFlight = false;
     var checkQueued = false;
+    var forceEmitQueued = false;
 
-    void emit(PlannerGroup? next) {
+    void emit(PlannerGroup? next, {bool force = false}) {
       if (cancelled || controller.isClosed) return;
-      if (hasValue && current == next) return;
+      if (!force && hasValue && current == next) return;
       current = next;
       hasValue = true;
       controller.add(next);
     }
 
-    Future<void> checkAuthoritatively() async {
+    Future<void> checkAuthoritatively({bool forceEmit = false}) async {
       if (cancelled) return;
       if (checkInFlight) {
         checkQueued = true;
+        forceEmitQueued = forceEmitQueued || forceEmit;
         return;
       }
       checkInFlight = true;
       try {
-        emit(await _readUsableGroup(userId, groupId));
+        emit(await _readUsableGroup(userId, groupId), force: forceEmit);
       } catch (error, stack) {
         // A read error is not an authoritative membership/group loss. Keep
         // the last-known lifecycle value and let the 15-second poll retry;
@@ -1681,7 +1995,9 @@ class SupabaseScheduleRepository
         checkInFlight = false;
         if (checkQueued && !cancelled) {
           checkQueued = false;
-          unawaited(checkAuthoritatively());
+          final queuedForceEmit = forceEmitQueued;
+          forceEmitQueued = false;
+          unawaited(checkAuthoritatively(forceEmit: queuedForceEmit));
         }
       }
     }
@@ -1721,16 +2037,18 @@ class SupabaseScheduleRepository
       // authoritative read and subsequent 15-second retries.
       recheckTimer = Timer.periodic(
         _lifecyclePollInterval,
-        (_) => unawaited(checkAuthoritatively()),
+        (_) => unawaited(checkAuthoritatively(forceEmit: true)),
       );
       try {
         membershipsSubscription = _client
             .from('memberships')
             .stream(primaryKey: const <String>['group_id', 'user_id'])
             .eq('group_id', groupId)
-            .eq('user_id', userId)
             .listen(
-              (_) => unawaited(checkAuthoritatively()),
+              // A different member's deactivation/removal must refresh the
+              // selected group's roster too.  The authoritative read remains
+              // requester-scoped; this signal only schedules that read.
+              (_) => unawaited(checkAuthoritatively(forceEmit: true)),
               onError: signalError,
             );
         groupsSubscription = _client
@@ -2051,25 +2369,36 @@ class SupabaseScheduleRepository
       throw const ScheduleValidationException('로그인 세션을 다시 확인해 주세요.');
     }
     final normalizedDraft = LocalScheduleRepository._normalizeDraft(draft);
-    final payload = <String, dynamic>{
-      'group_id': groupId,
-      'created_by': userId,
-      'title': normalizedDraft.title.trim(),
-      'description': normalizedDraft.note.trim(),
-      // The validated draft retains the caller's exact ARGB value.
-      'color_value': draft.colorValue,
-      'starts_at': normalizedDraft.startAt.toUtc().toIso8601String(),
-      'ends_at': normalizedDraft.endAt.toUtc().toIso8601String(),
-      'timezone': normalizedDraft.timezone,
-      'is_all_day': normalizedDraft.allDay,
-      'version': 1,
-    };
-    if (normalizedDraft.allDay) {
-      payload['all_day_start'] = _dateString(normalizedDraft.allDayStartDate!);
-      payload['all_day_end'] = _dateString(normalizedDraft.allDayEndDate!);
-    }
-    final row = await _client.from('events').insert(payload).select().single();
-    return _eventFromRow(row);
+    final memberIds = normalizedDraft.hasExplicitMemberIds
+        ? canonicalEventMemberIds(normalizedDraft.memberIds)
+        : null;
+    // The old direct payload used `'color_value': draft.colorValue`; the RPC
+    // keeps the same value under its explicit p_color_value argument.
+    // Legacy mapping: 'color_value': draft.colorValue.
+    final result = await _client.rpc<dynamic>(
+      'create_event_with_members',
+      params: <String, dynamic>{
+        'p_group_id': groupId,
+        'p_title': normalizedDraft.title.trim(),
+        'p_description': normalizedDraft.note.trim(),
+        'p_starts_at': normalizedDraft.startAt.toUtc().toIso8601String(),
+        'p_ends_at': normalizedDraft.endAt.toUtc().toIso8601String(),
+        'p_timezone': normalizedDraft.timezone,
+        'p_is_all_day': normalizedDraft.allDay,
+        'p_all_day_start': normalizedDraft.allDay
+            ? _dateString(normalizedDraft.allDayStartDate!)
+            : null,
+        'p_all_day_end': normalizedDraft.allDay
+            ? _dateString(normalizedDraft.allDayEndDate!)
+            : null,
+        'p_color_value': normalizedDraft.colorValue,
+        // NULL lets the create RPC apply its creator default.  An explicit
+        // empty list must remain [] so callers can intentionally create an
+        // unassigned event.
+        'p_member_ids': memberIds,
+      },
+    );
+    return _eventFromRpcResult(result, expectedGroupId: groupId);
   }
 
   @override
@@ -2082,39 +2411,66 @@ class SupabaseScheduleRepository
     if (actorId != null && actorId != normalizedEvent.ownerId) {
       throw const ScheduleConflictException('이 일정을 변경할 권한이 없습니다.');
     }
-    final payload = <String, dynamic>{
-      'title': normalizedEvent.title.trim(),
-      'description': normalizedEvent.note.trim(),
-      // Keep this payload tied to the caller's event value after validation.
-      'color_value': event.colorValue,
-      'starts_at': normalizedEvent.startAt.toUtc().toIso8601String(),
-      'ends_at': normalizedEvent.endAt.toUtc().toIso8601String(),
-      'timezone': normalizedEvent.timezone,
-      'is_all_day': normalizedEvent.allDay,
-      'version': expectedVersion + 1,
-    };
-    if (normalizedEvent.allDay) {
-      payload['all_day_start'] = _dateString(normalizedEvent.allDayStartDate!);
-      payload['all_day_end'] = _dateString(normalizedEvent.allDayEndDate!);
-    } else {
-      payload['all_day_start'] = null;
-      payload['all_day_end'] = null;
+    final memberIds = canonicalEventMemberIds(normalizedEvent.memberIds);
+    // The old direct payload used `'color_value': event.colorValue`; the RPC
+    // keeps the same value under its explicit p_color_value argument.
+    // Legacy mapping: 'color_value': event.colorValue.
+    final result = await _client.rpc<dynamic>(
+      'update_event_with_members_if_version',
+      params: <String, dynamic>{
+        'p_event_id': normalizedEvent.id,
+        'p_expected_version': expectedVersion,
+        'p_title': normalizedEvent.title.trim(),
+        'p_description': normalizedEvent.note.trim(),
+        'p_starts_at': normalizedEvent.startAt.toUtc().toIso8601String(),
+        'p_ends_at': normalizedEvent.endAt.toUtc().toIso8601String(),
+        'p_timezone': normalizedEvent.timezone,
+        'p_is_all_day': normalizedEvent.allDay,
+        'p_all_day_start': normalizedEvent.allDay
+            ? _dateString(normalizedEvent.allDayStartDate!)
+            : null,
+        'p_all_day_end': normalizedEvent.allDay
+            ? _dateString(normalizedEvent.allDayEndDate!)
+            : null,
+        'p_color_value': normalizedEvent.colorValue,
+        'p_member_ids': memberIds,
+      },
+    );
+    return _eventFromRpcResult(
+      result,
+      expectedEventId: normalizedEvent.id,
+      expectedGroupId: normalizedEvent.groupId,
+      expectedOwnerId: normalizedEvent.ownerId,
+      expectedVersion: expectedVersion + 1,
+    );
+  }
+
+  @override
+  Future<PlannerEvent> replaceEventMembers(
+    String eventId, {
+    required Iterable<String> memberIds,
+    required int expectedVersion,
+    String? actorId,
+  }) async {
+    final normalizedMemberIds = canonicalEventMemberIds(memberIds);
+    // actorId is intentionally ignored: authorization belongs to auth.uid()
+    // inside the SECURITY DEFINER RPC, never to caller-provided identity.
+    final result = await _client.rpc<dynamic>(
+      'replace_event_members_if_version',
+      params: <String, dynamic>{
+        'p_event_id': eventId,
+        'p_expected_version': expectedVersion,
+        'p_member_ids': normalizedMemberIds,
+      },
+    );
+    final updated = _eventFromRpcResult(result, expectedEventId: eventId);
+    // The RPC is idempotent for an unchanged canonical set and returns the
+    // expected version in that case; a changed set advances exactly once.
+    if (updated.version != expectedVersion &&
+        updated.version != expectedVersion + 1) {
+      throw const ScheduleConflictException('일정이 이미 변경되었거나 권한이 없습니다.');
     }
-    var query = _client
-        .from('events')
-        .update(payload)
-        .eq('id', normalizedEvent.id)
-        .eq('group_id', normalizedEvent.groupId)
-        .eq('created_by', normalizedEvent.ownerId)
-        .eq('version', expectedVersion);
-    final rows = await query.select();
-    final list = (rows as List).whereType<Map<String, dynamic>>().toList();
-    if (list.isEmpty) {
-      throw const ScheduleConflictException(
-        '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
-      );
-    }
-    return _eventFromRow(list.first);
+    return updated;
   }
 
   @override
@@ -2142,7 +2498,7 @@ class SupabaseScheduleRepository
     final returnedId = row == null ? null : row['id'];
     final returnedVersion = row == null
         ? null
-        : _intValueNullable(row['version']);
+        : _strictVersionValue(row['version']);
     if (row == null ||
         returnedId is! String ||
         returnedId != eventId ||
@@ -2150,6 +2506,116 @@ class SupabaseScheduleRepository
         returnedVersion != expectedVersion + 1) {
       throw const ScheduleConflictException('일정이 이미 변경되었거나 권한이 없습니다.');
     }
+  }
+
+  PlannerEvent _eventFromRpcResult(
+    Object? result, {
+    String? expectedEventId,
+    String? expectedGroupId,
+    String? expectedOwnerId,
+    int? expectedVersion,
+  }) {
+    final row = _strictSingleRpcMap(result);
+    if (row == null || !_hasCompleteEventFields(row)) {
+      throw const ScheduleConflictException('일정 변경 응답을 확인할 수 없습니다.');
+    }
+    final returnedId = row['id'];
+    final returnedGroupId = row['group_id'];
+    final returnedOwnerId = row['created_by'];
+    final returnedVersion = _strictVersionValue(row['version']);
+    if (returnedId is! String ||
+        returnedGroupId is! String ||
+        returnedOwnerId is! String ||
+        returnedId.trim().isEmpty ||
+        returnedGroupId.trim().isEmpty ||
+        returnedOwnerId.trim().isEmpty ||
+        (expectedEventId != null && returnedId != expectedEventId) ||
+        (expectedGroupId != null && returnedGroupId != expectedGroupId) ||
+        (expectedOwnerId != null && returnedOwnerId != expectedOwnerId) ||
+        (expectedVersion != null && returnedVersion != expectedVersion) ||
+        row['deleted_at'] != null) {
+      throw const ScheduleConflictException('일정이 이미 변경되었거나 권한이 없습니다.');
+    }
+    final memberIds = _strictMemberIds(row['member_ids']);
+    return _eventFromRow(row, memberIds: memberIds);
+  }
+
+  static bool _hasCompleteEventFields(Map<String, dynamic> row) {
+    const required = <String>[
+      'id',
+      'group_id',
+      'created_by',
+      'title',
+      'description',
+      'starts_at',
+      'ends_at',
+      'timezone',
+      'is_all_day',
+      'all_day_start',
+      'all_day_end',
+      'version',
+      'deleted_at',
+      'created_at',
+      'updated_at',
+      'color_value',
+      'member_ids',
+    ];
+    if (!required.every(row.containsKey)) return false;
+    return row['id'] is String &&
+        (row['id'] as String).trim().isNotEmpty &&
+        row['group_id'] is String &&
+        (row['group_id'] as String).trim().isNotEmpty &&
+        row['created_by'] is String &&
+        (row['created_by'] as String).trim().isNotEmpty &&
+        row['title'] is String &&
+        row['description'] is String &&
+        row['starts_at'] != null &&
+        row['ends_at'] != null &&
+        row['timezone'] is String &&
+        (row['timezone'] as String).trim().isNotEmpty &&
+        row['is_all_day'] is bool &&
+        _strictVersionValue(row['version']) != null &&
+        _dateTimeValue(row['created_at']) != null &&
+        _dateTimeValue(row['updated_at']) != null &&
+        _strictColorValue(row['color_value']) != null &&
+        _validEventDates(row) &&
+        _strictMemberIds(row['member_ids']) != null;
+  }
+
+  static bool _validEventDates(Map<String, dynamic> row) {
+    final allDay = row['is_all_day'] == true;
+    final start = row['all_day_start'];
+    final end = row['all_day_end'];
+    if (start != null && _parseDate(start) == null) return false;
+    if (end != null && _parseDate(end) == null) return false;
+    return !allDay || (start != null && end != null);
+  }
+
+  static List<String>? _strictMemberIds(Object? value) {
+    if (value is! List) return null;
+    final result = <String>[];
+    final seen = <String>{};
+    for (final raw in value) {
+      if (raw is! String) return null;
+      final id = raw.trim();
+      if (id.isEmpty || !seen.add(id)) return null;
+      result.add(id);
+    }
+    return List<String>.unmodifiable(result);
+  }
+
+  static int? _strictVersionValue(Object? value) {
+    if (value is int) return value;
+    if (value is num && value.isFinite && value == value.truncate()) {
+      return value.toInt();
+    }
+    return null;
+  }
+
+  static int? _strictColorValue(Object? value) {
+    final parsed = _strictVersionValue(value);
+    if (parsed == null || parsed < 0 || parsed > 0xffffffff) return null;
+    return parsed;
   }
 
   static Map<String, dynamic>? _strictSingleRpcMap(Object? result) {
@@ -2272,26 +2738,64 @@ class SupabaseScheduleRepository
     updatedAt: DateTime.tryParse('${row['updated_at']}')?.toUtc(),
   );
 
-  PlannerEvent _eventFromRow(Map<String, dynamic> row) => PlannerEvent(
-    id: '${row['id']}',
-    groupId: '${row['group_id']}',
-    title: '${row['title'] ?? ''}',
-    note: '${row['description'] ?? ''}',
-    startAt: DateTime.parse('${row['starts_at']}').toUtc(),
-    endAt: DateTime.parse('${row['ends_at']}').toUtc(),
-    allDay: row['is_all_day'] == true,
-    ownerId: '${row['created_by']}',
-    memberIds: <String>['${row['created_by']}'],
-    colorValue: _colorValue(row['color_value'], 0xff477b76),
-    timezone: '${row['timezone'] ?? 'UTC'}',
-    version: _intValue(row['version'], 1),
-    allDayStartDate: _parseDate(row['all_day_start']),
-    allDayEndDate: _parseDate(row['all_day_end']),
-    updatedAt: DateTime.tryParse('${row['updated_at']}')?.toUtc(),
-    deletedAt: row['deleted_at'] == null
-        ? null
-        : DateTime.tryParse('${row['deleted_at']}')?.toUtc(),
-  );
+  PlannerEvent _eventFromRow(
+    Map<String, dynamic> row, {
+    List<String>? memberIds,
+  }) {
+    final ownerId = '${row['created_by']}';
+    final parsedMemberIds = memberIds ?? _legacyMemberIds(row, ownerId);
+    return PlannerEvent(
+      id: '${row['id']}',
+      groupId: '${row['group_id']}',
+      title: '${row['title'] ?? ''}',
+      note: '${row['description'] ?? ''}',
+      startAt: DateTime.parse('${row['starts_at']}').toUtc(),
+      endAt: DateTime.parse('${row['ends_at']}').toUtc(),
+      allDay: row['is_all_day'] == true,
+      ownerId: ownerId,
+      memberIds: parsedMemberIds,
+      colorValue: _colorValue(row['color_value'], 0xff477b76),
+      timezone: '${row['timezone'] ?? 'UTC'}',
+      version: _intValue(row['version'], 1),
+      allDayStartDate: _parseDate(row['all_day_start']),
+      allDayEndDate: _parseDate(row['all_day_end']),
+      updatedAt: DateTime.tryParse('${row['updated_at']}')?.toUtc(),
+      deletedAt: row['deleted_at'] == null
+          ? null
+          : DateTime.tryParse('${row['deleted_at']}')?.toUtc(),
+    );
+  }
+
+  static List<String> _legacyMemberIds(
+    Map<String, dynamic> row,
+    String ownerId,
+  ) {
+    if (row.containsKey('member_ids')) {
+      final parsed = _strictMemberIds(row['member_ids']);
+      if (parsed == null) throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
+      return parsed;
+    }
+    final embedded = row['event_members'];
+    if (embedded is List) {
+      final ids = <String>[];
+      final seen = <String>{};
+      for (final item in embedded) {
+        final raw = item is Map ? item['user_id'] : item;
+        if (raw is! String) {
+          throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
+        }
+        final id = raw.trim();
+        if (id.isEmpty || !seen.add(id)) {
+          throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
+        }
+        ids.add(id);
+      }
+      return List<String>.unmodifiable(ids);
+    }
+    // Old event rows had no child projection.  Keep their creator-only
+    // interpretation, while explicit `member_ids: []` remains an empty set.
+    return List<String>.unmodifiable(<String>[ownerId]);
+  }
 
   static String? _stringValue(Object? value) => value == null ? null : '$value';
 

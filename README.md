@@ -72,6 +72,66 @@ group should be transferred or archived first. Local/configuration-blocked
 builds report that this capability requires a connected server; they never
 claim a local account was deleted.
 
+### Event participants (Feature 5)
+
+Migration `supabase/migrations/20260907130002_event_members.sql` adds the
+additive `public.event_members` relation. It stores one `(event_id, user_id)`
+assignment per row, records `created_at`, and has cascading foreign keys to
+`events` and `auth.users`, plus a user-leading index for account cleanup. The
+migration backfills each existing event's creator at the event's original
+`created_at` before installing the integrity and transition triggers; the
+guarded insert is safe to reapply. Soft-deleted events and archived groups keep
+their child rows for history, but RLS hides them. Hard event, group, or account
+deletion cascades the child rows.
+
+Authenticated clients have read-only table privileges. The select policy
+requires the requester to be an active member of the live event's group and
+the assigned user to be an active, non-removed member of that same group.
+Direct child INSERT/UPDATE/DELETE is denied; the authenticated RPCs are the
+only write path. `create_event_with_members` and
+`update_event_with_members_if_version` validate every target against the same
+live-group membership while holding the group/event locks. A new event with a
+omitted or `null` `member_ids` input defaults to its active creator; an
+explicitly supplied empty list creates an event with no participants. An empty
+list on an update or replacement intentionally clears all assignments.
+
+Event-body edits remain creator-only. `replace_event_members_if_version` lets
+the active event creator or current active group owner replace the participant
+list, but the group owner cannot change another creator's title, note, times,
+color, or delete the event. A participant assignment never grants body or
+delete permission. Every changed list advances the event version exactly once;
+an unchanged canonical set is an idempotent no-op and does not create a version
+or realtime transition. Stale versions, inactive/cross-group targets, deleted
+events, and inactive actors fail atomically without a partial child update.
+
+When an ordinary member leaves or an owner deactivates that member, current
+assignments are pruned and each affected live parent event is version-bumped
+once. Those post-migration lifecycle removals are not restored by rejoining or
+reactivating. The historical creator rows inserted by the migration are an
+intentional exception: an inactive creator's backfilled row is merely hidden by
+RLS and can become visible if that membership is later reactivated. The local
+adapter preserves the same omitted/`null` creator default versus explicit-empty
+assignment distinction, active-member/same-group checks, and no-op semantics;
+the Supabase adapter passes that distinction to the participant-aware RPCs and
+canonicalizes their `member_ids` response. Event streams read parent `events`
+rows and then batch-read visible child assignments. `event_members` is
+deliberately **not**
+published to `supabase_realtime`: parent-event version invalidation drives the
+refresh, while child DELETE payloads could expose UUIDs that DELETE/RLS
+authorization cannot safely verify.
+
+The editor shows active members as keyboard/focusable checkbox rows (at least
+48 px) and keeps a stale assignment as the neutral Korean label `이전 멤버`
+until an authoritative event refresh removes it. Creators edit body and
+participants together; a new event initially selects its creator, but the
+creator may clear every checkbox to leave the participant list empty. Group
+owners see participant-only controls; ordinary members can view but cannot
+save. Home uses the participant-specific filter
+(`모든 참여자`), renders accessible names/counts/compact avatars, and uses the
+same neutral fallback for inactive or unknown assignments. The participant
+list is parent-scrollable rather than a nested unbounded list, and the editor
+is covered for 320x568 layouts, 2x text, and a 300 px bottom keyboard inset.
+
 ## Flutter development
 
 1. Keep `.env.example` as the checked-in placeholder reference. For Flutter
@@ -341,6 +401,11 @@ real contact route before release rather than copying a placeholder.
 - `supabase/migrations/20260907130001_group_management.sql` adds the
   race-safe single-owner invariant, versioned update/transfer/archive/leave
   RPCs, and the authenticated `account_deletion_preflight()` JSON contract.
+- `supabase/migrations/20260907130002_event_members.sql` adds the
+  RLS-protected `event_members` assignment relation, creator backfill,
+  participant-aware create/update/replace RPCs, parent-event version
+  invalidation, and leave/deactivation pruning. It is intentionally not added
+  to the `supabase_realtime` publication.
 - `supabase/seed.sql` is an idempotent, local-only demo seed that never creates
   an auth user or stores an invite plaintext token.
 
@@ -355,9 +420,10 @@ revoked/expired/max-use, stale-version, and soft-delete cases.
 
 The current UI/remote adapter covers email/password auth, email confirmation and
 password recovery, group selection, member listing, owner member removal, invite
-creation/listing/revocation with expiry and max-use controls, event create and
-edit, timed/all-day events, and optimistic conflict handling, plus realtime event
-stream updates, and authenticated self-service account deletion with explicit
+creation/listing/revocation with expiry and max-use controls, event create/edit,
+timed/all-day events, participant assignment/filtering, creator-versus-group-owner
+participant permissions, optimistic conflict handling, parent-event realtime
+refreshes, and authenticated self-service account deletion with explicit
 owned-data cleanup. The backend additionally provides profile/timezone records
 for the next UI iteration. Useful follow-ups are profile editing, recurring events,
 reminders/notifications, attachment storage, pagination and rate-limit retention
@@ -388,3 +454,61 @@ started here, so CI covers Dart/widget behavior and static SQL/Edge contracts
 only. Run focused tests with `flutter test test/account_deletion_test.dart
 test/navigation_test.dart test/group_management_core_test.dart` and run
 `flutter analyze --no-pub` before a reviewed deployment.
+
+### Manual event participant verification
+
+These checks are a release checklist, not a claim that they have been run in
+this checkout. They require a disposable Supabase/Auth/Postgres deployment,
+two or more real authenticated sessions, and Realtime enabled for the parent
+`events` table:
+
+1. Apply migrations in order with `supabase db reset` (or the reviewed
+   deployment job). Create an active group owner, an event creator who is an
+   ordinary member, another active member, an inactive member, and an
+   outsider in a different group. Run
+   `flutter test --no-pub test/event_members_core_test.dart
+   test/event_members_ui_test.dart test/sql_event_members_static_test.dart`
+   for the credential-free Dart/static contract checks. The isolated upgrade
+   proof can be run with
+   `bash supabase/tests/run_group_management_upgrade.sh`; it needs local
+   PostgreSQL `initdb`, `pg_ctl`, and `psql`, and never connects to a remote
+   service. The pgTAP fixture is `supabase/tests/event_members.sql`; execute it
+   through the deployment's pgTAP runner (for example, `supabase test db` or
+   `psql -f supabase/tests/event_members.sql` against the disposable database).
+2. With the authenticated creator, create an event with several active
+   participants. Verify that omitted/`null` `member_ids` input on creation
+   defaults to the creator, while an explicitly supplied empty list creates an
+   event with no participants. Clear an existing list explicitly and verify it
+   remains empty. Edit body and participants together, then repeat with an
+   unchanged list and verify that the optimistic-lock `version` does not
+   advance for the no-op.
+3. As the group owner, open the creator-owned event. Verify that participant
+   checkboxes and `참여자 저장하기` work, while title/note/date/time/color and
+   delete remain read-only/unavailable. As an ordinary participant or outsider,
+   verify that the event remains viewable only within the active group and no
+   participant/body write is offered. Attempt inactive and cross-group target
+   IDs through the RPC boundary and verify an atomic rejection with no partial
+   assignment change. A stale event version must likewise preserve the draft.
+4. In a second session, deactivate or leave an assigned ordinary member.
+   Verify that current `event_members` rows are pruned, each affected parent
+   event advances once, the assignment is absent after reactivation, and a
+   fresh event read does not restore that pruned assignment. Confirm that the
+   parent `events` realtime signal causes the client to batch-read child
+   assignments. Do not expect an `event_members` DELETE payload: the child
+   table is intentionally absent from `supabase_realtime` because DELETE/RLS
+   authorization cannot safely verify the deleted row without risking UUID
+   disclosure.
+5. On real iOS and Android devices, run VoiceOver and TalkBack through the
+   editor checkboxes, save buttons, participant filter, and event cards. Check
+   hardware-keyboard focus order and Space/Enter activation, 48 px minimum
+   targets, Korean labels (`모든 참여자`, `이전 멤버`), and that inactive or
+   unknown identities never appear in text or accessibility output. Repeat at
+   a 320x568 viewport with 2x text and a 300 px bottom keyboard inset; verify
+   that the parent-scrolling editor keeps participant rows and save actions
+   reachable without RenderFlex/AlertDialog overflow.
+
+The live Auth, RLS, membership lifecycle, parent-event Realtime invalidation,
+and real-device accessibility checks above are external limitations of this
+repository and remain unexecuted until a configured deployment and devices are
+available. Keep service-role/secret keys in Supabase/CI secret storage; never
+put them in Flutter, this README, or test fixtures.

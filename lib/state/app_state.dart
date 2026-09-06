@@ -79,6 +79,22 @@ enum AuthFlowState {
   passwordRecovery,
 }
 
+/// Coalesced metadata refresh request emitted by a group lifecycle signal.
+/// Keeping the operation context with the request lets a delayed roster read
+/// fail closed when selection, identity, or planner revision changes before
+/// the debounce timer fires.
+class _GroupMetadataRefreshRequest {
+  const _GroupMetadataRefreshRequest({
+    required this.operation,
+    required this.userId,
+    required this.groupId,
+  });
+
+  final int operation;
+  final String userId;
+  final String groupId;
+}
+
 final plannerControllerProvider = ChangeNotifierProvider<PlannerController>((
   ref,
 ) {
@@ -117,7 +133,15 @@ class PlannerController extends ChangeNotifier {
   List<PlannerGroup> groups = const <PlannerGroup>[];
   List<PlannerMember> members = const <PlannerMember>[];
   List<InviteCode> invites = const <InviteCode>[];
-  List<PlannerEvent> events = const <PlannerEvent>[];
+  List<PlannerEvent> _events = const <PlannerEvent>[];
+  List<PlannerEvent> get events => _events;
+
+  /// Preserve the public assignment used by older test doubles while keeping
+  /// every event snapshot immutable at the controller boundary.
+  set events(Iterable<PlannerEvent> value) {
+    _events = List<PlannerEvent>.unmodifiable(value);
+  }
+
   PlannerGroup? selectedGroup;
   DateTime selectedDay = DateTime.now();
   String? selectedMemberId;
@@ -135,6 +159,10 @@ class PlannerController extends ChangeNotifier {
   StreamSubscription<AuthRepositoryEvent>? _authSubscription;
   StreamSubscription<List<PlannerEvent>>? _eventSubscription;
   StreamSubscription<PlannerGroup?>? _groupLifecycleSubscription;
+  Timer? _groupMetadataRefreshTimer;
+  _GroupMetadataRefreshRequest? _pendingGroupMetadataRefresh;
+  bool _groupMetadataRefreshInFlight = false;
+  int _groupMetadataRefreshToken = 0;
   Future<void> _authEventQueue = Future<void>.value();
   int _authEventGeneration = 0;
   String? _queuedAuthIdentity;
@@ -244,7 +272,7 @@ class PlannerController extends ChangeNotifier {
       final memberMatches =
           showAllMembers ||
           selectedMemberId == null ||
-          event.ownerId == selectedMemberId;
+          event.memberIds.contains(selectedMemberId);
       return overlaps && memberMatches && !event.isDeleted;
     }).toList();
     filtered.sort((a, b) => a.startAt.compareTo(b.startAt));
@@ -1255,6 +1283,7 @@ class PlannerController extends ChangeNotifier {
     if (clearSaving) _savingOperationToken = 0;
     _inviteOperation++;
     _groupOperationToken = 0;
+    _cancelGroupMetadataRefresh();
     _terminalGroupOperations.clear();
     _terminalGroupTombstones.clear();
     _inviteCodeInFlight = false;
@@ -1301,6 +1330,7 @@ class PlannerController extends ChangeNotifier {
   Future<void> _clearGroupScopedData() async {
     _inviteOperation++;
     _inviteCodeInFlight = false;
+    _cancelGroupMetadataRefresh();
     selectedGroup = null;
     members = const <PlannerMember>[];
     invites = const <InviteCode>[];
@@ -1351,6 +1381,7 @@ class PlannerController extends ChangeNotifier {
     _operationGeneration++;
     _inviteOperation++;
     _inviteCodeInFlight = false;
+    _cancelGroupMetadataRefresh();
     selectedGroup = null;
     members = const <PlannerMember>[];
     invites = const <InviteCode>[];
@@ -1436,13 +1467,93 @@ class PlannerController extends ChangeNotifier {
     // after a remote transfer).  Refresh the member and invite projections so
     // edit/transfer affordances do not keep stale roles while preserving the
     // just-updated group object immediately above.
-    unawaited(
-      _refreshGroupScopedMetadata(
-        operation: operation,
-        userId: userId,
-        groupId: groupId,
-      ),
+    _scheduleGroupScopedMetadataRefresh(
+      operation: operation,
+      userId: userId,
+      groupId: groupId,
     );
+  }
+
+  /// Debounces bursts of membership/group lifecycle notifications into one
+  /// complete member/invite projection read.  A second signal that arrives
+  /// while the read is in flight is retained and retried after that read, so
+  /// an older response cannot become the final roster snapshot.
+  void _scheduleGroupScopedMetadataRefresh({
+    required int operation,
+    required String userId,
+    required String groupId,
+  }) {
+    if (!_isCurrentPlannerContext(
+      operation,
+      userId: userId,
+      groupId: groupId,
+    )) {
+      return;
+    }
+    _pendingGroupMetadataRefresh = _GroupMetadataRefreshRequest(
+      operation: operation,
+      userId: userId,
+      groupId: groupId,
+    );
+    _armGroupMetadataRefreshTimer();
+  }
+
+  void _armGroupMetadataRefreshTimer({
+    Duration delay = const Duration(milliseconds: 80),
+  }) {
+    _groupMetadataRefreshTimer?.cancel();
+    final token = ++_groupMetadataRefreshToken;
+    _groupMetadataRefreshTimer = Timer(delay, () {
+      _groupMetadataRefreshTimer = null;
+      if (_disposed || token != _groupMetadataRefreshToken) return;
+      if (_groupMetadataRefreshInFlight) {
+        // The in-flight read's finally block re-arms the timer for the latest
+        // pending request. Keep that request intact until then.
+        return;
+      }
+      final request = _pendingGroupMetadataRefresh;
+      _pendingGroupMetadataRefresh = null;
+      if (request == null) return;
+      unawaited(_runGroupScopedMetadataRefresh(request));
+    });
+  }
+
+  Future<void> _runGroupScopedMetadataRefresh(
+    _GroupMetadataRefreshRequest request,
+  ) async {
+    if (_groupMetadataRefreshInFlight) {
+      _pendingGroupMetadataRefresh = request;
+      return;
+    }
+    if (!_isCurrentPlannerContext(
+      request.operation,
+      userId: request.userId,
+      groupId: request.groupId,
+    )) {
+      return;
+    }
+    _groupMetadataRefreshInFlight = true;
+    try {
+      await _refreshGroupScopedMetadata(
+        operation: request.operation,
+        userId: request.userId,
+        groupId: request.groupId,
+      );
+    } finally {
+      _groupMetadataRefreshInFlight = false;
+      if (_pendingGroupMetadataRefresh != null && !_disposed) {
+        // A signal may have arrived while membersForGroup/inviteCodesForGroup
+        // was pending. Re-arm without losing the newest operation context.
+        _armGroupMetadataRefreshTimer();
+      }
+    }
+  }
+
+  void _cancelGroupMetadataRefresh() {
+    _groupMetadataRefreshTimer?.cancel();
+    _groupMetadataRefreshTimer = null;
+    _pendingGroupMetadataRefresh = null;
+    ++_groupMetadataRefreshToken;
   }
 
   Future<void> _refreshGroupScopedMetadata({
@@ -1479,7 +1590,7 @@ class PlannerController extends ChangeNotifier {
       return;
     }
     if (nextMembers != null) {
-      members = List<PlannerMember>.unmodifiable(nextMembers);
+      _setMembersSnapshot(nextMembers);
     }
     if (nextInvites != null) {
       invites = List<InviteCode>.unmodifiable(nextInvites);
@@ -1593,6 +1704,7 @@ class PlannerController extends ChangeNotifier {
     final operation = ++_plannerRevision;
     _inviteOperation++;
     _inviteCodeInFlight = false;
+    _cancelGroupMetadataRefresh();
     final previousSubscription = _eventSubscription;
     _eventSubscription = null;
     final previousLifecycleSubscription = _groupLifecycleSubscription;
@@ -1801,7 +1913,7 @@ class PlannerController extends ChangeNotifier {
         return;
       }
 
-      members = List<PlannerMember>.unmodifiable(fetchedMembers);
+      _setMembersSnapshot(fetchedMembers);
       invites = List<InviteCode>.unmodifiable(fetchedInvites);
       if (!preserveOperationGeneration ||
           _operationGeneration == selectionGeneration) {
@@ -2466,6 +2578,25 @@ class PlannerController extends ChangeNotifier {
             members.any((member) => member.id == current.id && member.isOwner));
   }
 
+  /// Event body writes/deletes remain creator-only.  Group owners receive a
+  /// separate participant-list capability and must not gain body edit rights
+  /// merely because they can administer the group.
+  bool canEditEventParticipants(PlannerEvent event) {
+    final current = user;
+    final group = selectedGroup;
+    if (current == null ||
+        group == null ||
+        event.groupId != group.id ||
+        event.isDeleted) {
+      return false;
+    }
+    final activeMembership = members.any(
+      (member) => member.id == current.id && member.isActive,
+    );
+    if (!activeMembership) return false;
+    return event.ownerId == current.id || isGroupOwner;
+  }
+
   Future<void> deactivateMember(PlannerMember member) async {
     final current = user;
     final group = selectedGroup;
@@ -2501,11 +2632,7 @@ class PlannerController extends ChangeNotifier {
       )) {
         return;
       }
-      members = List<PlannerMember>.unmodifiable(refreshedMembers);
-      if (selectedMemberId == member.id) {
-        selectedMemberId = null;
-        showAllMembers = true;
-      }
+      _setMembersSnapshot(refreshedMembers);
     } catch (error) {
       if (_isOperationCurrent(
         operation,
@@ -2594,6 +2721,19 @@ class PlannerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Membership refreshes can remove the currently selected member even when
+  /// another client performed the deactivation. Clear the stale filter so a
+  /// deactivated identity cannot leave the calendar in a misleading state.
+  void _setMembersSnapshot(Iterable<PlannerMember> incoming) {
+    members = List<PlannerMember>.unmodifiable(incoming);
+    final selected = selectedMemberId;
+    if (selected != null &&
+        !members.any((member) => member.id == selected && member.isActive)) {
+      selectedMemberId = null;
+      showAllMembers = true;
+    }
+  }
+
   Future<void> saveEvent({
     PlannerEvent? existing,
     required EventDraft draft,
@@ -2614,8 +2754,26 @@ class PlannerController extends ChangeNotifier {
     errorMessage = null;
     notifyListeners();
     try {
+      final requestedMemberIds = canonicalEventMemberIds(draft.memberIds);
+      final normalizedDraft = draft.copyWith(
+        memberIds: draft.hasExplicitMemberIds ? requestedMemberIds : null,
+      );
       if (existing == null) {
-        final created = await _repository.createEvent(userId, groupId, draft);
+        // A capable adapter promises atomic event+participant creation.  A
+        // legacy adapter may still create the default creator-only event only
+        // when the draft genuinely omitted its participant field.  An
+        // explicit empty list is a real unassigned assignment and cannot be
+        // silently converted to the creator by an adapter without the
+        // capability.
+        if (normalizedDraft.hasExplicitMemberIds &&
+            _repository is! EventMemberAssignmentCapability) {
+          throw const ScheduleCapabilityException('일정 멤버 지정을 지원하지 않는 저장소입니다.');
+        }
+        final created = await _repository.createEvent(
+          userId,
+          groupId,
+          normalizedDraft,
+        );
         if (!_isOperationCurrent(
           operation,
           userId: userId,
@@ -2624,21 +2782,45 @@ class PlannerController extends ChangeNotifier {
         )) {
           return;
         }
-        _upsertEvent(created);
+        final normalizedCreated = _validatedEventMutationResult(
+          created,
+          expectedGroupId: groupId,
+          expectedOwnerId: userId,
+          expectedVersion: 1,
+          requestedMemberIds: normalizedDraft.hasExplicitMemberIds
+              ? requestedMemberIds
+              : <String>[userId],
+          allowLegacyCreatorDefault: true,
+        );
+        _upsertEvent(normalizedCreated);
       } else {
+        if (existing.groupId != groupId || existing.isDeleted) {
+          throw const ScheduleConflictException('일정을 찾을 수 없습니다.');
+        }
+        if (existing.ownerId != userId) {
+          throw const ScheduleConflictException('이 일정은 작성자만 변경할 수 있습니다.');
+        }
+        final existingMemberIds = canonicalEventMemberIds(existing.memberIds);
+        final membersChanged = !_sameMemberIdSet(
+          existingMemberIds,
+          requestedMemberIds,
+        );
+        if (membersChanged && _repository is! EventMemberAssignmentCapability) {
+          throw const ScheduleCapabilityException('일정 멤버 지정을 지원하지 않는 저장소입니다.');
+        }
         final updated = await _repository.updateEvent(
           existing.copyWith(
-            title: draft.title,
-            note: draft.note,
-            startAt: draft.startAt.toUtc(),
-            endAt: draft.endAt.toUtc(),
-            allDay: draft.allDay,
-            memberIds: draft.memberIds,
-            colorValue: draft.colorValue,
-            timezone: draft.timezone,
-            allDayStartDate: draft.allDayStartDate,
-            allDayEndDate: draft.allDayEndDate,
-            clearAllDayDates: !draft.allDay,
+            title: normalizedDraft.title,
+            note: normalizedDraft.note,
+            startAt: normalizedDraft.startAt.toUtc(),
+            endAt: normalizedDraft.endAt.toUtc(),
+            allDay: normalizedDraft.allDay,
+            memberIds: requestedMemberIds,
+            colorValue: normalizedDraft.colorValue,
+            timezone: normalizedDraft.timezone,
+            allDayStartDate: normalizedDraft.allDayStartDate,
+            allDayEndDate: normalizedDraft.allDayEndDate,
+            clearAllDayDates: !normalizedDraft.allDay,
           ),
           expectedVersion: existing.version,
           actorId: userId,
@@ -2651,7 +2833,16 @@ class PlannerController extends ChangeNotifier {
         )) {
           return;
         }
-        _upsertEvent(updated);
+        _upsertEvent(
+          _validatedEventMutationResult(
+            updated,
+            expectedEventId: existing.id,
+            expectedGroupId: groupId,
+            expectedOwnerId: existing.ownerId,
+            expectedVersion: existing.version + 1,
+            requestedMemberIds: requestedMemberIds,
+          ),
+        );
       }
     } catch (error) {
       if (_isOperationCurrent(
@@ -2668,15 +2859,146 @@ class PlannerController extends ChangeNotifier {
     }
   }
 
+  Future<void> replaceEventMembers(
+    PlannerEvent event,
+    Iterable<String> memberIds,
+  ) async {
+    final current = user;
+    final group = selectedGroup;
+    if (current == null || group == null) {
+      const error = ScheduleValidationException(
+        '일정 멤버를 변경하려면 로그인하고 그룹을 선택해 주세요.',
+      );
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    if (!canEditEventParticipants(event)) {
+      const error = ScheduleConflictException('이 일정의 멤버를 변경할 권한이 없습니다.');
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    final repository = _repository;
+    if (repository is! EventMemberAssignmentCapability) {
+      const error = ScheduleCapabilityException('일정 멤버 지정을 지원하지 않는 저장소입니다.');
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    final EventMemberAssignmentCapability capability =
+        repository as EventMemberAssignmentCapability;
+    late final List<String> normalizedMemberIds;
+    try {
+      normalizedMemberIds = canonicalEventMemberIds(memberIds);
+    } catch (error) {
+      errorMessage = _friendlyError(error);
+      notifyListeners();
+      rethrow;
+    }
+    final operation = _beginOperation();
+    final revision = _plannerRevision;
+    final userId = current.id;
+    final groupId = group.id;
+    final expectedResultVersion =
+        _sameMemberIdSet(event.memberIds, normalizedMemberIds)
+        ? event.version
+        : event.version + 1;
+    _startSaving(operation);
+    errorMessage = null;
+    notifyListeners();
+    try {
+      final updated = await capability.replaceEventMembers(
+        event.id,
+        memberIds: normalizedMemberIds,
+        expectedVersion: event.version,
+        actorId: userId,
+      );
+      if (!_isOperationCurrent(
+        operation,
+        userId: userId,
+        groupId: groupId,
+        plannerRevision: revision,
+      )) {
+        return;
+      }
+      _upsertEvent(
+        _validatedEventMutationResult(
+          updated,
+          expectedEventId: event.id,
+          expectedGroupId: groupId,
+          expectedOwnerId: event.ownerId,
+          expectedVersion: expectedResultVersion,
+          requestedMemberIds: normalizedMemberIds,
+        ),
+      );
+    } catch (error) {
+      if (_isOperationCurrent(
+        operation,
+        userId: userId,
+        groupId: groupId,
+        plannerRevision: revision,
+      )) {
+        errorMessage = _friendlyError(error);
+      }
+      rethrow;
+    } finally {
+      _finishSaving(operation);
+    }
+  }
+
+  static bool _sameMemberIdSet(Iterable<String> left, Iterable<String> right) {
+    final leftSet = left.toSet();
+    final rightSet = right.toSet();
+    return leftSet.length == rightSet.length && leftSet.containsAll(rightSet);
+  }
+
+  PlannerEvent _validatedEventMutationResult(
+    PlannerEvent incoming, {
+    String? expectedEventId,
+    required String expectedGroupId,
+    required String expectedOwnerId,
+    required int expectedVersion,
+    required Iterable<String> requestedMemberIds,
+    bool allowLegacyCreatorDefault = false,
+  }) {
+    if ((expectedEventId != null && incoming.id != expectedEventId) ||
+        incoming.groupId != expectedGroupId ||
+        incoming.ownerId != expectedOwnerId ||
+        incoming.version != expectedVersion ||
+        incoming.isDeleted) {
+      throw const ScheduleConflictException('일정 변경 응답을 확인할 수 없습니다.');
+    }
+    final requested = canonicalEventMemberIds(requestedMemberIds);
+    final returned = canonicalEventMemberIds(incoming.memberIds);
+    if (!_sameMemberIdSet(requested, returned)) {
+      if (!(allowLegacyCreatorDefault &&
+          returned.isEmpty &&
+          requested.length == 1 &&
+          requested.single == expectedOwnerId)) {
+        throw const ScheduleConflictException('일정 멤버 변경 응답을 확인할 수 없습니다.');
+      }
+      return incoming.copyWith(memberIds: requested);
+    }
+    return incoming.copyWith(memberIds: returned);
+  }
+
   void _upsertEvent(PlannerEvent incoming) {
-    final index = events.indexWhere((event) => event.id == incoming.id);
+    final selectedGroupId = selectedGroup?.id;
+    if (selectedGroupId != null && incoming.groupId != selectedGroupId) return;
+    final normalizedIds = canonicalEventMemberIds(incoming.memberIds);
+    final normalizedIncoming = incoming.copyWith(memberIds: normalizedIds);
+    final index = events.indexWhere(
+      (event) => event.id == normalizedIncoming.id,
+    );
     if (index == -1) {
-      events = <PlannerEvent>[...events, incoming];
+      events = <PlannerEvent>[...events, normalizedIncoming];
       return;
     }
+    if (events[index].version > normalizedIncoming.version) return;
     final next = <PlannerEvent>[...events];
-    next[index] = incoming;
-    events = next;
+    next[index] = normalizedIncoming;
+    events = List<PlannerEvent>.unmodifiable(next);
   }
 
   /// Merge an invite returned by a mutation with an in-flight lifecycle
@@ -2801,6 +3123,7 @@ class PlannerController extends ChangeNotifier {
     _operationToken++;
     _plannerRevision++;
     _groupOperationToken = 0;
+    _cancelGroupMetadataRefresh();
     _oauthTimeoutTimer?.cancel();
     _oauthTimeoutTimer = null;
     unawaited(_authSubscription?.cancel());
