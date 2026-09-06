@@ -1,13 +1,37 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../app.dart';
 import '../core/invite_code_utils.dart';
 import '../models/app_models.dart';
+import '../repositories/schedule_repository.dart';
 import '../state/app_state.dart';
+import 'group_management_dialogs.dart';
 
 class MembersScreen extends ConsumerWidget {
   const MembersScreen({super.key});
+
+  /// Resolve the version at the moment a dialog submits, rather than the
+  /// version captured when that dialog opened.  Conflict recovery reloads the
+  /// controller while keeping the dialog (and its draft) alive, so a retry
+  /// must use that freshly loaded value.  A switched/removed/archived group
+  /// is a terminal stale callback and fails closed before any repository write.
+  static PlannerGroup _latestGroupForSubmit(
+    PlannerController controller,
+    PlannerGroup openedGroup,
+  ) {
+    final latest = controller.selectedGroup;
+    if (latest == null ||
+        latest.id != openedGroup.id ||
+        latest.isArchived ||
+        controller.user == null) {
+      throw const ScheduleConflictException(
+        '그룹이 변경되었거나 더 이상 사용할 수 없습니다. 최신 그룹을 선택해 주세요.',
+      );
+    }
+    return latest;
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -15,17 +39,30 @@ class MembersScreen extends ConsumerWidget {
     final group = controller.selectedGroup;
     final scheme = Theme.of(context).colorScheme;
     final owner = controller.isGroupOwner;
+    final activeNonOwners = controller.members
+        .where(
+          (member) =>
+              member.isActive &&
+              !member.isOwner &&
+              member.id != controller.user?.id,
+        )
+        .toList(growable: false);
+    final currentMembership = controller.members
+        .where((member) => member.id == controller.user?.id)
+        .firstOrNull;
+    final canLeave =
+        group != null && !owner && currentMembership?.isActive == true;
     return Scaffold(
       appBar: AppBar(
         title: const Text('멤버'),
         actions: <Widget>[
           if (owner)
-            IconButton(
-              tooltip: '멤버 초대',
+            TextButton.icon(
               onPressed: controller.isSaving
                   ? null
                   : () => _showCreateInvite(context, ref),
               icon: const Icon(Icons.person_add_alt_1),
+              label: const Text('새 코드'),
             ),
         ],
       ),
@@ -37,19 +74,136 @@ class MembersScreen extends ConsumerWidget {
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
           children: <Widget>[
             if (group != null) ...<Widget>[
-              Text(
-                group.name,
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(
+                              group.name,
+                              style: Theme.of(context).textTheme.headlineSmall
+                                  ?.copyWith(fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                          if (owner)
+                            IconButton(
+                              tooltip: '그룹 정보 편집',
+                              onPressed: controller.isSaving
+                                  ? null
+                                  : () => _showEditGroup(context, ref, group),
+                              icon: const Icon(Icons.edit_outlined),
+                            ),
+                        ],
+                      ),
+                      if (group.description.isNotEmpty) ...<Widget>[
+                        const SizedBox(height: 4),
+                        Text(
+                          group.description,
+                          style: TextStyle(color: scheme.onSurfaceVariant),
+                        ),
+                      ],
+                      const SizedBox(height: 4),
+                      Text(
+                        group.timezone,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      if (owner)
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              '소유자는 그룹을 바로 나갈 수 없어요. 유지하려면 먼저 소유권을 이전하고, '
+                              '그룹을 끝내려면 보관하세요.',
+                              style: TextStyle(color: scheme.onSurfaceVariant),
+                            ),
+                            const SizedBox(height: 10),
+                            if (activeNonOwners.isEmpty) ...<Widget>[
+                              Text(
+                                '활성 멤버가 없어 소유권을 이전할 수 없어요. 그룹을 끝내려면 보관하세요.',
+                                style: TextStyle(color: scheme.error),
+                              ),
+                              const SizedBox(height: 8),
+                            ],
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: <Widget>[
+                                Semantics(
+                                  button: true,
+                                  enabled:
+                                      activeNonOwners.isNotEmpty &&
+                                      !controller.isSaving,
+                                  label: '소유권 이전',
+                                  hint: activeNonOwners.isEmpty
+                                      ? '활성 멤버가 없어 이전할 수 없음'
+                                      : null,
+                                  child: OutlinedButton.icon(
+                                    onPressed:
+                                        activeNonOwners.isEmpty ||
+                                            controller.isSaving
+                                        ? null
+                                        : () => _showTransferGroup(
+                                            context,
+                                            ref,
+                                            group,
+                                            activeNonOwners,
+                                          ),
+                                    icon: const Icon(Icons.swap_horiz),
+                                    label: const Text('소유권 이전'),
+                                  ),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: controller.isSaving
+                                      ? null
+                                      : () => _showArchiveGroup(
+                                          context,
+                                          ref,
+                                          group,
+                                        ),
+                                  icon: const Icon(Icons.archive_outlined),
+                                  label: const Text('그룹 보관'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        )
+                      else if (canLeave)
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: controller.isSaving
+                                ? null
+                                : () => _showLeaveGroup(context, ref, group),
+                            icon: const Icon(Icons.exit_to_app),
+                            label: const Text('그룹 나가기'),
+                          ),
+                        )
+                      else if (group.ownerId == controller.user?.id ||
+                          currentMembership?.isOwner == true)
+                        OwnerLeaveNotice(
+                          onTransfer: activeNonOwners.isEmpty
+                              ? null
+                              : () => _showTransferGroup(
+                                  context,
+                                  ref,
+                                  group,
+                                  activeNonOwners,
+                                ),
+                          onArchive: () =>
+                              _showArchiveGroup(context, ref, group),
+                        ),
+                    ],
+                  ),
                 ),
               ),
-              if (group.description.isNotEmpty) ...<Widget>[
-                const SizedBox(height: 4),
-                Text(
-                  group.description,
-                  style: TextStyle(color: scheme.onSurfaceVariant),
-                ),
-              ],
               const SizedBox(height: 24),
             ],
             if (controller.isLoading && controller.members.isEmpty)
@@ -89,7 +243,6 @@ class MembersScreen extends ConsumerWidget {
               _InviteSection(
                 invites: controller.invites,
                 isSaving: controller.isSaving,
-                onCreate: () => _showCreateInvite(context, ref),
                 onRevoke: (invite) => _revokeInvite(context, ref, invite),
               ),
             ] else ...<Widget>[
@@ -113,6 +266,137 @@ class MembersScreen extends ConsumerWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+
+  static Future<void> _showEditGroup(
+    BuildContext context,
+    WidgetRef ref,
+    PlannerGroup group,
+  ) async {
+    final controller = ref.read(plannerControllerProvider);
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => EditGroupDialog(
+        group: group,
+        onSubmit: (name, description, timezone) async {
+          final latest = _latestGroupForSubmit(controller, group);
+          await controller.updateGroup(
+            name: name,
+            description: description,
+            timezone: timezone,
+            expectedVersion: latest.version,
+          );
+        },
+      ),
+    );
+  }
+
+  static Future<void> _showTransferGroup(
+    BuildContext context,
+    WidgetRef ref,
+    PlannerGroup group,
+    List<PlannerMember> candidates,
+  ) async {
+    final controller = ref.read(plannerControllerProvider);
+    final transferred = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => TransferGroupDialog(
+        candidates: candidates,
+        onSubmit: (memberId) async {
+          final latest = _latestGroupForSubmit(controller, group);
+          await controller.transferGroupOwnership(
+            newOwnerId: memberId,
+            expectedVersion: latest.version,
+          );
+        },
+      ),
+    );
+    if (transferred == true && context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('소유권을 이전했어요.')));
+    }
+  }
+
+  static Future<void> _showArchiveGroup(
+    BuildContext context,
+    WidgetRef ref,
+    PlannerGroup group,
+  ) async {
+    final archived = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => ArchiveGroupDialog(
+        groupName: group.name,
+        onSubmit: () {
+          final controller = ref.read(plannerControllerProvider);
+          final latest = _latestGroupForSubmit(controller, group);
+          return controller.archiveGroup(expectedVersion: latest.version);
+        },
+      ),
+    );
+    if (archived == true && context.mounted) context.go('/groups');
+  }
+
+  static Future<void> _showLeaveGroup(
+    BuildContext context,
+    WidgetRef ref,
+    PlannerGroup group,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('그룹을 나갈까요?'),
+        content: Text('${group.name}에서 나가면 멤버 목록과 일정에 더 이상 접근할 수 없습니다.'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('나가기'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    try {
+      await ref.read(plannerControllerProvider).leaveGroup();
+      if (context.mounted) context.go('/groups');
+    } catch (error) {
+      if (!context.mounted) return;
+      await _showOperationError(context, error);
+    }
+  }
+
+  static Future<void> _showOperationError(
+    BuildContext context,
+    Object error,
+  ) async {
+    final message = error is ScheduleConflictException
+        ? error.message
+        : error is ScheduleValidationException
+        ? error.message
+        : error is FormatException
+        ? error.message
+        : '작업을 완료하지 못했어요. 최신 내용을 다시 확인해 주세요.';
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('변경 내용을 저장하지 못했어요'),
+        content: Semantics(
+          liveRegion: true,
+          label: message,
+          child: Text(message),
+        ),
+        actions: <Widget>[
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('확인'),
+          ),
+        ],
       ),
     );
   }
@@ -251,6 +535,12 @@ class _CreateInviteDialogState extends State<_CreateInviteDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    // Keep the title and form in the dialog's flexible scroll viewport.  A
+    // focused field can leave only a short viewport when the keyboard is
+    // visible, especially with a large text scale; a non-scrollable
+    // AlertDialog lets the form's intrinsic height overflow that viewport.
+    scrollable: true,
+    insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
     title: const Text('초대 코드 만들기'),
     content: Form(
       key: _formKey,
@@ -355,12 +645,10 @@ class _InviteSection extends StatelessWidget {
   const _InviteSection({
     required this.invites,
     required this.isSaving,
-    required this.onCreate,
     required this.onRevoke,
   });
   final List<InviteCode> invites;
   final bool isSaving;
-  final VoidCallback onCreate;
   final ValueChanged<InviteCode> onRevoke;
 
   @override
@@ -369,21 +657,11 @@ class _InviteSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Row(
-          children: <Widget>[
-            Text(
-              '초대 코드',
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const Spacer(),
-            TextButton.icon(
-              onPressed: isSaving ? null : onCreate,
-              icon: const Icon(Icons.add, size: 18),
-              label: const Text('새 코드'),
-            ),
-          ],
+        Text(
+          '초대 코드',
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
         ),
         const SizedBox(height: 6),
         if (invites.isEmpty)

@@ -30,23 +30,68 @@ class _NoSchedule implements ScheduleRepository {
   Future<PlannerGroup> createGroup(
     String ownerId,
     String name,
-    String description,
-  ) => Future<PlannerGroup>.error(UnimplementedError());
+    String description, {
+    String timezone = 'Asia/Seoul',
+  }) => Future<PlannerGroup>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 그룹 만들기를 지원하지 않습니다.'),
+  );
+
+  @override
+  Future<PlannerGroup> updateGroupIfVersion({
+    required String actorId,
+    required String groupId,
+    required String name,
+    required String description,
+    required String timezone,
+    required int expectedVersion,
+  }) => Future<PlannerGroup>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 그룹 편집을 지원하지 않습니다.'),
+  );
+
+  @override
+  Future<void> leaveGroup({required String actorId, required String groupId}) =>
+      Future<void>.error(
+        const ScheduleCapabilityException('테스트 저장소에서 그룹 나가기를 지원하지 않습니다.'),
+      );
+
+  @override
+  Future<PlannerGroup> transferGroupOwnership({
+    required String actorId,
+    required String groupId,
+    required String newOwnerId,
+    required int expectedVersion,
+  }) => Future<PlannerGroup>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 소유권 이전을 지원하지 않습니다.'),
+  );
+
+  @override
+  Future<int> archiveGroupIfVersion({
+    required String actorId,
+    required String groupId,
+    required int expectedVersion,
+  }) => Future<int>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 그룹 보관을 지원하지 않습니다.'),
+  );
 
   @override
   Future<PlannerGroup> joinGroup(String userId, String inviteCode) =>
-      Future<PlannerGroup>.error(UnimplementedError());
+      Future<PlannerGroup>.error(
+        const ScheduleCapabilityException('테스트 저장소에서 그룹 참여를 지원하지 않습니다.'),
+      );
 
   @override
-  Future<String> createInviteCode(String groupId) =>
-      Future<String>.error(UnimplementedError());
+  Future<String> createInviteCode(String groupId) => Future<String>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 초대 코드 생성을 지원하지 않습니다.'),
+  );
 
   @override
   Future<InviteCode> createInviteCodeWithOptions(
     String groupId, {
     Duration ttl = const Duration(days: 7),
     int maxUses = 20,
-  }) => Future<InviteCode>.error(UnimplementedError());
+  }) => Future<InviteCode>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 초대 옵션을 지원하지 않습니다.'),
+  );
 
   @override
   Future<List<InviteCode>> inviteCodesForGroup(String groupId) async =>
@@ -57,7 +102,9 @@ class _NoSchedule implements ScheduleRepository {
     String inviteId, {
     required int expectedVersion,
     String? actorId,
-  }) => Future<InviteCode>.error(UnimplementedError());
+  }) => Future<InviteCode>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 초대 취소를 지원하지 않습니다.'),
+  );
 
   @override
   Future<PlannerMember> setMemberActive(
@@ -65,28 +112,36 @@ class _NoSchedule implements ScheduleRepository {
     String userId,
     bool isActive, {
     String? actorId,
-  }) => Future<PlannerMember>.error(UnimplementedError());
+  }) => Future<PlannerMember>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 멤버 변경을 지원하지 않습니다.'),
+  );
 
   @override
   Future<PlannerEvent> createEvent(
     String userId,
     String groupId,
     EventDraft draft,
-  ) => Future<PlannerEvent>.error(UnimplementedError());
+  ) => Future<PlannerEvent>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 일정 생성을 지원하지 않습니다.'),
+  );
 
   @override
   Future<PlannerEvent> updateEvent(
     PlannerEvent event, {
     required int expectedVersion,
     String? actorId,
-  }) => Future<PlannerEvent>.error(UnimplementedError());
+  }) => Future<PlannerEvent>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 일정 편집을 지원하지 않습니다.'),
+  );
 
   @override
   Future<void> softDeleteEvent(
     String eventId, {
     required int expectedVersion,
     String? actorId,
-  }) => Future<void>.error(UnimplementedError());
+  }) => Future<void>.error(
+    const ScheduleCapabilityException('테스트 저장소에서 일정 삭제를 지원하지 않습니다.'),
+  );
 }
 
 void main() {

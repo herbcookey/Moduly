@@ -136,7 +136,10 @@ class SettingsScreen extends ConsumerWidget {
               onTap: () async {
                 final client = ref.read(supabaseClientProvider);
                 final repository = client == null
-                    ? LocalAccountDeletionRepository()
+                    ? ConfigurationBlockedAccountDeletionRepository(
+                        ref.read(releaseConfigurationErrorProvider) ??
+                            '계정 삭제는 연결된 서버에서만 사용할 수 있어요.',
+                      )
                     : SupabaseAccountDeletionRepository(client);
                 final controller = ref.read(plannerControllerProvider);
                 await Navigator.of(context).push(
@@ -153,6 +156,9 @@ class SettingsScreen extends ConsumerWidget {
                           // 서버에서 계정이 이미 삭제된 상태다.
                         }
                         if (context.mounted) context.go('/login');
+                      },
+                      onManageGroups: () {
+                        if (context.mounted) context.go('/groups');
                       },
                     ),
                   ),
@@ -318,6 +324,11 @@ class _EditDisplayNameDialogState extends State<_EditDisplayNameDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    // The maxLength counter increases the field's intrinsic height at large
+    // text scales.  AlertDialog's scrollable viewport prevents that content
+    // from overflowing when the keyboard consumes most of the screen.
+    scrollable: true,
+    insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
     title: const Text('이름 변경'),
     content: TextField(
       controller: _controller,

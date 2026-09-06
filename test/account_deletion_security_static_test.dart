@@ -4,12 +4,16 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   late String edgeFunction;
+  late String preflightValidator;
   late String functionConfig;
   late String accountMigration;
 
   setUpAll(() {
     edgeFunction = File(
       'supabase/functions/delete-account/index.ts',
+    ).readAsStringSync();
+    preflightValidator = File(
+      'supabase/functions/delete-account/preflight_validator.mjs',
     ).readAsStringSync();
     functionConfig = File('supabase/config.toml').readAsStringSync();
     accountMigration = File(
@@ -24,6 +28,7 @@ void main() {
     expect(edgeFunction, contains("defaultKey('SUPABASE_SECRET_KEYS')"));
     expect(edgeFunction, contains('auth.getUser(token)'));
     expect(edgeFunction, contains('auth.admin.deleteUser'));
+    expect(edgeFunction, contains('isValidDeletionSummary(summary)'));
     expect(
       edgeFunction.indexOf("defaultKey('SUPABASE_PUBLISHABLE_KEYS')"),
       lessThan(
@@ -33,6 +38,10 @@ void main() {
     expect(
       edgeFunction.indexOf("defaultKey('SUPABASE_SECRET_KEYS')"),
       lessThan(edgeFunction.indexOf("Deno.env.get('SUPABASE_SECRET_KEY')")),
+    );
+    expect(
+      edgeFunction.indexOf('isValidDeletionSummary(summary)'),
+      lessThan(edgeFunction.indexOf('auth.admin.deleteUser')),
     );
     expect(functionConfig, contains('[functions.delete-account]'));
     expect(functionConfig, contains('verify_jwt = false'));
@@ -64,6 +73,21 @@ void main() {
       reason: 'every JSON response should carry the CORS headers',
     );
   });
+
+  test(
+    'preflight validator is pure and has no logging or provider dependency',
+    () {
+      expect(
+        preflightValidator,
+        contains('export function isValidDeletionSummary'),
+      );
+      expect(preflightValidator, contains('return false'));
+      expect(preflightValidator, contains('return true'));
+      expect(preflightValidator, isNot(contains('Deno.')));
+      expect(preflightValidator, isNot(contains('supabase')));
+      expect(preflightValidator, isNot(contains('console.')));
+    },
+  );
 
   test(
     'account deletion migration documents the owned-data cascade policy',

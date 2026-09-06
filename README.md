@@ -46,6 +46,32 @@ unsigned 32-bit ARGB integer (`0` through `4,294,967,295`) with a default of
 `4,282,874,742` (`0xff477b76`); create, update, and realtime event payloads
 preserve this value.
 
+### Group management and account deletion
+
+The Members screen exposes owner-only group name/description/IANA-timezone
+updates through `update_group_if_version`, ownership transfer through
+`transfer_group_ownership`, and terminal archive through
+`archive_group_if_version`. All three RPCs use the group's optimistic-lock
+`version`; a stale response is shown as a Korean conflict message and the
+draft/target remains in its dialog. Active non-owners can confirm **Leave
+group** (`leave_group`). Owners cannot leave until they transfer ownership or
+archive the group. The UI filters transfer targets to active non-owner
+members, asks for a second confirmation, and requires the exact group name to
+archive. RLS keeps these operations owner/member scoped; authenticated clients
+do not receive direct ownership or presentation-column UPDATE privileges.
+
+Account deletion first calls the authenticated `account_deletion_preflight()`
+RPC. Its typed JSON summary lists owned active and archived groups (including
+member counts) and the cascade counts for groups, events, invite codes, and
+memberships. The Edge Function validates that same summary and only accepts a
+successful `{ "deleted": true, "summary": ... }` body after JWT verification;
+the Auth Admin delete then cascades owned/authored rows according to the
+account-deletion migration. The confirmation screen clearly states that the
+cascade is permanent and links back to group management when an active owned
+group should be transferred or archived first. Local/configuration-blocked
+builds report that this capability requires a connected server; they never
+claim a local account was deleted.
+
 ## Flutter development
 
 1. Keep `.env.example` as the checked-in placeholder reference. For Flutter
@@ -312,6 +338,9 @@ real contact route before release rather than copying a placeholder.
   backfills and constrains group descriptions and unsigned event colors, then
   replaces the `create_group` RPC with the description-aware signature and
   least-privilege grants.
+- `supabase/migrations/20260907130001_group_management.sql` adds the
+  race-safe single-owner invariant, versioned update/transfer/archive/leave
+  RPCs, and the authenticated `account_deletion_preflight()` JSON contract.
 - `supabase/seed.sql` is an idempotent, local-only demo seed that never creates
   an auth user or stores an invite plaintext token.
 
@@ -334,3 +363,28 @@ for the next UI iteration. Useful follow-ups are profile editing, recurring even
 reminders/notifications, attachment storage, pagination and rate-limit retention
 jobs, TLS/secret management in deployment, backups, and a full pgTAP/RLS
 integration suite.
+
+### Manual group/account verification
+
+On a disposable Supabase stack, apply migrations in order (`supabase db reset`)
+and create two authenticated users. Verify the following with the real JWT
+roles (the Flutter client never sends an actor ID):
+
+1. An owner creates a group with `Asia/Seoul`, edits the description and exact
+   IANA zone, and sees the new values after a refresh. An invalid zone and a
+   stale `version` are rejected without losing the dialog draft.
+2. A member can leave after confirmation and is routed to `/groups`; an owner
+   sees the transfer/archive guidance. Transfer only lists active non-owners,
+   changes exactly one owner, and archive requires the exact group name and
+   removes the group from active reads.
+3. Open account deletion and confirm that preflight lists both active and
+   archived owned groups plus cascade counts. Keep a group by transferring or
+   archiving it first, then confirm the exact deletion phrase and verify the
+   Edge response includes `deleted: true` and the validated `summary`.
+
+These checks require a running Auth/Postgres/Edge deployment and are not run in
+this checkout: Docker/Supabase services are intentionally not installed or
+started here, so CI covers Dart/widget behavior and static SQL/Edge contracts
+only. Run focused tests with `flutter test test/account_deletion_test.dart
+test/navigation_test.dart test/group_management_core_test.dart` and run
+`flutter analyze --no-pub` before a reviewed deployment.

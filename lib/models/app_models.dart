@@ -18,6 +18,9 @@ class PlannerGroup {
     this.timezone = 'UTC',
     this.version = 1,
     this.colorValue = 0xff476a6f,
+    this.ownerId,
+    this.archivedAt,
+    this.deletedAt,
   });
 
   final String id;
@@ -26,6 +29,74 @@ class PlannerGroup {
   final String timezone;
   final int version;
   final int colorValue;
+
+  /// The immutable owner recorded by the database. Older/local fixtures may
+  /// omit this field and derive ownership from the active member list.
+  final String? ownerId;
+
+  /// Optional lifecycle markers. The production schema currently uses
+  /// `deleted_at` for an archived group, while some clients expose that state
+  /// as `archivedAt`; retaining both keeps the model additive and tolerant of
+  /// either payload shape.
+  final DateTime? archivedAt;
+  final DateTime? deletedAt;
+
+  bool get isArchived => archivedAt != null || deletedAt != null;
+  bool get isDeleted => deletedAt != null;
+
+  PlannerGroup copyWith({
+    String? id,
+    String? name,
+    String? description,
+    String? timezone,
+    int? version,
+    int? colorValue,
+    String? ownerId,
+    DateTime? archivedAt,
+    DateTime? deletedAt,
+    bool clearOwnerId = false,
+    bool clearArchivedAt = false,
+    bool clearDeletedAt = false,
+  }) {
+    return PlannerGroup(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      description: description ?? this.description,
+      timezone: timezone ?? this.timezone,
+      version: version ?? this.version,
+      colorValue: colorValue ?? this.colorValue,
+      ownerId: clearOwnerId ? null : (ownerId ?? this.ownerId),
+      archivedAt: clearArchivedAt ? null : (archivedAt ?? this.archivedAt),
+      deletedAt: clearDeletedAt ? null : (deletedAt ?? this.deletedAt),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is PlannerGroup &&
+        other.id == id &&
+        other.name == name &&
+        other.description == description &&
+        other.timezone == timezone &&
+        other.version == version &&
+        other.colorValue == colorValue &&
+        other.ownerId == ownerId &&
+        other.archivedAt == archivedAt &&
+        other.deletedAt == deletedAt;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    name,
+    description,
+    timezone,
+    version,
+    colorValue,
+    ownerId,
+    archivedAt,
+    deletedAt,
+  );
 }
 
 @immutable
@@ -47,6 +118,27 @@ class PlannerMember {
   final bool isActive;
   final DateTime? removedAt;
   final int avatarColor;
+
+  PlannerMember copyWith({
+    String? id,
+    String? name,
+    String? email,
+    bool? isOwner,
+    bool? isActive,
+    DateTime? removedAt,
+    int? avatarColor,
+    bool clearRemovedAt = false,
+  }) {
+    return PlannerMember(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      email: email ?? this.email,
+      isOwner: isOwner ?? this.isOwner,
+      isActive: isActive ?? this.isActive,
+      removedAt: clearRemovedAt ? null : (removedAt ?? this.removedAt),
+      avatarColor: avatarColor ?? this.avatarColor,
+    );
+  }
 }
 
 @immutable

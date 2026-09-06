@@ -171,8 +171,40 @@ void main() {
 
       expect(event.allDay, isTrue);
       expect(event.endAt.isAfter(event.startAt), isTrue);
-      expect(event.endAt, end.toUtc());
+      // UTC timezone drafts are persisted at the canonical UTC-midnight
+      // boundary, even when the device supplied local wall-date DateTimes.
+      expect(event.startAt, DateTime.utc(2026, 10, 31));
+      expect(event.endAt, DateTime.utc(2026, 11, 1));
     });
+
+    test(
+      'canonicalizes local (KST-style) UTC all-day dates and metadata together',
+      () async {
+        final repository = LocalScheduleRepository();
+        // A device in KST can construct a wall-date DateTime while the
+        // persisted event timezone is UTC. The adapter must not retain the
+        // local instant (which would be the prior UTC date); both boundaries
+        // and date-only metadata must describe the same UTC midnights.
+        final start = DateTime(2026, 10, 31);
+        final end = DateTime(2026, 11, 2);
+        final event = await repository.createEvent(
+          'demo-user',
+          'demo-group',
+          EventDraft(
+            title: 'UTC all-day',
+            startAt: start,
+            endAt: end,
+            allDay: true,
+            timezone: 'UTC',
+          ),
+        );
+
+        expect(event.startAt, DateTime.utc(2026, 10, 31));
+        expect(event.endAt, DateTime.utc(2026, 11, 2));
+        expect(event.allDayStartDate, DateTime(2026, 10, 31));
+        expect(event.allDayEndDate, DateTime(2026, 11, 2));
+      },
+    );
 
     test('rejects invalid drafts and non-owner writes', () async {
       final repository = LocalScheduleRepository();

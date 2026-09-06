@@ -98,8 +98,9 @@ class _ControlledScheduleRepository extends LocalScheduleRepository {
   Future<PlannerGroup> createGroup(
     String ownerId,
     String name,
-    String description,
-  ) {
+    String description, {
+    String timezone = 'Asia/Seoul',
+  }) {
     createGroupCalls++;
     if (createGroupLoads.isNotEmpty) {
       return createGroupLoads.removeAt(0).future;
@@ -204,6 +205,37 @@ class _ControlledScheduleRepository extends LocalScheduleRepository {
     updatedEvent = event.copyWith(version: expectedVersion + 1);
     return updatedEvent!;
   }
+}
+
+class _LifecycleControlledRepository extends LocalScheduleRepository {
+  final StreamController<PlannerGroup?> lifecycle =
+      StreamController<PlannerGroup?>.broadcast();
+  final Completer<List<PlannerMember>> membersLoad =
+      Completer<List<PlannerMember>>();
+  bool eventsStarted = false;
+  bool lifecycleStarted = false;
+
+  @override
+  Future<List<PlannerMember>> membersForGroup(String groupId) =>
+      membersLoad.future;
+
+  @override
+  Future<List<InviteCode>> inviteCodesForGroup(String groupId) =>
+      Future<List<InviteCode>>.value(const <InviteCode>[]);
+
+  @override
+  Stream<List<PlannerEvent>> watchEventsForUser(String userId, String groupId) {
+    eventsStarted = true;
+    return Stream<List<PlannerEvent>>.value(const <PlannerEvent>[]);
+  }
+
+  @override
+  Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId) {
+    lifecycleStarted = true;
+    return lifecycle.stream;
+  }
+
+  Future<void> close() => lifecycle.close();
 }
 
 Future<void> _settleControllerBootstrap() async {
@@ -365,6 +397,70 @@ void main() {
       expect(controller.events, isEmpty);
     },
   );
+
+  test(
+    'selectGroup starts lifecycle watchers while metadata reads are pending',
+    () async {
+      final auth = _ControlledAuth();
+      final repository = _LifecycleControlledRepository();
+      final controller = PlannerController(auth: auth, repository: repository);
+      addTearDown(() async {
+        controller.dispose();
+        await repository.close();
+        auth.dispose();
+      });
+      await _settleControllerBootstrap();
+      controller.user = _alice;
+      controller.groups = const <PlannerGroup>[_groupA];
+
+      final selection = controller.selectGroup(_groupA.id);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(repository.eventsStarted, isTrue);
+      expect(repository.lifecycleStarted, isTrue);
+      expect(controller.selectedGroup?.id, _groupA.id);
+
+      // A lifecycle tombstone must be observed even though the member REST
+      // projection has not returned yet.
+      repository.lifecycle.add(null);
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.selectedGroup, isNull);
+      expect(controller.events, isEmpty);
+
+      repository.membersLoad.complete(const <PlannerMember>[]);
+      await selection;
+    },
+  );
+
+  test('selectGroup ignores a cross-group lifecycle row', () async {
+    final auth = _ControlledAuth();
+    final repository = _LifecycleControlledRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() async {
+      controller.dispose();
+      await repository.close();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_groupA, _groupB];
+
+    final selection = controller.selectGroup(_groupA.id);
+    await Future<void>.delayed(Duration.zero);
+    repository.lifecycle.add(_groupB);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.selectedGroup?.id, _groupA.id);
+    expect(controller.groups.map((group) => group.id), <String>[
+      _groupA.id,
+      _groupB.id,
+    ]);
+
+    repository.membersLoad.complete(const <PlannerMember>[]);
+    await selection;
+  });
 
   test('auth user changes invalidate an in-flight group load', () async {
     final auth = _ControlledAuth();

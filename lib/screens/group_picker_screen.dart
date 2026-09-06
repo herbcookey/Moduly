@@ -3,8 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../app.dart';
+import '../core/timezone_utils.dart';
 import '../core/invite_code_utils.dart';
 import '../state/app_state.dart';
+import 'timezone_picker.dart';
 
 class GroupPickerScreen extends ConsumerStatefulWidget {
   const GroupPickerScreen({super.key});
@@ -28,18 +30,16 @@ class _GroupPickerScreenState extends ConsumerState<GroupPickerScreen> {
 
   Future<void> _showCreateDialog() async {
     if (!mounted || ref.read(plannerControllerProvider).isSaving) return;
-    final result = await showDialog<(String, String)>(
-      context: context,
-      builder: (context) => const _CreateGroupDialog(),
-    );
-    if (result == null || result.$1.trim().isEmpty || !mounted) return;
     final controller = ref.read(plannerControllerProvider);
-    try {
-      await controller.createGroup(result.$1.trim(), result.$2.trim());
-      if (mounted) context.go('/home');
-    } catch (_) {
-      if (mounted) setState(() {});
-    }
+    final created = await showDialog<bool>(
+      context: context,
+      builder: (context) => _CreateGroupDialog(
+        onSubmit: (name, description, timezone) async {
+          await controller.createGroup(name, description, timezone: timezone);
+        },
+      ),
+    );
+    if (created == true && mounted) context.go('/home');
   }
 
   Future<void> _showJoinDialog() async {
@@ -217,7 +217,10 @@ class _GroupPickerScreenState extends ConsumerState<GroupPickerScreen> {
 }
 
 class _CreateGroupDialog extends StatefulWidget {
-  const _CreateGroupDialog();
+  const _CreateGroupDialog({required this.onSubmit});
+
+  final Future<void> Function(String name, String description, String timezone)
+  onSubmit;
 
   @override
   State<_CreateGroupDialog> createState() => _CreateGroupDialogState();
@@ -227,6 +230,9 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _descriptionController = TextEditingController();
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
+  String _timezone = defaultPlannerTimezone;
+  String? _asyncError;
+  bool _isSubmitting = false;
 
   @override
   void dispose() {
@@ -235,59 +241,130 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
     super.dispose();
   }
 
+  Future<void> _submit() async {
+    if (_isSubmitting) return;
+    FocusScope.of(context).unfocus();
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+    setState(() {
+      _isSubmitting = true;
+      _asyncError = null;
+    });
+    try {
+      await widget.onSubmit(
+        _nameController.text.trim(),
+        _descriptionController.text.trim(),
+        _timezone,
+      );
+      if (mounted) Navigator.pop(context, true);
+    } catch (error) {
+      if (!mounted) return;
+      final message = error is FormatException
+          ? error.message
+          : error.toString().contains('그룹 작업이 진행 중')
+          ? '그룹 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요.'
+          : '그룹을 만들지 못했어요. 입력 내용을 확인한 뒤 다시 시도해 주세요.';
+      setState(() {
+        _isSubmitting = false;
+        _asyncError = message;
+      });
+    }
+  }
+
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('새 그룹 만들기'),
-    content: Form(
-      key: _formKey,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          TextFormField(
-            controller: _nameController,
-            autofocus: true,
-            maxLength: 160,
-            textInputAction: TextInputAction.next,
-            decoration: const InputDecoration(labelText: '그룹 이름'),
-            validator: (value) {
-              final name = value?.trim() ?? '';
-              if (name.isEmpty) return '그룹 이름을 입력해 주세요.';
-              if (name.length > 160) {
-                return '그룹 이름은 160자 이하로 입력해 주세요.';
-              }
-              return null;
-            },
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final media = MediaQuery.of(context);
+    final maxHeight = (media.size.height - media.viewInsets.bottom - 240)
+        .clamp(180.0, 520.0)
+        .toDouble();
+    final maxWidth = (media.size.width - media.viewInsets.horizontal - 32)
+        .clamp(220.0, 520.0)
+        .toDouble();
+    return AlertDialog(
+      scrollable: true,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      title: const Text('새 그룹 만들기'),
+      content: SizedBox(
+        width: maxWidth,
+        height: maxHeight,
+        child: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                TextFormField(
+                  controller: _nameController,
+                  autofocus: true,
+                  maxLength: 160,
+                  textInputAction: TextInputAction.next,
+                  onFieldSubmitted: (_) => FocusScope.of(context).nextFocus(),
+                  decoration: const InputDecoration(labelText: '그룹 이름'),
+                  validator: (value) {
+                    final name = value?.trim() ?? '';
+                    if (name.isEmpty) return '그룹 이름을 입력해 주세요.';
+                    if (name.length > 160) {
+                      return '그룹 이름은 160자 이하로 입력해 주세요.';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+                IanaTimezoneField(
+                  value: _timezone,
+                  enabled: !_isSubmitting,
+                  onChanged: (value) => setState(() => _timezone = value),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _descriptionController,
+                  maxLines: 2,
+                  maxLength: 10000,
+                  textInputAction: TextInputAction.done,
+                  onFieldSubmitted: (_) => _submit(),
+                  decoration: const InputDecoration(labelText: '설명 (선택)'),
+                  validator: (value) => (value?.length ?? 0) > 10000
+                      ? '설명은 10,000자 이하로 입력해 주세요.'
+                      : null,
+                ),
+                if (_asyncError != null) ...<Widget>[
+                  const SizedBox(height: 10),
+                  Semantics(
+                    liveRegion: true,
+                    label: '오류: $_asyncError',
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        _asyncError!,
+                        style: TextStyle(color: scheme.error),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _descriptionController,
-            maxLines: 2,
-            maxLength: 10000,
-            decoration: const InputDecoration(labelText: '설명 (선택)'),
-            validator: (value) => (value?.length ?? 0) > 10000
-                ? '설명은 10,000자 이하로 입력해 주세요.'
-                : null,
-          ),
-        ],
+        ),
       ),
-    ),
-    actions: <Widget>[
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('취소'),
-      ),
-      FilledButton(
-        onPressed: () {
-          if (!(_formKey.currentState?.validate() ?? false)) return;
-          Navigator.pop(context, (
-            _nameController.text,
-            _descriptionController.text,
-          ));
-        },
-        child: const Text('만들기'),
-      ),
-    ],
-  );
+      actions: <Widget>[
+        TextButton(
+          onPressed: _isSubmitting ? null : () => Navigator.pop(context),
+          child: const Text('취소'),
+        ),
+        FilledButton(
+          onPressed: _isSubmitting ? null : _submit,
+          child: _isSubmitting
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('만들기'),
+        ),
+      ],
+    );
+  }
 }
 
 class _JoinGroupDialog extends StatefulWidget {
@@ -309,6 +386,10 @@ class _JoinGroupDialogState extends State<_JoinGroupDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    // Let the title/form yield to a constrained keyboard viewport while the
+    // actions remain fixed and reachable.
+    scrollable: true,
+    insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
     title: const Text('초대 코드로 참여'),
     content: Form(
       key: _formKey,

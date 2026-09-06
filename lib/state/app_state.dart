@@ -3,7 +3,7 @@
 
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -134,6 +134,7 @@ class PlannerController extends ChangeNotifier {
   AuthEventType? lastAuthEvent;
   StreamSubscription<AuthRepositoryEvent>? _authSubscription;
   StreamSubscription<List<PlannerEvent>>? _eventSubscription;
+  StreamSubscription<PlannerGroup?>? _groupLifecycleSubscription;
   Future<void> _authEventQueue = Future<void>.value();
   int _authEventGeneration = 0;
   String? _queuedAuthIdentity;
@@ -179,10 +180,23 @@ class PlannerController extends ChangeNotifier {
   // 동안 먼저 시작한 요청이 늦게 도착해 개인 데이터를 되살리지 않게
   // 한다.
   int _plannerRevision = 0;
+  int _plannerSessionGeneration = 0;
   int _operationToken = 0;
+  // Monotonic planner-operation generation used to prevent an older
+  // conflict-reload continuation from overwriting a newer operation's error.
+  // Conflict-owned refreshes preserve this value across their internal
+  // loadGroups/selectGroup sequence; every external operation advances it.
+  int _operationGeneration = 0;
   int _savingOperationToken = 0;
   bool _inviteCodeInFlight = false;
   int _groupOperationToken = 0;
+  final Set<String> _terminalGroupOperations = <String>{};
+  // Leave/archive and a remote lifecycle tombstone are terminal from the
+  // controller's point of view.  Keeping this separate from the in-flight
+  // operation set prevents a stale groups refresh from reintroducing private
+  // data after the mutation has succeeded.  A successful explicit rejoin
+  // clears the tombstone for an ordinary (non-archived) leave.
+  final Set<String> _terminalGroupTombstones = <String>{};
   int _inviteOperation = 0;
   bool _disposed = false;
 
@@ -718,7 +732,10 @@ class PlannerController extends ChangeNotifier {
     return socialAuthUnknownErrorMessage;
   }
 
-  int _beginOperation() => ++_operationToken;
+  int _beginOperation() {
+    _operationGeneration++;
+    return ++_operationToken;
+  }
 
   int _beginAuthOperation({required bool sessionChanging}) {
     // Auth requests use a generation separate from planner revisions. A
@@ -1225,11 +1242,21 @@ class PlannerController extends ChangeNotifier {
     bool invalidateOperation = true,
     bool clearSaving = true,
   }) async {
+    // A full identity/privacy clear starts a new planner session even when a
+    // test double happens to sign back in as the same user id.  Terminal
+    // group mutations capture this generation and must not alter a newer
+    // session when their old network Future finally settles.
+    _plannerSessionGeneration++;
     _plannerRevision++;
-    if (invalidateOperation) _operationToken++;
+    if (invalidateOperation) {
+      _operationToken++;
+      _operationGeneration++;
+    }
     if (clearSaving) _savingOperationToken = 0;
     _inviteOperation++;
     _groupOperationToken = 0;
+    _terminalGroupOperations.clear();
+    _terminalGroupTombstones.clear();
     _inviteCodeInFlight = false;
     user = null;
     groups = const <PlannerGroup>[];
@@ -1247,11 +1274,18 @@ class PlannerController extends ChangeNotifier {
     notifyListeners();
     final subscription = _eventSubscription;
     _eventSubscription = null;
+    final lifecycleSubscription = _groupLifecycleSubscription;
+    _groupLifecycleSubscription = null;
     try {
       await subscription?.cancel();
     } catch (_) {
       // Clearing private state is more important than a failing stream
       // cancellation. The stream callback is still guarded by the revision.
+    }
+    try {
+      await lifecycleSubscription?.cancel();
+    } catch (_) {
+      // Lifecycle cancellation is best effort during a privacy clear.
     }
   }
 
@@ -1260,7 +1294,8 @@ class PlannerController extends ChangeNotifier {
         members.isNotEmpty ||
         invites.isNotEmpty ||
         events.isNotEmpty ||
-        _eventSubscription != null;
+        _eventSubscription != null ||
+        _groupLifecycleSubscription != null;
   }
 
   Future<void> _clearGroupScopedData() async {
@@ -1275,12 +1310,63 @@ class PlannerController extends ChangeNotifier {
     isOffline = false;
     final subscription = _eventSubscription;
     _eventSubscription = null;
+    final lifecycleSubscription = _groupLifecycleSubscription;
+    _groupLifecycleSubscription = null;
     try {
       await subscription?.cancel();
     } catch (_) {
       // A stale subscription cannot keep private data alive. Its callbacks
       // are guarded by the operation revision.
     }
+    try {
+      await lifecycleSubscription?.cancel();
+    } catch (_) {
+      // A lifecycle stream cannot block selected-group invalidation.
+    }
+  }
+
+  /// Atomically removes [groupId] from the visible list and invalidates every
+  /// selected-group callback before waiting for stream cancellation. The
+  /// returned Future only represents best-effort subscription cleanup; callers
+  /// must not restore the removed group when a subsequent reload fails.
+  Future<void> _invalidateGroupScopedData({String? removeGroupId}) {
+    // A stale leave/archive completion can arrive after the user has already
+    // switched to another group.  Remove the terminal row from the list but
+    // do not wipe the new group's selection/cache in that case.  A selected
+    // group (or a no-id privacy clear) still takes the full invalidation path.
+    final clearSelected =
+        removeGroupId == null || selectedGroup?.id == removeGroupId;
+    if (removeGroupId != null) {
+      _terminalGroupTombstones.add(removeGroupId);
+      groups = List<PlannerGroup>.unmodifiable(
+        groups.where((group) => group.id != removeGroupId),
+      );
+    }
+    if (!clearSelected) {
+      notifyListeners();
+      return Future<void>.value();
+    }
+    _plannerRevision++;
+    _operationToken++;
+    _operationGeneration++;
+    _inviteOperation++;
+    _inviteCodeInFlight = false;
+    selectedGroup = null;
+    members = const <PlannerMember>[];
+    invites = const <InviteCode>[];
+    events = const <PlannerEvent>[];
+    selectedMemberId = null;
+    showAllMembers = true;
+    isOffline = false;
+    final eventSubscription = _eventSubscription;
+    _eventSubscription = null;
+    final lifecycleSubscription = _groupLifecycleSubscription;
+    _groupLifecycleSubscription = null;
+    notifyListeners();
+    return Future.wait<void>(<Future<void>>[
+      if (eventSubscription != null) eventSubscription.cancel(),
+      if (lifecycleSubscription != null) lifecycleSubscription.cancel(),
+    ]).then<void>((_) {}, onError: (Object error, StackTrace stack) {});
   }
 
   bool _isCurrentPlannerContext(
@@ -1301,19 +1387,127 @@ class PlannerController extends ChangeNotifier {
     return true;
   }
 
-  Future<void> loadGroups() async {
+  Stream<List<PlannerEvent>> _watchEventsForUser(
+    String userId,
+    String groupId,
+  ) {
+    final capability = _repository;
+    if (capability is UserScopedEventReadCapability) {
+      return (capability as UserScopedEventReadCapability).watchEventsForUser(
+        userId,
+        groupId,
+      );
+    }
+    // Legacy fakes predate requester-scoped streams. Keep their unscoped read
+    // path available only in non-release test/dev builds; production adapters
+    // implement UserScopedEventReadCapability and never reach this fallback.
+    if (!kReleaseMode) return _repository.watchEvents(groupId);
+    return Stream<List<PlannerEvent>>.error(
+      const ScheduleCapabilityException('사용자 범위 일정 스트림을 지원하지 않는 저장소입니다.'),
+    );
+  }
+
+  Future<void> _handleGroupLifecycleUpdate({
+    required int operation,
+    required String userId,
+    required String groupId,
+    required PlannerGroup? incoming,
+  }) async {
+    if (!_isCurrentPlannerContext(
+      operation,
+      userId: userId,
+      groupId: groupId,
+    )) {
+      return;
+    }
+    // Repository lifecycle reads are requester/group scoped, but keep the
+    // controller closed against a malformed adapter response as well. A
+    // cross-group row must never replace the currently selected group.
+    if (incoming != null && incoming.id != groupId) return;
+    if (incoming == null || incoming.isArchived) {
+      // Do not await before clearing state: a remote archive/null event must
+      // immediately hide the group's private data and invalidate callbacks.
+      final clear = _invalidateGroupScopedData(removeGroupId: groupId);
+      await clear;
+      return;
+    }
+    _replaceGroup(incoming);
+    // A lifecycle update can also carry an owner/version change (for example
+    // after a remote transfer).  Refresh the member and invite projections so
+    // edit/transfer affordances do not keep stale roles while preserving the
+    // just-updated group object immediately above.
+    unawaited(
+      _refreshGroupScopedMetadata(
+        operation: operation,
+        userId: userId,
+        groupId: groupId,
+      ),
+    );
+  }
+
+  Future<void> _refreshGroupScopedMetadata({
+    required int operation,
+    required String userId,
+    required String groupId,
+  }) async {
+    List<PlannerMember>? nextMembers;
+    List<InviteCode>? nextInvites;
+    try {
+      nextMembers = await _repository.membersForGroup(groupId);
+    } catch (_) {
+      // Realtime group metadata remains usable even if an auxiliary profile
+      // projection is temporarily unavailable.
+    }
+    if (!_isCurrentPlannerContext(
+      operation,
+      userId: userId,
+      groupId: groupId,
+    )) {
+      return;
+    }
+    try {
+      nextInvites = await _repository.inviteCodesForGroup(groupId);
+    } catch (_) {
+      // Invite rows are owner-scoped and may legitimately be unavailable to a
+      // member; retain the last visible value in that case.
+    }
+    if (!_isCurrentPlannerContext(
+      operation,
+      userId: userId,
+      groupId: groupId,
+    )) {
+      return;
+    }
+    if (nextMembers != null) {
+      members = List<PlannerMember>.unmodifiable(nextMembers);
+    }
+    if (nextInvites != null) {
+      invites = List<InviteCode>.unmodifiable(nextInvites);
+    }
+    notifyListeners();
+  }
+
+  Future<void> loadGroups({bool preserveOperationGeneration = false}) async {
     final current = user;
     if (current == null) return;
+    if (!preserveOperationGeneration) _operationGeneration++;
+    final operationGeneration = _operationGeneration;
     _operationToken++;
     final operation = ++_plannerRevision;
     final selectedGroupId = selectedGroup?.id;
     isLoading = true;
-    errorMessage = null;
+    // A conflict-owned refresh must not erase a newer operation's diagnostic
+    // while its network read is pending.  The caller will restore the
+    // original conflict message only when this generation still owns the
+    // context after the refresh completes.
+    if (!preserveOperationGeneration) errorMessage = null;
     notifyListeners();
     try {
       // Stage the response until the user and selection that initiated this
       // request are still current. A sign-out or a newer refresh must win.
-      final fetchedGroups = await _repository.groupsForUser(current.id);
+      final fetchedGroups = (await _repository.groupsForUser(current.id))
+          .where((group) => !_terminalGroupTombstones.contains(group.id))
+          .toList(growable: false);
       if (!_isCurrentPlannerContext(
         operation,
         userId: current.id,
@@ -1331,6 +1525,7 @@ class PlannerController extends ChangeNotifier {
         if (refreshedSelection == null) {
           // Membership was removed (or the group was deleted). Do not leave
           // the old selection or its events/members reachable.
+          _terminalGroupTombstones.add(selectedGroupId);
           await _clearGroupScopedData();
           if (_plannerRevision == operation && user?.id == current.id) {
             isLoading = false;
@@ -1338,7 +1533,11 @@ class PlannerController extends ChangeNotifier {
           }
           return;
         }
-        await selectGroup(refreshedSelection.id);
+        await selectGroup(
+          refreshedSelection.id,
+          preserveOperationGeneration: preserveOperationGeneration,
+          preservedOperationGeneration: operationGeneration,
+        );
       } else if (_hasGroupScopedData) {
         // This is defensive for callers that cleared selectedGroup directly;
         // a refresh with no selection must not retain an orphaned cache.
@@ -1346,10 +1545,12 @@ class PlannerController extends ChangeNotifier {
       }
     } catch (error) {
       if (_isCurrentPlannerContext(
-        operation,
-        userId: current.id,
-        selectedGroupId: selectedGroupId,
-      )) {
+            operation,
+            userId: current.id,
+            selectedGroupId: selectedGroupId,
+          ) &&
+          (!preserveOperationGeneration ||
+              _operationGeneration == operationGeneration)) {
         isOffline = true;
         errorMessage = _friendlyError(error);
       }
@@ -1365,16 +1566,37 @@ class PlannerController extends ChangeNotifier {
     }
   }
 
-  Future<void> selectGroup(String groupId) async {
-    final group = groups.firstWhere((candidate) => candidate.id == groupId);
+  Future<void> selectGroup(
+    String groupId, {
+    bool preserveOperationGeneration = false,
+    int? preservedOperationGeneration,
+  }) async {
+    if (_terminalGroupOperations.contains(groupId)) {
+      // A leave/archive completion has already invalidated this group. Ignore
+      // stale taps and late list callbacks until the terminal operation ends.
+      return;
+    }
+    final group = groups
+        .where((candidate) => candidate.id == groupId)
+        .firstOrNull;
+    // A terminal mutation or a remote archive may remove the row between a
+    // list tap and this callback.  Treat that stale selection as a no-op
+    // instead of throwing from `firstWhere` and reviving cached data.
+    if (group == null) return;
     final userId = user?.id;
     if (userId == null) return;
+    if (!preserveOperationGeneration) _operationGeneration++;
+    final selectionGeneration = preserveOperationGeneration
+        ? (preservedOperationGeneration ?? _operationGeneration)
+        : _operationGeneration;
     _operationToken++;
     final operation = ++_plannerRevision;
     _inviteOperation++;
     _inviteCodeInFlight = false;
     final previousSubscription = _eventSubscription;
     _eventSubscription = null;
+    final previousLifecycleSubscription = _groupLifecycleSubscription;
+    _groupLifecycleSubscription = null;
     selectedGroup = group;
     final groupNow = utcToWallTime(DateTime.now().toUtc(), group.timezone);
     selectedDay = dateOnly(groupNow);
@@ -1384,7 +1606,7 @@ class PlannerController extends ChangeNotifier {
     invites = const <InviteCode>[];
     events = const <PlannerEvent>[];
     isLoading = true;
-    errorMessage = null;
+    if (!preserveOperationGeneration) errorMessage = null;
     notifyListeners();
     try {
       try {
@@ -1392,37 +1614,10 @@ class PlannerController extends ChangeNotifier {
       } catch (_) {
         // A cancelled stream cannot be allowed to block the new selection.
       }
-      if (!_isCurrentPlannerContext(
-        operation,
-        userId: userId,
-        groupId: group.id,
-      )) {
-        return;
-      }
-
-      List<PlannerMember> fetchedMembers = const <PlannerMember>[];
-      List<InviteCode> fetchedInvites = const <InviteCode>[];
-      String? metadataError;
       try {
-        fetchedMembers = await _repository.membersForGroup(group.id);
-      } catch (error) {
-        // 프로필/멤버십 조회 실패가 일정 스트림 시작을 막아서는 안 된다.
-        // 실패는 표시하되 일정 데이터를 불러올 수 있다면 일정을 오프라인으로
-        // 표시하지 않는다.
-        metadataError = _friendlyError(error);
-      }
-      if (!_isCurrentPlannerContext(
-        operation,
-        userId: userId,
-        groupId: group.id,
-      )) {
-        return;
-      }
-      try {
-        fetchedInvites = await _repository.inviteCodesForGroup(group.id);
+        await previousLifecycleSubscription?.cancel();
       } catch (_) {
-        // 초대 메타데이터는 소유자 전용이지만 일정 접근은 계속 가능하다.
-        fetchedInvites = const <InviteCode>[];
+        // A stale lifecycle stream cannot block the new selection.
       }
       if (!_isCurrentPlannerContext(
         operation,
@@ -1432,11 +1627,42 @@ class PlannerController extends ChangeNotifier {
         return;
       }
 
+      // Event and lifecycle streams are privacy/availability-critical. Start
+      // both before the auxiliary member/invite reads below: those reads may
+      // be slow or remain pending while a remote archive/deactivation still
+      // needs to clear the selected group immediately.
       StreamSubscription<List<PlannerEvent>>? nextSubscription;
+      StreamSubscription<PlannerGroup?>? nextLifecycleSubscription;
       var streamFailed = false;
+      String? metadataError;
+
+      Future<void> cancelPendingSubscriptions() async {
+        final eventSubscription = nextSubscription;
+        final lifecycleSubscription = nextLifecycleSubscription;
+        nextSubscription = null;
+        nextLifecycleSubscription = null;
+        if (identical(_eventSubscription, eventSubscription)) {
+          _eventSubscription = null;
+        }
+        if (identical(_groupLifecycleSubscription, lifecycleSubscription)) {
+          _groupLifecycleSubscription = null;
+        }
+        for (final subscription in <StreamSubscription<dynamic>>[
+          ?eventSubscription,
+          ?lifecycleSubscription,
+        ]) {
+          try {
+            await subscription.cancel();
+          } catch (_) {
+            // A stale stream cannot block a newer selection or a privacy
+            // clear. Its callbacks remain guarded by the operation context.
+          }
+        }
+      }
+
       try {
-        final stream = _repository.watchEvents(group.id);
-        nextSubscription = stream.listen(
+        final stream = _watchEventsForUser(userId, group.id);
+        final subscription = stream.listen(
           (incoming) {
             if (!_isCurrentPlannerContext(
               operation,
@@ -1462,8 +1688,94 @@ class PlannerController extends ChangeNotifier {
             notifyListeners();
           },
         );
+        nextSubscription = subscription;
+        if (!_isCurrentPlannerContext(
+          operation,
+          userId: userId,
+          groupId: group.id,
+        )) {
+          await cancelPendingSubscriptions();
+          return;
+        }
+        // Publish the subscription before awaiting metadata so a lifecycle
+        // tombstone can cancel it even while either REST read is pending.
+        _eventSubscription = subscription;
       } catch (error) {
         streamFailed = true;
+        metadataError = _friendlyError(error);
+      }
+
+      if (!_isCurrentPlannerContext(
+        operation,
+        userId: userId,
+        groupId: group.id,
+      )) {
+        await cancelPendingSubscriptions();
+        return;
+      }
+
+      if (_repository is GroupLifecycleCapability) {
+        try {
+          final lifecycleStream = (_repository as GroupLifecycleCapability)
+              .watchGroupLifecycle(userId, group.id);
+          final subscription = lifecycleStream.listen(
+            (incoming) {
+              unawaited(
+                _handleGroupLifecycleUpdate(
+                  operation: operation,
+                  userId: userId,
+                  groupId: group.id,
+                  incoming: incoming,
+                ),
+              );
+            },
+            onError: (Object error) {
+              if (!_isCurrentPlannerContext(
+                operation,
+                userId: userId,
+                groupId: group.id,
+              )) {
+                return;
+              }
+              errorMessage = _friendlyError(error);
+              notifyListeners();
+            },
+          );
+          nextLifecycleSubscription = subscription;
+          if (!_isCurrentPlannerContext(
+            operation,
+            userId: userId,
+            groupId: group.id,
+          )) {
+            await cancelPendingSubscriptions();
+            return;
+          }
+          // As with events, publish this before the metadata reads. If the
+          // listener synchronously reports a tombstone, the context check
+          // below prevents a stale subscription from being retained.
+          _groupLifecycleSubscription = subscription;
+        } catch (error) {
+          metadataError ??= _friendlyError(error);
+        }
+      }
+
+      if (!_isCurrentPlannerContext(
+        operation,
+        userId: userId,
+        groupId: group.id,
+      )) {
+        await cancelPendingSubscriptions();
+        return;
+      }
+
+      List<PlannerMember> fetchedMembers = const <PlannerMember>[];
+      List<InviteCode> fetchedInvites = const <InviteCode>[];
+      try {
+        fetchedMembers = await _repository.membersForGroup(group.id);
+      } catch (error) {
+        // 프로필/멤버십 조회 실패가 일정 스트림 시작을 막아서는 안 된다.
+        // 실패는 표시하되 일정 데이터를 불러올 수 있다면 일정을 오프라인으로
+        // 표시하지 않는다.
         metadataError ??= _friendlyError(error);
       }
       if (!_isCurrentPlannerContext(
@@ -1471,21 +1783,47 @@ class PlannerController extends ChangeNotifier {
         userId: userId,
         groupId: group.id,
       )) {
-        await nextSubscription?.cancel();
+        await cancelPendingSubscriptions();
+        return;
+      }
+      try {
+        fetchedInvites = await _repository.inviteCodesForGroup(group.id);
+      } catch (_) {
+        // 초대 메타데이터는 소유자 전용이지만 일정 접근은 계속 가능하다.
+        fetchedInvites = const <InviteCode>[];
+      }
+      if (!_isCurrentPlannerContext(
+        operation,
+        userId: userId,
+        groupId: group.id,
+      )) {
+        await cancelPendingSubscriptions();
         return;
       }
 
       members = List<PlannerMember>.unmodifiable(fetchedMembers);
       invites = List<InviteCode>.unmodifiable(fetchedInvites);
-      errorMessage = metadataError;
-      isOffline = streamFailed;
-      _eventSubscription = nextSubscription;
-    } catch (error) {
-      if (_isCurrentPlannerContext(
+      if (!preserveOperationGeneration ||
+          _operationGeneration == selectionGeneration) {
+        errorMessage = metadataError;
+        isOffline = streamFailed;
+      }
+      if (!_isCurrentPlannerContext(
         operation,
         userId: userId,
         groupId: group.id,
       )) {
+        await cancelPendingSubscriptions();
+        return;
+      }
+    } catch (error) {
+      if (_isCurrentPlannerContext(
+            operation,
+            userId: userId,
+            groupId: group.id,
+          ) &&
+          (!preserveOperationGeneration ||
+              _operationGeneration == selectionGeneration)) {
         isOffline = true;
         errorMessage = _friendlyError(error);
       }
@@ -1501,7 +1839,11 @@ class PlannerController extends ChangeNotifier {
     }
   }
 
-  Future<void> createGroup(String name, String description) async {
+  Future<void> createGroup(
+    String name,
+    String description, {
+    String timezone = defaultPlannerTimezone,
+  }) async {
     final current = user;
     if (current == null) return;
     if (_groupOperationToken != 0) {
@@ -1520,7 +1862,12 @@ class PlannerController extends ChangeNotifier {
     errorMessage = null;
     notifyListeners();
     try {
-      final group = await _repository.createGroup(userId, name, description);
+      final group = await _createGroupWithTimezone(
+        userId,
+        name,
+        description,
+        timezone: timezone,
+      );
       if (!_isOperationCurrent(
         operation,
         userId: userId,
@@ -1543,6 +1890,454 @@ class PlannerController extends ChangeNotifier {
       if (_groupOperationToken == operation) _groupOperationToken = 0;
       _finishSaving(operation);
     }
+  }
+
+  Future<PlannerGroup> _createGroupWithTimezone(
+    String ownerId,
+    String name,
+    String description, {
+    required String timezone,
+  }) {
+    final capability = _repository;
+    // Preserve the old three-positional contract for the historical default
+    // timezone. This also lets legacy test doubles override createGroup
+    // without accidentally bypassing their controlled Future.
+    if (timezone == defaultPlannerTimezone) {
+      return _repository.createGroup(ownerId, name, description);
+    }
+    if (capability is! TimezoneGroupCreationCapability) {
+      return Future<PlannerGroup>.error(
+        const ScheduleCapabilityException('선택한 시간대를 지원하지 않는 저장소입니다.'),
+      );
+    }
+    return (capability as TimezoneGroupCreationCapability)
+        .createGroupWithTimezone(
+          ownerId,
+          name,
+          description,
+          timezone: timezone,
+        );
+  }
+
+  /// Updates the selected group's mutable metadata with optimistic locking.
+  /// The form owns its draft values, so a conflict refreshes the latest group
+  /// while leaving those values untouched in the screen.
+  Future<PlannerGroup> updateGroup({
+    required String name,
+    required String description,
+    String? timezone,
+    int? expectedVersion,
+  }) async {
+    final current = user;
+    final group = selectedGroup;
+    if (current == null || group == null) {
+      const error = ScheduleValidationException('그룹을 편집하려면 로그인하고 그룹을 선택해 주세요.');
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    return _updateGroupCore(
+      actorId: current.id,
+      group: group,
+      name: name,
+      description: description,
+      timezone: timezone ?? group.timezone,
+      expectedVersion: expectedVersion ?? group.version,
+    );
+  }
+
+  /// Positional alias for screens that use the shorter edit terminology.
+  Future<PlannerGroup> editGroup(
+    String name,
+    String description, {
+    String? timezone,
+    int? expectedVersion,
+  }) => updateGroup(
+    name: name,
+    description: description,
+    timezone: timezone,
+    expectedVersion: expectedVersion,
+  );
+
+  /// Explicit-version alias useful to preflight/edit flows. The actor is
+  /// always the authenticated controller user; a caller-supplied actor is
+  /// accepted only as a compatibility check and is never trusted for auth.
+  Future<PlannerGroup> updateGroupIfVersion({
+    required String groupId,
+    required String name,
+    required String description,
+    required String timezone,
+    required int expectedVersion,
+    String? actorId,
+  }) async {
+    final current = user;
+    final group = selectedGroup;
+    if (current == null || group == null || group.id != groupId) {
+      const error = ScheduleValidationException('그룹을 편집하려면 로그인하고 그룹을 선택해 주세요.');
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    if (actorId != null && actorId != current.id) {
+      const error = ScheduleConflictException('현재 로그인한 사용자만 그룹을 편집할 수 있습니다.');
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    return _updateGroupCore(
+      actorId: current.id,
+      group: group,
+      name: name,
+      description: description,
+      timezone: timezone,
+      expectedVersion: expectedVersion,
+    );
+  }
+
+  Future<PlannerGroup> _updateGroupCore({
+    required String actorId,
+    required PlannerGroup group,
+    required String name,
+    required String description,
+    required String timezone,
+    required int expectedVersion,
+  }) async {
+    if (_groupOperationToken != 0) {
+      const error = ScheduleConflictException(
+        '그룹 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요.',
+      );
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    final operation = _beginOperation();
+    _groupOperationToken = operation;
+    final revision = _plannerRevision;
+    final groupId = group.id;
+    _startSaving(operation);
+    errorMessage = null;
+    notifyListeners();
+    try {
+      final updated = await _repository.updateGroupIfVersion(
+        actorId: actorId,
+        groupId: groupId,
+        name: name,
+        description: description,
+        timezone: timezone,
+        expectedVersion: expectedVersion,
+      );
+      if (!_isOperationCurrent(
+        operation,
+        userId: actorId,
+        groupId: groupId,
+        plannerRevision: revision,
+      )) {
+        return updated;
+      }
+      _replaceGroup(updated);
+      // A metadata edit also refreshes members, invites and realtime events;
+      // this ensures a changed timezone immediately updates calendar walls.
+      await loadGroups();
+      return updated;
+    } catch (error) {
+      final friendly = _friendlyError(error);
+      if (_isOperationCurrent(
+        operation,
+        userId: actorId,
+        groupId: groupId,
+        plannerRevision: revision,
+      )) {
+        errorMessage = friendly;
+        notifyListeners();
+        if (_isConflictError(error)) {
+          await _reloadGroupsAfterGroupConflict(
+            actorId,
+            groupId,
+            friendly,
+            revision: revision,
+          );
+        }
+      }
+      rethrow;
+    } finally {
+      if (_groupOperationToken == operation) _groupOperationToken = 0;
+      _finishSaving(operation);
+    }
+  }
+
+  /// Leaves the selected group as the authenticated member. The repository
+  /// rejects owners; ownership transfer is intentionally a separate action.
+  Future<void> leaveGroup() async {
+    final current = user;
+    final group = selectedGroup;
+    if (current == null || group == null) {
+      const error = ScheduleValidationException('그룹을 나가려면 로그인하고 그룹을 선택해 주세요.');
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    if (_groupOperationToken != 0) {
+      const error = ScheduleConflictException(
+        '그룹 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요.',
+      );
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    final operation = _beginOperation();
+    _groupOperationToken = operation;
+    final revision = _plannerRevision;
+    final sessionGeneration = _plannerSessionGeneration;
+    final userId = current.id;
+    final groupId = group.id;
+    _terminalGroupOperations.add(groupId);
+    _startSaving(operation);
+    errorMessage = null;
+    notifyListeners();
+    try {
+      await _repository.leaveGroup(actorId: userId, groupId: groupId);
+      if (_disposed ||
+          user?.id != userId ||
+          _plannerSessionGeneration != sessionGeneration) {
+        return;
+      }
+      // Invalidate synchronously before any reload/cancellation await. A
+      // failing network reload must not resurrect the left group.  This is
+      // intentionally performed even when another selection/auth operation
+      // made the original leave callback stale; the terminal mutation still
+      // has to remove its group row from the visible list.
+      final clear = _invalidateGroupScopedData(removeGroupId: groupId);
+      await clear;
+      if (!_disposed && user?.id == userId && selectedGroup == null) {
+        await loadGroups();
+      }
+    } catch (error) {
+      if (_isOperationCurrent(
+        operation,
+        userId: userId,
+        groupId: groupId,
+        plannerRevision: revision,
+      )) {
+        errorMessage = _friendlyError(error);
+        notifyListeners();
+      }
+      _terminalGroupOperations.remove(groupId);
+      rethrow;
+    } finally {
+      if (_groupOperationToken == operation) _groupOperationToken = 0;
+      _terminalGroupOperations.remove(groupId);
+      _finishSaving(operation);
+    }
+  }
+
+  Future<void> leaveSelectedGroup() => leaveGroup();
+
+  /// Transfers ownership to an active member and reloads all group-scoped
+  /// data so member roles and invite visibility are immediately consistent.
+  Future<PlannerGroup> transferGroupOwnership({
+    required String newOwnerId,
+    int? expectedVersion,
+  }) async {
+    final current = user;
+    final group = selectedGroup;
+    if (current == null || group == null) {
+      const error = ScheduleValidationException(
+        '소유권을 이전하려면 로그인하고 그룹을 선택해 주세요.',
+      );
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    if (_groupOperationToken != 0) {
+      const error = ScheduleConflictException(
+        '그룹 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요.',
+      );
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    final operation = _beginOperation();
+    _groupOperationToken = operation;
+    final revision = _plannerRevision;
+    final userId = current.id;
+    final groupId = group.id;
+    final version = expectedVersion ?? group.version;
+    _startSaving(operation);
+    errorMessage = null;
+    notifyListeners();
+    try {
+      final updated = await _repository.transferGroupOwnership(
+        actorId: userId,
+        groupId: groupId,
+        newOwnerId: newOwnerId,
+        expectedVersion: version,
+      );
+      if (!_isOperationCurrent(
+        operation,
+        userId: userId,
+        groupId: groupId,
+        plannerRevision: revision,
+      )) {
+        return updated;
+      }
+      _replaceGroup(updated);
+      await loadGroups();
+      return updated;
+    } catch (error) {
+      final friendly = _friendlyError(error);
+      if (_isOperationCurrent(
+        operation,
+        userId: userId,
+        groupId: groupId,
+        plannerRevision: revision,
+      )) {
+        errorMessage = friendly;
+        notifyListeners();
+        if (_isConflictError(error)) {
+          await _reloadGroupsAfterGroupConflict(
+            userId,
+            groupId,
+            friendly,
+            revision: revision,
+          );
+        }
+      }
+      rethrow;
+    } finally {
+      if (_groupOperationToken == operation) _groupOperationToken = 0;
+      _finishSaving(operation);
+    }
+  }
+
+  Future<PlannerGroup> transferOwnership({
+    required String newOwnerId,
+    int? expectedVersion,
+  }) => transferGroupOwnership(
+    newOwnerId: newOwnerId,
+    expectedVersion: expectedVersion,
+  );
+
+  /// Archives the selected group. The operation is terminal on the
+  /// repository; local subscriptions and caches are cleared before the group
+  /// list is refreshed.
+  Future<void> archiveGroup({int? expectedVersion}) async {
+    final current = user;
+    final group = selectedGroup;
+    if (current == null || group == null) {
+      const error = ScheduleValidationException('그룹을 보관하려면 로그인하고 그룹을 선택해 주세요.');
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    if (_groupOperationToken != 0) {
+      const error = ScheduleConflictException(
+        '그룹 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요.',
+      );
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
+    final operation = _beginOperation();
+    _groupOperationToken = operation;
+    final revision = _plannerRevision;
+    final sessionGeneration = _plannerSessionGeneration;
+    final userId = current.id;
+    final groupId = group.id;
+    final version = expectedVersion ?? group.version;
+    _terminalGroupOperations.add(groupId);
+    _startSaving(operation);
+    errorMessage = null;
+    notifyListeners();
+    try {
+      final archivedVersion = await _repository.archiveGroupIfVersion(
+        actorId: userId,
+        groupId: groupId,
+        expectedVersion: version,
+      );
+      if (_disposed ||
+          user?.id != userId ||
+          _plannerSessionGeneration != sessionGeneration) {
+        return;
+      }
+      if (archivedVersion <= version) {
+        throw const ScheduleConflictException('그룹 보관 버전을 확인할 수 없습니다.');
+      }
+      // Remove the archived group before awaiting stream cancellation or a
+      // network reload. This terminal invalidation survives reload failures
+      // and is applied even if a concurrent group switch made this callback
+      // stale.
+      final clear = _invalidateGroupScopedData(removeGroupId: groupId);
+      await clear;
+      if (!_disposed && user?.id == userId && selectedGroup == null) {
+        await loadGroups();
+      }
+    } catch (error) {
+      final friendly = _friendlyError(error);
+      if (_isOperationCurrent(
+        operation,
+        userId: userId,
+        groupId: groupId,
+        plannerRevision: revision,
+      )) {
+        errorMessage = friendly;
+        notifyListeners();
+        if (_isConflictError(error)) {
+          await _reloadGroupsAfterGroupConflict(
+            userId,
+            groupId,
+            friendly,
+            revision: revision,
+          );
+        }
+      }
+      _terminalGroupOperations.remove(groupId);
+      rethrow;
+    } finally {
+      if (_groupOperationToken == operation) _groupOperationToken = 0;
+      _terminalGroupOperations.remove(groupId);
+      _finishSaving(operation);
+    }
+  }
+
+  Future<void> archiveSelectedGroup({int? expectedVersion}) =>
+      archiveGroup(expectedVersion: expectedVersion);
+
+  void _replaceGroup(PlannerGroup updated) {
+    final index = groups.indexWhere((group) => group.id == updated.id);
+    if (index < 0) {
+      groups = <PlannerGroup>[...groups, updated];
+    } else {
+      final next = <PlannerGroup>[...groups];
+      next[index] = updated;
+      groups = List<PlannerGroup>.unmodifiable(next);
+    }
+    selectedGroup = updated;
+    notifyListeners();
+  }
+
+  Future<void> _reloadGroupsAfterGroupConflict(
+    String userId,
+    String groupId,
+    String message, {
+    required int revision,
+  }) async {
+    if (!_isCurrentPlannerContext(revision, userId: userId, groupId: groupId)) {
+      return;
+    }
+    // Keep a generation marker around the conflict-owned refresh. The
+    // refresh itself advances planner revision/tokens, but it must not make a
+    // later operation look stale to this continuation. Any external/newer
+    // operation advances the marker and wins the error state.
+    final reloadGeneration = _operationGeneration;
+    await loadGroups(preserveOperationGeneration: true);
+    if (_disposed ||
+        user?.id != userId ||
+        selectedGroup?.id != groupId ||
+        _operationGeneration != reloadGeneration) {
+      return;
+    }
+    errorMessage = message;
+    notifyListeners();
   }
 
   Future<void> joinGroup(String inviteCode) async {
@@ -1572,6 +2367,10 @@ class PlannerController extends ChangeNotifier {
       )) {
         return;
       }
+      // Joining is the only explicit path that can make a previously left
+      // group visible again.  Do this only after the operation/context guard
+      // so a stale join completion cannot resurrect another session's data.
+      _terminalGroupTombstones.remove(group.id);
       if (!groups.any((candidate) => candidate.id == group.id)) {
         groups = <PlannerGroup>[...groups, group];
       }
@@ -1637,7 +2436,7 @@ class PlannerController extends ChangeNotifier {
             groupId: group.id,
             plannerRevision: revision,
           )) {
-        invites = <InviteCode>[invite, ...invites];
+        _upsertInvite(invite);
       }
       return invite;
     } catch (error) {
@@ -1661,8 +2460,10 @@ class PlannerController extends ChangeNotifier {
 
   bool get isGroupOwner {
     final current = user;
+    final group = selectedGroup;
     return current != null &&
-        members.any((member) => member.id == current.id && member.isOwner);
+        ((group?.ownerId == current.id) ||
+            members.any((member) => member.id == current.id && member.isOwner));
   }
 
   Future<void> deactivateMember(PlannerMember member) async {
@@ -1878,6 +2679,21 @@ class PlannerController extends ChangeNotifier {
     events = next;
   }
 
+  /// Merge an invite returned by a mutation with an in-flight lifecycle
+  /// metadata refresh. Both responses can contain the same row id; replacing
+  /// by id keeps the visible projection canonical instead of prepending a
+  /// duplicate when the mutation Future settles last.
+  void _upsertInvite(InviteCode incoming) {
+    final index = invites.indexWhere((invite) => invite.id == incoming.id);
+    if (index == -1) {
+      invites = <InviteCode>[incoming, ...invites];
+      return;
+    }
+    final next = <InviteCode>[...invites];
+    next[index] = incoming;
+    invites = List<InviteCode>.unmodifiable(next);
+  }
+
   Future<void> deleteEvent(PlannerEvent event) async {
     final current = user;
     if (current == null) return;
@@ -1955,6 +2771,11 @@ class PlannerController extends ChangeNotifier {
     return '잠시 후 다시 시도해 주세요.';
   }
 
+  bool _isConflictError(Object error) {
+    return error is ScheduleConflictException ||
+        (error is PostgrestException && error.code == '40001');
+  }
+
   @override
   void notifyListeners() {
     // 경로/공급자가 해제된 뒤에도 인증과 실시간 콜백이 완료될 수 있다.
@@ -1984,6 +2805,8 @@ class PlannerController extends ChangeNotifier {
     _oauthTimeoutTimer = null;
     unawaited(_authSubscription?.cancel());
     unawaited(_eventSubscription?.cancel());
+    unawaited(_groupLifecycleSubscription?.cancel());
+    _groupLifecycleSubscription = null;
     super.dispose();
   }
 }

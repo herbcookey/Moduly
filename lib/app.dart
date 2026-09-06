@@ -136,7 +136,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       final requiresGroup =
           location.startsWith('/home') ||
           location.startsWith('/members') ||
-          location.startsWith('/settings') ||
           location.startsWith('/event');
       if (controller.isAuthenticated &&
           controller.selectedGroup == null &&

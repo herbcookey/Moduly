@@ -68,11 +68,20 @@ const _routeUser = PlannerUser(
 );
 
 Future<GoRouter> _pumpRoutedApp(WidgetTester tester, _RouterAuth auth) async {
+  final schedule = LocalScheduleRepository(
+    seedMembers: <PlannerMember>[
+      PlannerMember(
+        id: _routeUser.id,
+        name: _routeUser.displayName ?? 'Route User',
+        email: _routeUser.email,
+      ),
+    ],
+  );
   await tester.pumpWidget(
     ProviderScope(
       overrides: <Override>[
         authRepositoryProvider.overrideWithValue(auth),
-        scheduleRepositoryProvider.overrideWithValue(LocalScheduleRepository()),
+        scheduleRepositoryProvider.overrideWithValue(schedule),
       ],
       child: const ModulyApp(),
     ),
