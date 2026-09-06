@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 시작 스플래시 화면을 맞춤 설정하려면 이 파일을 수정한다. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/moduly_icon_background" />
+
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/moduly_splash" />
+    </item>
+</layer-list>

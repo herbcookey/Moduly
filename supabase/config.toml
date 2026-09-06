@@ -1,0 +1,57 @@
+# Moduly용 Supabase CLI 개발 프로필이다.
+# 이 파일은 설정만 담으며 Docker/Supabase를 설치하거나 시작하지 않는다.
+
+project_id = "moduly-dev"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = [
+  "http://localhost:3000/**",
+  "http://127.0.0.1:3000/**",
+  "moduly://auth-callback"
+]
+# 커밋된 로컬 프로필에서는 Google, Apple, Kakao를 비활성화한다.
+# 개발자의 로컬 Supabase 비밀 환경이나 호스팅 Dashboard에서 활성화하고
+# 설정하며, 클라이언트 비밀 값은 이 파일에 절대 커밋하지 않는다.
+
+[auth.external.google]
+enabled = false
+
+[auth.external.apple]
+enabled = false
+
+[auth.external.kakao]
+enabled = false
+
+[functions.delete-account]
+# 최신 sb_* 공개/비밀 키는 플랫폼의 기본 JWT 게이트와 호환되지 않는다.
+# 핸들러가 서버 전용 Auth 관리자 API를 호출하기 전에 필수 auth.getUser(token)
+# 검사를 직접 수행한다.
+verify_jwt = false
+
+[analytics]
+enabled = false

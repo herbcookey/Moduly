@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 개발에는 INTERNET 권한이 필요하다. 특히 Flutter 도구가 실행 중인 앱과
+         통신해 중단점 설정과 핫 리로드 등을 제공하는 데 사용한다.
+    -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+</manifest>

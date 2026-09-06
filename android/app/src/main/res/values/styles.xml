@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- OS 다크 모드가 꺼져 있을 때 프로세스 시작 중 Android Window에 적용할 테마다. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <!-- Activity에 스플래시 화면을 표시한다. Flutter 엔진이 첫 프레임을
+             그리면 자동으로 제거된다. -->
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+    <!-- 프로세스가 시작되자마자 Android Window에 적용할 테마다. Flutter UI가
+         초기화되는 동안과 실행 중 Flutter UI 뒤의 Window 색상을 결정한다.
+
+         이 테마는 Flutter Android 임베딩 V2부터 사용한다. -->
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">?android:colorBackground</item>
+    </style>
+</resources>

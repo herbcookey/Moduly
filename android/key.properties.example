@@ -1,0 +1,7 @@
+# 이 파일을 android/key.properties로 복사하고(git에서는 복사본을 무시함),
+# 모든 자리표시자를 릴리스 업로드 키의 인증 정보로 바꾼다.
+# 절대 경로가 아니면 storeFile은 android/를 기준으로 해석된다.
+storeFile=upload-keystore.jks
+storePassword=REPLACE_WITH_KEYSTORE_PASSWORD
+keyAlias=moduly
+keyPassword=REPLACE_WITH_KEY_PASSWORD

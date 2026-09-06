@@ -1,0 +1,7 @@
+// 로컬 Xcode 서명을 위해 이 파일을 Signing.xcconfig로 복사한다.
+// Signing.xcconfig는 무시되므로 개발자나 CI 계정에만 해당하는 팀 ID와
+// 프로비저닝 정보를 소스 관리에 넣지 않는다.
+//
+// DEVELOPMENT_TEAM = YOUR_APPLE_TEAM_ID
+// CODE_SIGN_STYLE = Automatic
+// PROVISIONING_PROFILE_SPECIFIER =

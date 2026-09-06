@@ -1,0 +1,72 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+**/Signing.xcconfig
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+**/build/
+**/coverage/
+**/.gradle/
+**/.kotlin/
+**/.cxx/
+**/Flutter/ephemeral/
+**/Generated.xcconfig
+
+# Local Supabase and Flutter configuration (keep the checked-in template).
+**/.env
+**/.env.*
+!.env.example
+**/supabase/.temp/
+**/supabase/.branches/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Release signing material and certificates (never commit passwords or private keys).
+**/key.properties
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.pfx
+**/*.pem
+**/*.key
+**/*.mobileprovision
+**/*.cer
+**/*.crt
+**/*.der
