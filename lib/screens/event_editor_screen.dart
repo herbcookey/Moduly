@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -30,6 +32,14 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   bool _bodyDraftDirty = false;
   bool _memberSelectionDirty = false;
   bool _eventUnavailable = false;
+  PlannerEvent? _deepLinkedEvent;
+  String? _deepLinkedUserId;
+  String? _deepLinkedGroupId;
+  bool _eventLookupStarted = false;
+  bool _eventLookupInFlight = false;
+  bool _eventLookupSettled = false;
+  bool _eventLookupRetryable = false;
+  String? _eventLookupError;
 
   final _colors = const <int>[
     0xff477b76,
@@ -44,7 +54,113 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     for (final event in controller.events) {
       if (event.id == widget.eventId && !event.isDeleted) return event;
     }
+    final cached = _deepLinkedEvent;
+    if (cached != null &&
+        cached.id == widget.eventId &&
+        !cached.isDeleted &&
+        cached.groupId == controller.selectedGroup?.id &&
+        _deepLinkedUserId == controller.user?.id &&
+        _deepLinkedGroupId == controller.selectedGroup?.id) {
+      return cached;
+    }
     return null;
+  }
+
+  void _maybeLoadDeepLinkedEvent(PlannerController controller) {
+    final eventId = widget.eventId;
+    final current = controller.user;
+    final group = controller.selectedGroup;
+    if (eventId == null ||
+        _eventLookupStarted ||
+        current == null ||
+        group == null ||
+        !controller.supportsEventById ||
+        controller.isLoading) {
+      return;
+    }
+    _eventLookupStarted = true;
+    _eventLookupInFlight = true;
+    _eventLookupSettled = false;
+    _eventLookupRetryable = false;
+    _eventLookupError = null;
+    final userId = current.id;
+    final groupId = group.id;
+    unawaited(
+      controller
+          .loadEventById(eventId)
+          .then((event) {
+            if (!mounted) return;
+            final latest = ref.read(plannerControllerProvider);
+            if (latest.user?.id != userId ||
+                latest.selectedGroup?.id != groupId) {
+              // The result belongs to a stale identity/group.  Clear the local
+              // detail cache and let the next build retry under the new context.
+              setState(() {
+                _deepLinkedEvent = null;
+                _deepLinkedUserId = null;
+                _deepLinkedGroupId = null;
+                _eventLookupStarted = false;
+                _eventLookupInFlight = false;
+                _eventLookupSettled = false;
+                _eventLookupRetryable = false;
+                _eventLookupError = null;
+              });
+              return;
+            }
+            setState(() {
+              _deepLinkedEvent = event;
+              _deepLinkedUserId = userId;
+              _deepLinkedGroupId = groupId;
+              _eventLookupInFlight = false;
+              _eventLookupSettled = true;
+              _eventLookupRetryable = false;
+              _eventLookupError = null;
+            });
+          })
+          .catchError((Object error) {
+            if (!mounted) return;
+            final latest = ref.read(plannerControllerProvider);
+            if (latest.user?.id != userId ||
+                latest.selectedGroup?.id != groupId) {
+              setState(() {
+                _deepLinkedEvent = null;
+                _deepLinkedUserId = null;
+                _deepLinkedGroupId = null;
+                _eventLookupStarted = false;
+                _eventLookupInFlight = false;
+                _eventLookupSettled = false;
+                _eventLookupRetryable = false;
+                _eventLookupError = null;
+              });
+              return;
+            }
+            final authoritative = latest.isAuthoritativeAccessDenial(error);
+            setState(() {
+              _deepLinkedEvent = null;
+              _deepLinkedUserId = null;
+              _deepLinkedGroupId = null;
+              _eventLookupInFlight = false;
+              _eventLookupSettled = true;
+              _eventLookupRetryable = !authoritative;
+              _eventLookupError = authoritative
+                  ? null
+                  : '일정을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.';
+            });
+          }),
+    );
+  }
+
+  void _retryDeepLinkedEvent() {
+    if (!mounted) return;
+    setState(() {
+      _eventUnavailable = false;
+      _eventLookupStarted = false;
+      _eventLookupInFlight = false;
+      _eventLookupSettled = false;
+      _eventLookupRetryable = false;
+      _eventLookupError = null;
+    });
+    _maybeLoadDeepLinkedEvent(ref.read(plannerControllerProvider));
   }
 
   void _applyEventToBody(PlannerEvent event) {
@@ -171,6 +287,22 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       _bodyDraftDirty = false;
       _memberSelectionDirty = false;
     }
+  }
+
+  @override
+  void didUpdateWidget(covariant EventEditorScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.eventId == widget.eventId) return;
+    _deepLinkedEvent = null;
+    _deepLinkedUserId = null;
+    _deepLinkedGroupId = null;
+    _eventLookupStarted = false;
+    _eventLookupInFlight = false;
+    _eventLookupSettled = false;
+    _eventLookupRetryable = false;
+    _eventLookupError = null;
+    _eventUnavailable = false;
+    _didSeed = false;
   }
 
   @override
@@ -383,11 +515,71 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   Widget build(BuildContext context) {
     final controller = ref.watch(plannerControllerProvider);
     final existing = _existing(controller);
-    if (widget.eventId != null && existing == null && !controller.isLoading) {
+    if (widget.eventId != null && existing == null) {
+      _maybeLoadDeepLinkedEvent(controller);
+    }
+    final lookupReady =
+        widget.eventId != null &&
+        controller.user != null &&
+        controller.selectedGroup != null &&
+        controller.supportsEventById;
+    final lookupPending =
+        widget.eventId != null &&
+        existing == null &&
+        !_eventLookupSettled &&
+        (controller.isLoading || _eventLookupInFlight || lookupReady);
+    if (widget.eventId != null && existing == null && _eventLookupRetryable) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('일정 보기')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Semantics(
+                  liveRegion: true,
+                  label: _eventLookupError ?? '일정을 불러오지 못했어요.',
+                  child: Text(
+                    _eventLookupError ?? '일정을 불러오지 못했어요.',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Semantics(
+                  button: true,
+                  label: '다시 시도',
+                  child: FilledButton(
+                    onPressed: _retryDeepLinkedEvent,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 48),
+                    ),
+                    child: const Text('다시 시도'),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Semantics(
+                  button: true,
+                  label: '돌아가기',
+                  child: OutlinedButton(
+                    onPressed: _closeUnavailable,
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 48),
+                    ),
+                    child: const Text('돌아가기'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    if (widget.eventId != null && existing == null && !lookupPending) {
       _eventUnavailable = true;
     }
     if (_eventUnavailable || (widget.eventId != null && existing == null)) {
-      final loading = !_eventUnavailable && controller.isLoading;
+      final loading = !_eventUnavailable && lookupPending;
       return Scaffold(
         appBar: AppBar(title: const Text('일정 보기')),
         body: Center(

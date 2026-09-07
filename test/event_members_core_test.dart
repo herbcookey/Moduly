@@ -207,7 +207,7 @@ void main() {
           'demo-group',
           _draft(memberIds: <String>['member-extra', _demo.id, 'member-extra']),
         );
-        expect(explicit.memberIds, <String>['member-extra', _demo.id]);
+        expect(explicit.memberIds, <String>[_demo.id, 'member-extra']);
       },
     );
 
@@ -388,7 +388,7 @@ void main() {
           'group-1',
           _draft(memberIds: const <String>['member-1', 'owner-1']),
         );
-        expect(created.memberIds, <String>['owner-1', 'member-1']);
+        expect(created.memberIds, <String>['member-1', 'owner-1']);
         final createRequest = transport.requests.single;
         final createBody =
             jsonDecode((createRequest as http.Request).body) as Map;
@@ -406,7 +406,7 @@ void main() {
           actorId: 'owner-1',
         );
         expect(updated.version, 3);
-        expect(updated.memberIds, <String>['owner-1', 'member-1']);
+        expect(updated.memberIds, <String>['member-1', 'owner-1']);
         expect(
           transport.requests.last.url.path,
           contains('/rpc/update_event_with_members_if_version'),

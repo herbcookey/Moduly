@@ -148,6 +148,40 @@ abstract interface class GroupLifecycleCapability {
   Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId);
 }
 
+/// Optional capability for bounded calendar reads.  Keeping this additive to
+/// [ScheduleRepository] preserves compatibility with older test doubles and
+/// adapters while allowing production controllers to fail closed instead of
+/// downloading every event in a group.
+abstract interface class BoundedEventRangeReadCapability {
+  /// Reads one keyset page for an authenticated group member.  [userId] is a
+  /// local context hint only; remote adapters derive identity from auth.uid
+  /// and must never serialize it as an actor/query parameter.
+  Future<EventRangePage> eventsForRange({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    EventRangeCursor? cursor,
+    int limit = 100,
+    String? participantId,
+  });
+
+  /// Emits a change-only signal for parent `events` rows.  The stream must
+  /// not perform an initial full event read; callers fetch the current range
+  /// through [eventsForRange] and use this stream only for invalidation.
+  Stream<void> watchEventInvalidations(String userId, String groupId);
+}
+
+/// Optional point lookup used by deep links/details routes. It is separate
+/// from bounded pages so an event outside the current calendar range can be
+/// opened without polluting that range's pagination projection.
+abstract interface class EventByIdReadCapability {
+  Future<PlannerEvent?> eventById({
+    required String userId,
+    required String groupId,
+    required String eventId,
+  });
+}
+
 /// Optional capability for repositories that can atomically replace the
 /// participant rows belonging to an existing event.  The base repository
 /// deliberately does not require this method so older adapters and tests keep
@@ -174,6 +208,13 @@ class ScheduleConflictException implements Exception {
   String toString() => message;
 }
 
+/// A structured authorization/lifecycle denial.  State uses this marker to
+/// clear a cached private range after an authoritative access loss, while
+/// preserving last-good rows for unrelated transient transport failures.
+class ScheduleAuthorizationException extends ScheduleConflictException {
+  const ScheduleAuthorizationException(super.message);
+}
+
 /// Raised when a repository implementation is intentionally unable to expose
 /// a mutating capability. This is distinct from a successful no-op and keeps
 /// fakes/configuration-blocked adapters honest.
@@ -191,6 +232,18 @@ class ScheduleValidationException implements Exception {
   String toString() => message;
 }
 
+/// Lifecycle state for one Supabase invalidation channel. Capturing this
+/// object in callbacks lets a failed/retired channel be removed without ever
+/// clearing or tearing down a newer channel that has replaced it.
+class _EventInvalidationChannelState {
+  _EventInvalidationChannelState(this.channel);
+
+  final RealtimeChannel channel;
+  bool closing = false;
+  bool failureHandled = false;
+  bool subscribedHandled = false;
+}
+
 /// 메모리 기반 미리보기 저장소다. Supabase URL과 공개 키가 없거나 초기화가
 /// 실패해 설정 화면에 오류가 표시될 때만 선택되므로, 설정된 백엔드를
 /// 실수로 가리지 않는다.
@@ -200,10 +253,28 @@ class LocalScheduleRepository
         TimezoneGroupCreationCapability,
         UserScopedEventReadCapability,
         GroupLifecycleCapability,
-        EventMemberAssignmentCapability {
+        EventMemberAssignmentCapability,
+        BoundedEventRangeReadCapability,
+        EventByIdReadCapability {
   LocalScheduleRepository({Iterable<PlannerMember> seedMembers = const []}) {
     _seed(seedMembers);
   }
+
+  /// Subclasses used as legacy test doubles may override a few methods while
+  /// still inheriting this adapter.  Keep their old full-stream controller
+  /// path unless they explicitly opt into bounded reads; the concrete local
+  /// adapter itself remains the production-capable implementation.
+  bool get useBoundedEventRangeReads => runtimeType == LocalScheduleRepository;
+
+  /// Whether mutation responses must echo the exact persisted participant set.
+  /// The concrete local adapter and configuration-blocked adapter are strict;
+  /// old Local subclasses used as partial test doubles predate participant
+  /// responses and may opt into the historical creator-default normalization.
+  /// This compatibility bit is only for omitted-member create responses; an
+  /// explicit participant list still requires [EventMemberAssignmentCapability]
+  /// and is never silently accepted by a legacy adapter.
+  bool get requireExactEventMutationResults =>
+      runtimeType == LocalScheduleRepository;
 
   final Map<String, PlannerGroup> _groups = <String, PlannerGroup>{};
   final Map<String, List<PlannerMember>> _members =
@@ -218,6 +289,8 @@ class LocalScheduleRepository
       <String, Map<String, StreamController<List<PlannerEvent>>>>{};
   final Map<String, Map<String, StreamController<PlannerGroup?>>>
   _groupControllers = <String, Map<String, StreamController<PlannerGroup?>>>{};
+  final Map<String, Set<StreamController<void>>> _rangeInvalidationControllers =
+      <String, Set<StreamController<void>>>{};
   int _counter = 0;
 
   void _seed(Iterable<PlannerMember> seedMembers) {
@@ -378,6 +451,97 @@ class LocalScheduleRepository
   }
 
   @override
+  Future<EventRangePage> eventsForRange({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    EventRangeCursor? cursor,
+    int limit = 100,
+    String? participantId,
+  }) async {
+    _validateBoundedRangeRequest(
+      userId: userId,
+      groupId: groupId,
+      range: range,
+      limit: limit,
+      participantId: participantId,
+    );
+    final normalizedParticipant = participantId?.trim();
+    final candidates = (_events[groupId] ?? const <PlannerEvent>[])
+        .where(
+          (event) =>
+              !event.isDeleted &&
+              eventOverlapsCalendarRange(event, range) &&
+              (normalizedParticipant == null ||
+                  event.memberIds.contains(normalizedParticipant)),
+        )
+        .toList(growable: false);
+    candidates.sort(_compareEventRangeRows);
+
+    final afterCursor = cursor == null
+        ? candidates
+        : candidates
+              .where((event) => _isAfterEventRangeCursor(event, cursor))
+              .toList(growable: false);
+    final hasMore = afterCursor.length > limit;
+    final pageEvents = afterCursor.take(limit).toList(growable: false);
+    final nextCursor = hasMore && pageEvents.isNotEmpty
+        ? EventRangeCursor(
+            startsAtUtc: pageEvents.last.startAt.toUtc(),
+            eventId: pageEvents.last.id,
+          )
+        : null;
+    return EventRangePage(
+      events: pageEvents,
+      nextCursor: nextCursor,
+      hasMore: hasMore,
+    );
+  }
+
+  @override
+  Future<PlannerEvent?> eventById({
+    required String userId,
+    required String groupId,
+    required String eventId,
+  }) async {
+    if (eventId.trim().isEmpty || eventId != eventId.trim()) {
+      throw const ScheduleValidationException('일정 식별자를 확인해 주세요.');
+    }
+    _requireBoundedActiveMember(groupId, userId);
+    final event = (_events[groupId] ?? const <PlannerEvent>[])
+        .where((candidate) => candidate.id == eventId)
+        .firstOrNull;
+    if (event == null || event.isDeleted) return null;
+    if (event.groupId != groupId) return null;
+    return event;
+  }
+
+  @override
+  Stream<void> watchEventInvalidations(String userId, String groupId) {
+    try {
+      _requireActiveMember(groupId, userId);
+    } catch (error, stack) {
+      return Stream<void>.error(error, stack);
+    }
+    late final StreamController<void> controller;
+    controller = StreamController<void>.broadcast(
+      onListen: () {
+        _rangeInvalidationControllers
+            .putIfAbsent(groupId, () => <StreamController<void>>{})
+            .add(controller);
+      },
+      onCancel: () {
+        final controllers = _rangeInvalidationControllers[groupId];
+        controllers?.remove(controller);
+        if (controllers != null && controllers.isEmpty) {
+          _rangeInvalidationControllers.remove(groupId);
+        }
+      },
+    );
+    return controller.stream;
+  }
+
+  @override
   Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId) {
     if (userId.trim().isEmpty) {
       return Stream<PlannerGroup?>.error(
@@ -428,6 +592,65 @@ class LocalScheduleRepository
         entry.value.add(_visibleEventsForUser(entry.key, groupId));
       }
     }
+    for (final controller in List<StreamController<void>>.from(
+      _rangeInvalidationControllers[groupId] ??
+          const <StreamController<void>>{},
+    )) {
+      if (!controller.isClosed) controller.add(null);
+    }
+  }
+
+  void _validateBoundedRangeRequest({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    required int limit,
+    String? participantId,
+  }) {
+    _requireBoundedActiveMember(groupId, userId);
+    if (limit < 1 || limit > 200) {
+      throw const ScheduleValidationException('일정 페이지 크기를 확인해 주세요.');
+    }
+    validateIanaTimezone(range.viewTimezone);
+    final localStart = utcToWallTimePrecise(range.startUtc, range.viewTimezone);
+    final localEnd = utcToWallTimePrecise(range.endUtc, range.viewTimezone);
+    bool isMidnight(DateTime value) =>
+        value.hour == 0 &&
+        value.minute == 0 &&
+        value.second == 0 &&
+        value.millisecond == 0 &&
+        value.microsecond == 0;
+    if (!isMidnight(localStart) || !isMidnight(localEnd)) {
+      throw const ScheduleValidationException('일정 범위는 현지 자정 경계여야 합니다.');
+    }
+    final span = calendarDateSpan(
+      range.startUtc,
+      range.endUtc,
+      range.viewTimezone,
+    );
+    if (span < 1 || span > 366) {
+      throw const ScheduleValidationException('일정 범위는 366일 이내여야 합니다.');
+    }
+    if (participantId != null) {
+      final normalized = participantId.trim();
+      if (normalized.isEmpty || !_isActiveMember(groupId, normalized)) {
+        throw const ScheduleAuthorizationException('일정 멤버는 이 그룹의 활성 멤버여야 합니다.');
+      }
+    }
+  }
+
+  static int _compareEventRangeRows(PlannerEvent left, PlannerEvent right) {
+    final byStart = left.startAt.toUtc().compareTo(right.startAt.toUtc());
+    return byStart != 0 ? byStart : left.id.compareTo(right.id);
+  }
+
+  static bool _isAfterEventRangeCursor(
+    PlannerEvent event,
+    EventRangeCursor cursor,
+  ) {
+    final byStart = event.startAt.toUtc().compareTo(cursor.startsAtUtc);
+    return byStart > 0 ||
+        (byStart == 0 && event.id.compareTo(cursor.eventId) > 0);
   }
 
   void _emitGroupLifecycle(String groupId) {
@@ -1244,13 +1467,7 @@ class LocalScheduleRepository
       throw const ScheduleConflictException('보관된 그룹에서는 멤버를 변경할 수 없습니다.');
     }
     final normalized = <String>[];
-    final seen = <String>{};
-    for (final raw in memberIds) {
-      final id = raw.trim();
-      if (id.isEmpty) {
-        throw const ScheduleValidationException('일정 멤버를 확인해 주세요.');
-      }
-      if (!seen.add(id)) continue;
+    for (final id in canonicalEventMemberIds(memberIds)) {
       if (!_isActiveMember(groupId, id)) {
         throw const ScheduleConflictException('일정 멤버는 이 그룹의 활성 멤버여야 합니다.');
       }
@@ -1263,6 +1480,7 @@ class LocalScheduleRepository
       }
       normalized.add(creator);
     }
+    normalized.sort();
     return List<String>.unmodifiable(normalized);
   }
 
@@ -1296,6 +1514,18 @@ class LocalScheduleRepository
     }
     if (userId.trim().isEmpty || !_isActiveMember(groupId, userId)) {
       throw const ScheduleConflictException('활성 멤버만 그룹 일정을 변경할 수 있습니다.');
+    }
+  }
+
+  void _requireBoundedActiveMember(String groupId, String userId) {
+    try {
+      _requireActiveMember(groupId, userId);
+    } on ScheduleAuthorizationException {
+      rethrow;
+    } on ScheduleConflictException {
+      throw const ScheduleAuthorizationException('그룹을 사용할 수 없습니다.');
+    } on StateError {
+      throw const ScheduleAuthorizationException('그룹을 사용할 수 없습니다.');
     }
   }
 
@@ -1335,6 +1565,12 @@ class LocalScheduleRepository
 class ConfigurationBlockedScheduleRepository extends LocalScheduleRepository {
   ConfigurationBlockedScheduleRepository(this.message) : super();
 
+  @override
+  bool get useBoundedEventRangeReads => true;
+
+  @override
+  bool get requireExactEventMutationResults => true;
+
   final String message;
 
   RuntimeConfigurationException get _error =>
@@ -1357,6 +1593,27 @@ class ConfigurationBlockedScheduleRepository extends LocalScheduleRepository {
     String userId,
     String groupId,
   ) => Stream<List<PlannerEvent>>.error(_error);
+
+  @override
+  Future<EventRangePage> eventsForRange({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    EventRangeCursor? cursor,
+    int limit = 100,
+    String? participantId,
+  }) => Future<EventRangePage>.error(_error);
+
+  @override
+  Future<PlannerEvent?> eventById({
+    required String userId,
+    required String groupId,
+    required String eventId,
+  }) => Future<PlannerEvent?>.error(_error);
+
+  @override
+  Stream<void> watchEventInvalidations(String userId, String groupId) =>
+      Stream<void>.error(_error);
 
   @override
   Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId) =>
@@ -1479,7 +1736,9 @@ class SupabaseScheduleRepository
         TimezoneGroupCreationCapability,
         UserScopedEventReadCapability,
         GroupLifecycleCapability,
-        EventMemberAssignmentCapability {
+        EventMemberAssignmentCapability,
+        BoundedEventRangeReadCapability,
+        EventByIdReadCapability {
   /// [lifecyclePollInterval] is deliberately bounded to a conservative
   /// default for production (15 seconds).  Tests may inject a shorter clock
   /// interval when exercising the authoritative recheck path; the app uses
@@ -1499,6 +1758,7 @@ class SupabaseScheduleRepository
   }
   final SupabaseClient _client;
   final Duration _lifecyclePollInterval;
+  int _rangeInvalidationChannelCounter = 0;
 
   @override
   Future<List<PlannerGroup>> groupsForUser(String userId) async {
@@ -1558,6 +1818,299 @@ class SupabaseScheduleRepository
     return _watchEventsWithMembers(groupId);
   }
 
+  /// Parent event stream seam used by the legacy member-merge path. Keeping
+  /// this as an overridable method lets deterministic tests feed realtime rows
+  /// without a live websocket; production callers use the Supabase stream.
+  Stream<List<Map<String, dynamic>>> eventRowsStream(String groupId) {
+    return _client
+        .from('events')
+        .stream(primaryKey: const <String>['id'])
+        .eq('group_id', groupId);
+  }
+
+  @override
+  Future<EventRangePage> eventsForRange({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    EventRangeCursor? cursor,
+    int limit = 100,
+    String? participantId,
+  }) async {
+    if (userId.trim().isEmpty || groupId.trim().isEmpty) {
+      throw const ScheduleValidationException('로그인 세션과 그룹을 확인해 주세요.');
+    }
+    _validateRemoteRangeShape(range, limit);
+    final normalizedParticipant = participantId?.trim();
+    if (participantId != null && normalizedParticipant!.isEmpty) {
+      throw const ScheduleValidationException('일정 멤버를 확인해 주세요.');
+    }
+    if (cursor?.occurrenceKey.isNotEmpty == true) {
+      throw const ScheduleValidationException('지원하지 않는 페이지 커서 버전입니다.');
+    }
+    final result = await _client.rpc<dynamic>(
+      'events_for_range',
+      params: <String, dynamic>{
+        'p_group_id': groupId,
+        'p_range_start': range.startUtc.toIso8601String(),
+        'p_range_end': range.endUtc.toIso8601String(),
+        'p_view_timezone': range.viewTimezone,
+        'p_limit': limit,
+        'p_cursor': cursor?.encode(),
+        'p_participant_id': normalizedParticipant,
+      },
+    );
+    return _eventRangePageFromRpcResult(
+      result,
+      expectedGroupId: groupId,
+      range: range,
+      cursor: cursor,
+      limit: limit,
+      participantId: normalizedParticipant,
+    );
+  }
+
+  @override
+  Future<PlannerEvent?> eventById({
+    required String userId,
+    required String groupId,
+    required String eventId,
+  }) async {
+    if (userId.trim().isEmpty ||
+        groupId.trim().isEmpty ||
+        eventId.trim().isEmpty ||
+        eventId != eventId.trim()) {
+      throw const ScheduleValidationException('로그인 세션과 일정을 확인해 주세요.');
+    }
+    final usableGroup = await _readUsableGroup(userId, groupId);
+    if (usableGroup == null) {
+      throw const ScheduleAuthorizationException('그룹을 사용할 수 없습니다.');
+    }
+    final raw = await _client
+        .from('events')
+        .select(
+          'id,group_id,created_by,title,description,starts_at,ends_at,timezone,is_all_day,all_day_start,all_day_end,version,deleted_at,created_at,updated_at,color_value',
+        )
+        .eq('id', eventId)
+        .eq('group_id', groupId)
+        .maybeSingle();
+    if (raw == null) return null;
+    final row = Map<String, dynamic>.from(raw);
+    if (row['id'] != eventId || row['group_id'] != groupId) {
+      throw const ScheduleConflictException('일정 응답을 확인할 수 없습니다.');
+    }
+    if (row['deleted_at'] != null) return null;
+    final memberRows = await _readEventMemberRows(<String>[eventId]);
+    final memberIds = memberRows[eventId];
+    if (memberIds == null) {
+      throw const ScheduleConflictException('일정 멤버 응답을 확인할 수 없습니다.');
+    }
+    final complete = <String, dynamic>{...row, 'member_ids': memberIds};
+    if (!_hasCompleteEventFields(complete)) {
+      throw const ScheduleConflictException('일정 응답을 확인할 수 없습니다.');
+    }
+    return _eventFromRow(complete, memberIds: memberIds);
+  }
+
+  @override
+  Stream<void> watchEventInvalidations(String userId, String groupId) {
+    if (userId.trim().isEmpty || groupId.trim().isEmpty) {
+      return Stream<void>.error(
+        const ScheduleValidationException('로그인 세션과 그룹을 확인해 주세요.'),
+      );
+    }
+    late final StreamController<void> controller;
+    _EventInvalidationChannelState? active;
+    Timer? reconnectTimer;
+    Timer? recoveryTimer;
+    var cancelled = false;
+    var reconnectScheduled = false;
+    var reconnectInFlight = false;
+    var hasSubscribed = false;
+    var currentChannelSubscribed = false;
+    var channelRemovalInFlight = 0;
+    late Future<void> Function() subscribeChannel;
+
+    Future<void> removeChannel(RealtimeChannel? candidate) async {
+      if (candidate == null) return;
+      channelRemovalInFlight += 1;
+      try {
+        await _client.removeChannel(candidate);
+      } catch (_) {
+        // Best-effort cleanup; the next generation remains guarded by the
+        // cancelled/reconnect flags below.
+      } finally {
+        channelRemovalInFlight -= 1;
+      }
+    }
+
+    void scheduleReconnect() {
+      if (cancelled ||
+          controller.isClosed ||
+          reconnectScheduled ||
+          reconnectInFlight ||
+          channelRemovalInFlight > 0) {
+        return;
+      }
+      reconnectScheduled = true;
+      reconnectTimer?.cancel();
+      reconnectTimer = Timer(const Duration(seconds: 1), () {
+        reconnectTimer = null;
+        reconnectScheduled = false;
+        unawaited(subscribeChannel());
+      });
+    }
+
+    Future<void> retireFailedChannel(
+      _EventInvalidationChannelState state,
+    ) async {
+      // Mark before awaiting removal: SDKs may report `closed` synchronously
+      // as part of removeChannel, and that callback must not schedule a second
+      // reconnect or remove a newer channel.
+      state.closing = true;
+      await removeChannel(state.channel);
+      if (!cancelled && !controller.isClosed && active == null) {
+        scheduleReconnect();
+      }
+    }
+
+    _EventInvalidationChannelState buildChannel() {
+      late final _EventInvalidationChannelState state;
+      final next = _client
+          .channel(
+            'events-range-invalidation-${++_rangeInvalidationChannelCounter}',
+          )
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'events',
+            filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'group_id',
+              value: groupId,
+            ),
+            // Parent event version changes are the Feature5 participant
+            // signal. Keep the invalidation payload change-only and do
+            // not expose descriptions or participant rows.
+            select: const <String>['id', 'group_id', 'version', 'deleted_at'],
+            callback: (_) {
+              // A retired SDK channel can still deliver one queued payload
+              // (or even rejoin itself).  Only the currently registered
+              // generation may invalidate the controller.
+              if (!cancelled &&
+                  !controller.isClosed &&
+                  !state.closing &&
+                  identical(active, state)) {
+                controller.add(null);
+              }
+            },
+          );
+      state = _EventInvalidationChannelState(next);
+      return state;
+    }
+
+    subscribeChannel = () async {
+      if (cancelled || controller.isClosed || reconnectInFlight) return;
+      reconnectInFlight = true;
+      final previous = active;
+      active = null;
+      if (previous != null) {
+        previous.closing = true;
+        await removeChannel(previous.channel);
+      }
+      if (cancelled || controller.isClosed) {
+        reconnectInFlight = false;
+        return;
+      }
+      try {
+        final state = buildChannel();
+        active = state;
+        currentChannelSubscribed = false;
+        state.channel.subscribe((status, [error]) {
+          if (cancelled ||
+              controller.isClosed ||
+              state.closing ||
+              !identical(active, state)) {
+            return;
+          }
+          if (status == RealtimeSubscribeStatus.subscribed) {
+            if (state.subscribedHandled) return;
+            state.subscribedHandled = true;
+            // A successful re-subscription is itself a bounded recovery
+            // signal: an event mutation could have happened while the old
+            // socket was down, so force the controller to refetch once.
+            if (hasSubscribed) controller.add(null);
+            hasSubscribed = true;
+            currentChannelSubscribed = true;
+            return;
+          }
+          if (status == RealtimeSubscribeStatus.channelError ||
+              status == RealtimeSubscribeStatus.timedOut ||
+              status == RealtimeSubscribeStatus.closed) {
+            if (state.failureHandled) return;
+            state.failureHandled = true;
+            // Capture identity before clearing active: a callback from an old
+            // channel must never reset the subscription state of a newer one.
+            final isCurrent = identical(active, state);
+            if (isCurrent) {
+              active = null;
+              currentChannelSubscribed = false;
+            }
+            controller.addError(error ?? StateError('일정 실시간 연결을 확인해 주세요.'));
+            unawaited(retireFailedChannel(state));
+          }
+        });
+      } catch (error, stack) {
+        if (!cancelled && !controller.isClosed) {
+          controller.addError(error, stack);
+          final state = active;
+          if (state != null) {
+            state.failureHandled = true;
+            state.closing = true;
+            active = null;
+            unawaited(retireFailedChannel(state));
+          } else {
+            scheduleReconnect();
+          }
+        }
+      } finally {
+        reconnectInFlight = false;
+      }
+    };
+
+    Future<void> cancel() async {
+      cancelled = true;
+      reconnectTimer?.cancel();
+      reconnectTimer = null;
+      recoveryTimer?.cancel();
+      recoveryTimer = null;
+      final current = active;
+      active = null;
+      currentChannelSubscribed = false;
+      if (current != null) {
+        current.closing = true;
+        await removeChannel(current.channel);
+      }
+    }
+
+    controller = StreamController<void>.broadcast(
+      onListen: () {
+        if (cancelled) return;
+        // One active channel at a time.  A bounded retry plus the periodic
+        // fallback repairs a dropped/missed socket without an unbounded
+        // reconnect loop or duplicate subscriptions.
+        recoveryTimer ??= Timer.periodic(const Duration(seconds: 15), (_) {
+          if (!cancelled && (active == null || !currentChannelSubscribed)) {
+            scheduleReconnect();
+          }
+        });
+        unawaited(subscribeChannel());
+      },
+      onCancel: cancel,
+    );
+    return controller.stream;
+  }
+
   /// Rebuilds an immutable event snapshot whenever the parent events stream
   /// changes.  Participant rows intentionally have no realtime publication;
   /// every participant mutation bumps the parent event version, which is the
@@ -1585,9 +2138,16 @@ class SupabaseScheduleRepository
           if (id is! String || id.trim().isEmpty || !seen.add(id)) {
             throw StateError('일정 응답을 확인할 수 없습니다.');
           }
+          // The parent realtime projection normally omits event_members.  It
+          // must still carry a complete, strictly validated event payload;
+          // otherwise _eventFromRow could normalize malformed timestamps or
+          // inverted ranges before the child assignment read completes.
+          if (!_hasCompleteEventFields(row, requireMemberIds: false)) {
+            throw StateError('일정 응답을 확인할 수 없습니다.');
+          }
           ids.add(id);
         }
-        final memberRows = await _readEventMemberRows(ids);
+        final memberRows = await eventMemberRows(ids);
         if (cancelled || token != generation) return;
         final merged = <PlannerEvent>[];
         for (final row in eventRows) {
@@ -1598,7 +2158,11 @@ class SupabaseScheduleRepository
           if (parsed == null) {
             throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
           }
-          final event = _eventFromRow(row, memberIds: parsed);
+          final complete = <String, dynamic>{...row, 'member_ids': parsed};
+          if (!_hasCompleteEventFields(complete)) {
+            throw StateError('일정 응답을 확인할 수 없습니다.');
+          }
+          final event = _eventFromRow(complete, memberIds: parsed);
           if (!event.isDeleted) merged.add(event);
         }
         latestGood = List<PlannerEvent>.unmodifiable(merged);
@@ -1641,18 +2205,14 @@ class SupabaseScheduleRepository
     controller = StreamController<List<PlannerEvent>>(
       onListen: () {
         try {
-          subscription = _client
-              .from('events')
-              .stream(primaryKey: const <String>['id'])
-              .eq('group_id', groupId)
-              .listen(
-                (rows) => unawaited(refresh(rows)),
-                onError: (Object error, StackTrace stack) {
-                  if (!cancelled && !controller.isClosed) {
-                    controller.addError(error, stack);
-                  }
-                },
-              );
+          subscription = eventRowsStream(groupId).listen(
+            (rows) => unawaited(refresh(rows)),
+            onError: (Object error, StackTrace stack) {
+              if (!cancelled && !controller.isClosed) {
+                controller.addError(error, stack);
+              }
+            },
+          );
         } catch (error, stack) {
           if (!cancelled && !controller.isClosed) {
             controller.addError(error, stack);
@@ -1673,7 +2233,8 @@ class SupabaseScheduleRepository
     final dynamic rawRows = await _client
         .from('event_members')
         .select('event_id,user_id')
-        .inFilter('event_id', ids);
+        .inFilter('event_id', ids)
+        .order('user_id', ascending: true);
     if (rawRows is! List) {
       throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
     }
@@ -1696,11 +2257,21 @@ class SupabaseScheduleRepository
       }
       result[normalizedEventId]!.add(normalizedUserId);
     }
+    for (final idsForEvent in result.values) {
+      idsForEvent.sort();
+    }
     return <String, List<String>>{
       for (final entry in result.entries)
         entry.key: List<String>.unmodifiable(entry.value),
     };
   }
+
+  /// Child assignment read seam paired with [eventRowsStream].  The concrete
+  /// implementation performs one ordered batch query; test doubles may
+  /// override it to exercise realtime merge and malformed-row handling.
+  Future<Map<String, List<String>>> eventMemberRows(
+    Iterable<String> eventIds,
+  ) => _readEventMemberRows(eventIds);
 
   @override
   Stream<List<PlannerEvent>> watchEventsForUser(String userId, String groupId) {
@@ -2540,8 +3111,11 @@ class SupabaseScheduleRepository
     return _eventFromRow(row, memberIds: memberIds);
   }
 
-  static bool _hasCompleteEventFields(Map<String, dynamic> row) {
-    const required = <String>[
+  static bool _hasCompleteEventFields(
+    Map<String, dynamic> row, {
+    bool requireMemberIds = true,
+  }) {
+    final required = <String>[
       'id',
       'group_id',
       'created_by',
@@ -2558,8 +3132,8 @@ class SupabaseScheduleRepository
       'created_at',
       'updated_at',
       'color_value',
-      'member_ids',
     ];
+    if (requireMemberIds) required.add('member_ids');
     if (!required.every(row.containsKey)) return false;
     return row['id'] is String &&
         (row['id'] as String).trim().isNotEmpty &&
@@ -2573,22 +3147,46 @@ class SupabaseScheduleRepository
         row['ends_at'] != null &&
         row['timezone'] is String &&
         (row['timezone'] as String).trim().isNotEmpty &&
+        isValidIanaTimezone(row['timezone'] as String) &&
         row['is_all_day'] is bool &&
         _strictVersionValue(row['version']) != null &&
         _dateTimeValue(row['created_at']) != null &&
         _dateTimeValue(row['updated_at']) != null &&
+        (row['deleted_at'] == null ||
+            _dateTimeValue(row['deleted_at']) != null) &&
         _strictColorValue(row['color_value']) != null &&
         _validEventDates(row) &&
-        _strictMemberIds(row['member_ids']) != null;
+        (!requireMemberIds || _strictMemberIds(row['member_ids']) != null);
   }
 
   static bool _validEventDates(Map<String, dynamic> row) {
     final allDay = row['is_all_day'] == true;
     final start = row['all_day_start'];
     final end = row['all_day_end'];
-    if (start != null && _parseDate(start) == null) return false;
-    if (end != null && _parseDate(end) == null) return false;
-    return !allDay || (start != null && end != null);
+    final startsAt = _strictDateTimeValue(row['starts_at']);
+    final endsAt = _strictDateTimeValue(row['ends_at']);
+    if (startsAt == null || endsAt == null || !endsAt.isAfter(startsAt)) {
+      return false;
+    }
+    final startDate = _parseDate(start);
+    final endDate = _parseDate(end);
+    if (!allDay) {
+      // Timed rows must not carry stale date-only metadata from a previous
+      // all-day edit.  Treating that mixture as valid would let malformed RPC
+      // payloads leak into the editor with a different temporal meaning.
+      return start == null && end == null;
+    }
+    if (startDate == null || endDate == null || !endDate.isAfter(startDate)) {
+      return false;
+    }
+    final timezone = row['timezone'];
+    if (timezone is! String || !isValidIanaTimezone(timezone)) return false;
+    // All-day timestamps are the exact UTC instants for the local date
+    // boundaries.  This catches rows that claim a date range but contain an
+    // arbitrary timed instant (including a non-midnight offset).
+    final canonicalStart = wallTimeToUtc(startDate, timezone);
+    final canonicalEnd = wallTimeToUtc(endDate, timezone);
+    return startsAt == canonicalStart && endsAt == canonicalEnd;
   }
 
   static List<String>? _strictMemberIds(Object? value) {
@@ -2601,6 +3199,7 @@ class SupabaseScheduleRepository
       if (id.isEmpty || !seen.add(id)) return null;
       result.add(id);
     }
+    result.sort();
     return List<String>.unmodifiable(result);
   }
 
@@ -2646,6 +3245,126 @@ class SupabaseScheduleRepository
         row['timezone'] is String &&
         (row['timezone'] as String).isNotEmpty &&
         _intValueNullable(row['version']) != null;
+  }
+
+  static void _validateRemoteRangeShape(EventRange range, int limit) {
+    if (limit < 1 || limit > 200) {
+      throw const ScheduleValidationException('일정 페이지 크기를 확인해 주세요.');
+    }
+    validateIanaTimezone(range.viewTimezone);
+    final localStart = utcToWallTimePrecise(range.startUtc, range.viewTimezone);
+    final localEnd = utcToWallTimePrecise(range.endUtc, range.viewTimezone);
+    bool isMidnight(DateTime value) =>
+        value.hour == 0 &&
+        value.minute == 0 &&
+        value.second == 0 &&
+        value.millisecond == 0 &&
+        value.microsecond == 0;
+    if (!isMidnight(localStart) || !isMidnight(localEnd)) {
+      throw const ScheduleValidationException('일정 범위는 현지 자정 경계여야 합니다.');
+    }
+    final span = calendarDateSpan(
+      range.startUtc,
+      range.endUtc,
+      range.viewTimezone,
+    );
+    if (span < 1 || span > 366) {
+      throw const ScheduleValidationException('일정 범위는 366일 이내여야 합니다.');
+    }
+  }
+
+  EventRangePage _eventRangePageFromRpcResult(
+    Object? result, {
+    required String expectedGroupId,
+    required EventRange range,
+    required EventRangeCursor? cursor,
+    required int limit,
+    required String? participantId,
+  }) {
+    try {
+      if (result is! Map || result.keys.any((key) => key is! String)) {
+        throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+      }
+      final envelope = result.cast<String, dynamic>();
+      if (!envelope.containsKey('events') ||
+          !envelope.containsKey('next_cursor') ||
+          !envelope.containsKey('has_more') ||
+          envelope['events'] is! List ||
+          envelope['has_more'] is! bool) {
+        throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+      }
+      final rawEvents = envelope['events'] as List;
+      if (rawEvents.length > limit) {
+        throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+      }
+      final rawNextCursor = envelope['next_cursor'];
+      if (rawNextCursor != null && rawNextCursor is! String) {
+        throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+      }
+      final nextCursor = rawNextCursor == null
+          ? null
+          : EventRangeCursor.decode(rawNextCursor as String);
+      final hasMore = envelope['has_more'] as bool;
+      if (hasMore != (nextCursor != null)) {
+        throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+      }
+      final events = <PlannerEvent>[];
+      final seenIds = <String>{};
+      for (final raw in rawEvents) {
+        if (raw is! Map || raw.keys.any((key) => key is! String)) {
+          throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+        }
+        final row = raw.cast<String, dynamic>();
+        if (!_hasCompleteEventFields(row)) {
+          throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+        }
+        final memberIds = _strictMemberIds(row['member_ids']);
+        if (memberIds == null) {
+          throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+        }
+        final event = _eventFromRow(row, memberIds: memberIds);
+        if (event.groupId != expectedGroupId ||
+            event.isDeleted ||
+            !seenIds.add(event.id) ||
+            !eventOverlapsCalendarRange(event, range) ||
+            (participantId != null &&
+                !event.memberIds.contains(participantId))) {
+          throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+        }
+        if (events.isNotEmpty &&
+            LocalScheduleRepository._compareEventRangeRows(
+                  events.last,
+                  event,
+                ) >=
+                0) {
+          throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+        }
+        if (cursor != null &&
+            !LocalScheduleRepository._isAfterEventRangeCursor(event, cursor)) {
+          throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+        }
+        events.add(event);
+      }
+      if (nextCursor != null) {
+        if (events.isEmpty ||
+            nextCursor.startsAtUtc != events.last.startAt.toUtc() ||
+            nextCursor.eventId != events.last.id ||
+            nextCursor.occurrenceKey.isNotEmpty) {
+          throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+        }
+      }
+      return EventRangePage(
+        events: events,
+        nextCursor: nextCursor,
+        hasMore: hasMore,
+      );
+    } on ScheduleConflictException {
+      rethrow;
+    } on FormatException {
+      throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+    } catch (_) {
+      throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+    }
   }
 
   /// Validates the complete active-group row returned by an optimistic group
@@ -2790,6 +3509,7 @@ class SupabaseScheduleRepository
         }
         ids.add(id);
       }
+      ids.sort();
       return List<String>.unmodifiable(ids);
     }
     // Old event rows had no child projection.  Keep their creator-only
@@ -2801,6 +3521,13 @@ class SupabaseScheduleRepository
 
   static DateTime? _dateTimeValue(Object? value) =>
       value == null ? null : DateTime.tryParse('$value')?.toUtc();
+
+  /// Parses a wire timestamp only when its offset/UTC marker is explicit.
+  /// DateTime.tryParse accepts timezone-less strings in the host's local
+  /// timezone, which would make an RPC response vary by device location.
+  static DateTime? _strictDateTimeValue(Object? value) {
+    return parseStrictExplicitOffsetTimestamp(value);
+  }
 
   static int _intValue(Object? value, int fallback) =>
       value is num ? value.toInt() : int.tryParse('$value') ?? fallback;
@@ -2822,13 +3549,19 @@ class SupabaseScheduleRepository
   }
 
   static DateTime? _parseDate(Object? value) {
-    if (value == null) return null;
-    final parts = '$value'.split('-');
-    if (parts.length != 3) return null;
-    final year = int.tryParse(parts[0]);
-    final month = int.tryParse(parts[1]);
-    final day = int.tryParse(parts[2]);
+    if (value is! String || !RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) {
+      return null;
+    }
+    final year = int.tryParse(value.substring(0, 4));
+    final month = int.tryParse(value.substring(5, 7));
+    final day = int.tryParse(value.substring(8, 10));
     if (year == null || month == null || day == null) return null;
+    final candidate = DateTime.utc(year, month, day);
+    if (candidate.year != year ||
+        candidate.month != month ||
+        candidate.day != day) {
+      return null;
+    }
     return DateTime(year, month, day);
   }
 

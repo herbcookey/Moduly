@@ -144,6 +144,12 @@ class PlannerController extends ChangeNotifier {
 
   PlannerGroup? selectedGroup;
   DateTime selectedDay = DateTime.now();
+  CalendarViewMode calendarView = CalendarViewMode.day;
+  EventRange? selectedEventRange;
+  bool hasMoreEvents = false;
+  bool isLoadingEvents = false;
+  bool isLoadingMoreEvents = false;
+  String? rangeError;
   String? selectedMemberId;
   bool showAllMembers = true;
   bool isLoading = true;
@@ -158,6 +164,7 @@ class PlannerController extends ChangeNotifier {
   AuthEventType? lastAuthEvent;
   StreamSubscription<AuthRepositoryEvent>? _authSubscription;
   StreamSubscription<List<PlannerEvent>>? _eventSubscription;
+  StreamSubscription<void>? _eventInvalidationSubscription;
   StreamSubscription<PlannerGroup?>? _groupLifecycleSubscription;
   Timer? _groupMetadataRefreshTimer;
   _GroupMetadataRefreshRequest? _pendingGroupMetadataRefresh;
@@ -218,6 +225,15 @@ class PlannerController extends ChangeNotifier {
   int _savingOperationToken = 0;
   bool _inviteCodeInFlight = false;
   int _groupOperationToken = 0;
+  EventRangeCursor? _rangeCursor;
+  int _rangeGeneration = 0;
+  bool _rangeRefreshInFlight = false;
+  int? _rangeRefreshOwnerGeneration;
+  bool _rangeLoadMoreInFlight = false;
+  int? _rangeLoadMoreOwnerGeneration;
+  bool _rangeRefreshQueued = false;
+  Timer? _rangeInvalidationTimer;
+  String? _rangeKey;
   final Set<String> _terminalGroupOperations = <String>{};
   // Leave/archive and a remote lifecycle tombstone are terminal from the
   // controller's point of view.  Keeping this separate from the in-flight
@@ -229,6 +245,36 @@ class PlannerController extends ChangeNotifier {
   bool _disposed = false;
 
   bool get isAuthenticated => user != null;
+
+  /// Whether this adapter can perform an authoritative point lookup for a
+  /// detail route. Legacy full-stream test/double adapters intentionally do
+  /// not opt into this path.
+  bool get supportsEventById =>
+      _usesBoundedEventRangeReads && _repository is EventByIdReadCapability;
+
+  bool get _usesBoundedEventRangeReads {
+    final repository = _repository;
+    if (repository is SupabaseScheduleRepository ||
+        repository is ConfigurationBlockedScheduleRepository) {
+      return true;
+    }
+    if (repository is LocalScheduleRepository) {
+      return repository.useBoundedEventRangeReads;
+    }
+    return repository is BoundedEventRangeReadCapability;
+  }
+
+  bool get _requiresExactEventMutationResults {
+    final repository = _repository;
+    if (repository is LocalScheduleRepository) {
+      return repository.requireExactEventMutationResults;
+    }
+    // Any non-local adapter that advertises participant mutation is a
+    // production capability and must echo the exact persisted assignment.
+    // Older non-capability adapters are allowed only the omitted-field legacy
+    // creator fallback below; explicit member lists fail before mutation.
+    return repository is EventMemberAssignmentCapability;
+  }
 
   /// 인증 UI와 경로 보호에서 편하게 사용할 수 있는 별칭이다.
   AuthFlowState get authState => authFlowState;
@@ -244,39 +290,40 @@ class PlannerController extends ChangeNotifier {
       _socialAuthProviderInFlight;
 
   List<PlannerEvent> get visibleEvents {
-    final start = DateTime(
-      selectedDay.year,
-      selectedDay.month,
-      selectedDay.day,
-    );
-    final end = start.add(const Duration(days: 1));
+    final selected = dateOnly(selectedDay);
+    final viewTimezone = selectedGroup?.timezone;
     final filtered = events.where((event) {
-      final overlaps = event.allDay
-          ? () {
-              final eventStartDate = dateOnly(
-                event.allDayStartDate ??
-                    utcToWallTime(event.startAt, event.timezone),
-              );
-              final eventEndDate = dateOnly(
-                event.allDayEndDate ??
-                    utcToWallTime(event.endAt, event.timezone),
-              );
-              return !start.isBefore(eventStartDate) &&
-                  start.isBefore(eventEndDate);
-            }()
-          : () {
-              final eventStart = utcToWallTime(event.startAt, event.timezone);
-              final eventEnd = utcToWallTime(event.endAt, event.timezone);
-              return eventStart.isBefore(end) && eventEnd.isAfter(start);
-            }();
+      final overlaps = viewTimezone == null
+          ? _legacyEventOverlapsSelectedDay(event, selected)
+          : eventOverlapsCalendarDate(event, selected, viewTimezone);
       final memberMatches =
           showAllMembers ||
           selectedMemberId == null ||
           event.memberIds.contains(selectedMemberId);
       return overlaps && memberMatches && !event.isDeleted;
     }).toList();
-    filtered.sort((a, b) => a.startAt.compareTo(b.startAt));
+    filtered.sort((a, b) {
+      final byStart = a.startAt.compareTo(b.startAt);
+      return byStart != 0 ? byStart : a.id.compareTo(b.id);
+    });
     return filtered;
+  }
+
+  bool _legacyEventOverlapsSelectedDay(PlannerEvent event, DateTime selected) {
+    final start = dateOnly(selected);
+    final end = calendarDateAdd(start, 1);
+    if (event.allDay) {
+      final eventStartDate = dateOnly(
+        event.allDayStartDate ?? utcToWallTime(event.startAt, event.timezone),
+      );
+      final eventEndDate = dateOnly(
+        event.allDayEndDate ?? utcToWallTime(event.endAt, event.timezone),
+      );
+      return !start.isBefore(eventStartDate) && start.isBefore(eventEndDate);
+    }
+    final eventStart = utcToWallTime(event.startAt, event.timezone);
+    final eventEnd = utcToWallTime(event.endAt, event.timezone);
+    return eventStart.isBefore(end) && eventEnd.isAfter(start);
   }
 
   Future<void> bootstrap() async {
@@ -1290,6 +1337,8 @@ class PlannerController extends ChangeNotifier {
     user = null;
     groups = const <PlannerGroup>[];
     selectedGroup = null;
+    _resetRangeState();
+    selectedEventRange = null;
     events = const <PlannerEvent>[];
     members = const <PlannerMember>[];
     invites = const <InviteCode>[];
@@ -1303,6 +1352,8 @@ class PlannerController extends ChangeNotifier {
     notifyListeners();
     final subscription = _eventSubscription;
     _eventSubscription = null;
+    final invalidationSubscription = _eventInvalidationSubscription;
+    _eventInvalidationSubscription = null;
     final lifecycleSubscription = _groupLifecycleSubscription;
     _groupLifecycleSubscription = null;
     try {
@@ -1310,6 +1361,11 @@ class PlannerController extends ChangeNotifier {
     } catch (_) {
       // Clearing private state is more important than a failing stream
       // cancellation. The stream callback is still guarded by the revision.
+    }
+    try {
+      await invalidationSubscription?.cancel();
+    } catch (_) {
+      // Invalidation cancellation is best effort during a privacy clear.
     }
     try {
       await lifecycleSubscription?.cancel();
@@ -1324,6 +1380,7 @@ class PlannerController extends ChangeNotifier {
         invites.isNotEmpty ||
         events.isNotEmpty ||
         _eventSubscription != null ||
+        _eventInvalidationSubscription != null ||
         _groupLifecycleSubscription != null;
   }
 
@@ -1331,6 +1388,7 @@ class PlannerController extends ChangeNotifier {
     _inviteOperation++;
     _inviteCodeInFlight = false;
     _cancelGroupMetadataRefresh();
+    _resetRangeState();
     selectedGroup = null;
     members = const <PlannerMember>[];
     invites = const <InviteCode>[];
@@ -1340,6 +1398,8 @@ class PlannerController extends ChangeNotifier {
     isOffline = false;
     final subscription = _eventSubscription;
     _eventSubscription = null;
+    final invalidationSubscription = _eventInvalidationSubscription;
+    _eventInvalidationSubscription = null;
     final lifecycleSubscription = _groupLifecycleSubscription;
     _groupLifecycleSubscription = null;
     try {
@@ -1347,6 +1407,11 @@ class PlannerController extends ChangeNotifier {
     } catch (_) {
       // A stale subscription cannot keep private data alive. Its callbacks
       // are guarded by the operation revision.
+    }
+    try {
+      await invalidationSubscription?.cancel();
+    } catch (_) {
+      // Invalidation cancellation is best effort during a group clear.
     }
     try {
       await lifecycleSubscription?.cancel();
@@ -1382,6 +1447,7 @@ class PlannerController extends ChangeNotifier {
     _inviteOperation++;
     _inviteCodeInFlight = false;
     _cancelGroupMetadataRefresh();
+    _resetRangeState();
     selectedGroup = null;
     members = const <PlannerMember>[];
     invites = const <InviteCode>[];
@@ -1391,11 +1457,14 @@ class PlannerController extends ChangeNotifier {
     isOffline = false;
     final eventSubscription = _eventSubscription;
     _eventSubscription = null;
+    final invalidationSubscription = _eventInvalidationSubscription;
+    _eventInvalidationSubscription = null;
     final lifecycleSubscription = _groupLifecycleSubscription;
     _groupLifecycleSubscription = null;
     notifyListeners();
     return Future.wait<void>(<Future<void>>[
       if (eventSubscription != null) eventSubscription.cancel(),
+      if (invalidationSubscription != null) invalidationSubscription.cancel(),
       if (lifecycleSubscription != null) lifecycleSubscription.cancel(),
     ]).then<void>((_) {}, onError: (Object error, StackTrace stack) {});
   }
@@ -1462,7 +1531,13 @@ class PlannerController extends ChangeNotifier {
       await clear;
       return;
     }
+    final timezoneChanged = selectedGroup?.timezone != incoming.timezone;
     _replaceGroup(incoming);
+    if (timezoneChanged &&
+        selectedEventRange != null &&
+        _usesBoundedEventRangeReads) {
+      _beginSelectedRange(fetch: true);
+    }
     // A lifecycle update can also carry an owner/version change (for example
     // after a remote transfer).  Refresh the member and invite projections so
     // edit/transfer affordances do not keep stale roles while preserving the
@@ -1707,11 +1782,24 @@ class PlannerController extends ChangeNotifier {
     _cancelGroupMetadataRefresh();
     final previousSubscription = _eventSubscription;
     _eventSubscription = null;
+    final previousInvalidationSubscription = _eventInvalidationSubscription;
+    _eventInvalidationSubscription = null;
     final previousLifecycleSubscription = _groupLifecycleSubscription;
     _groupLifecycleSubscription = null;
+    _resetRangeState();
     selectedGroup = group;
     final groupNow = utcToWallTime(DateTime.now().toUtc(), group.timezone);
     selectedDay = dateOnly(groupNow);
+    selectedEventRange = _usesBoundedEventRangeReads
+        ? _rangeForCalendarSelection(group: group)
+        : null;
+    if (selectedEventRange != null) {
+      _rangeKey = _rangeIdentity(
+        selectedEventRange!,
+        showAllMembers ? null : selectedMemberId,
+      );
+      isLoadingEvents = _usesBoundedEventRangeReads;
+    }
     selectedMemberId = null;
     showAllMembers = true;
     members = const <PlannerMember>[];
@@ -1725,6 +1813,11 @@ class PlannerController extends ChangeNotifier {
         await previousSubscription?.cancel();
       } catch (_) {
         // A cancelled stream cannot be allowed to block the new selection.
+      }
+      try {
+        await previousInvalidationSubscription?.cancel();
+      } catch (_) {
+        // A stale invalidation stream cannot block the new selection.
       }
       try {
         await previousLifecycleSubscription?.cancel();
@@ -1744,14 +1837,17 @@ class PlannerController extends ChangeNotifier {
       // be slow or remain pending while a remote archive/deactivation still
       // needs to clear the selected group immediately.
       StreamSubscription<List<PlannerEvent>>? nextSubscription;
+      StreamSubscription<void>? nextInvalidationSubscription;
       StreamSubscription<PlannerGroup?>? nextLifecycleSubscription;
       var streamFailed = false;
       String? metadataError;
 
       Future<void> cancelPendingSubscriptions() async {
         final eventSubscription = nextSubscription;
+        final invalidationSubscription = nextInvalidationSubscription;
         final lifecycleSubscription = nextLifecycleSubscription;
         nextSubscription = null;
+        nextInvalidationSubscription = null;
         nextLifecycleSubscription = null;
         if (identical(_eventSubscription, eventSubscription)) {
           _eventSubscription = null;
@@ -1759,8 +1855,15 @@ class PlannerController extends ChangeNotifier {
         if (identical(_groupLifecycleSubscription, lifecycleSubscription)) {
           _groupLifecycleSubscription = null;
         }
+        if (identical(
+          _eventInvalidationSubscription,
+          invalidationSubscription,
+        )) {
+          _eventInvalidationSubscription = null;
+        }
         for (final subscription in <StreamSubscription<dynamic>>[
           ?eventSubscription,
+          ?invalidationSubscription,
           ?lifecycleSubscription,
         ]) {
           try {
@@ -1772,49 +1875,93 @@ class PlannerController extends ChangeNotifier {
         }
       }
 
-      try {
-        final stream = _watchEventsForUser(userId, group.id);
-        final subscription = stream.listen(
-          (incoming) {
-            if (!_isCurrentPlannerContext(
-              operation,
+      final rangeCapability = _repository;
+      if (_usesBoundedEventRangeReads &&
+          rangeCapability is BoundedEventRangeReadCapability) {
+        try {
+          final capability = rangeCapability as BoundedEventRangeReadCapability;
+          final invalidationStream = capability.watchEventInvalidations(
+            userId,
+            group.id,
+          );
+          final subscription = invalidationStream.listen(
+            (_) => _scheduleRangeInvalidation(
+              operation: operation,
               userId: userId,
               groupId: group.id,
-            )) {
-              return;
-            }
-            events = List<PlannerEvent>.unmodifiable(incoming);
-            isOffline = false;
-            notifyListeners();
-          },
-          onError: (Object error) {
-            if (!_isCurrentPlannerContext(
-              operation,
-              userId: userId,
-              groupId: group.id,
-            )) {
-              return;
-            }
-            isOffline = true;
-            errorMessage = _friendlyError(error);
-            notifyListeners();
-          },
-        );
-        nextSubscription = subscription;
-        if (!_isCurrentPlannerContext(
-          operation,
-          userId: userId,
-          groupId: group.id,
-        )) {
-          await cancelPendingSubscriptions();
-          return;
+            ),
+            onError: (Object error) {
+              if (!_isCurrentPlannerContext(
+                operation,
+                userId: userId,
+                groupId: group.id,
+              )) {
+                return;
+              }
+              streamFailed = true;
+              errorMessage = _friendlyError(error);
+              notifyListeners();
+            },
+          );
+          nextInvalidationSubscription = subscription;
+          if (!_isCurrentPlannerContext(
+            operation,
+            userId: userId,
+            groupId: group.id,
+          )) {
+            await cancelPendingSubscriptions();
+            return;
+          }
+          _eventInvalidationSubscription = subscription;
+        } catch (error) {
+          streamFailed = true;
+          metadataError = _friendlyError(error);
         }
-        // Publish the subscription before awaiting metadata so a lifecycle
-        // tombstone can cancel it even while either REST read is pending.
-        _eventSubscription = subscription;
-      } catch (error) {
-        streamFailed = true;
-        metadataError = _friendlyError(error);
+      } else {
+        try {
+          final stream = _watchEventsForUser(userId, group.id);
+          final subscription = stream.listen(
+            (incoming) {
+              if (!_isCurrentPlannerContext(
+                operation,
+                userId: userId,
+                groupId: group.id,
+              )) {
+                return;
+              }
+              events = List<PlannerEvent>.unmodifiable(incoming);
+              isOffline = false;
+              notifyListeners();
+            },
+            onError: (Object error) {
+              if (!_isCurrentPlannerContext(
+                operation,
+                userId: userId,
+                groupId: group.id,
+              )) {
+                return;
+              }
+              isOffline = true;
+              errorMessage = _friendlyError(error);
+              notifyListeners();
+            },
+          );
+          nextSubscription = subscription;
+          if (!_isCurrentPlannerContext(
+            operation,
+            userId: userId,
+            groupId: group.id,
+          )) {
+            await cancelPendingSubscriptions();
+            return;
+          }
+          // Publish the subscription before awaiting metadata so a lifecycle
+          // tombstone can cancel it even while either REST read is pending.
+          _eventSubscription = subscription;
+        } catch (error) {
+          streamFailed = true;
+          metadataError = _friendlyError(error);
+        }
       }
 
       if (!_isCurrentPlannerContext(
@@ -1915,10 +2062,26 @@ class PlannerController extends ChangeNotifier {
 
       _setMembersSnapshot(fetchedMembers);
       invites = List<InviteCode>.unmodifiable(fetchedInvites);
+      if (_usesBoundedEventRangeReads &&
+          rangeCapability is BoundedEventRangeReadCapability) {
+        await _fetchRangeFirstPage(
+          force: true,
+          preserveCurrentEvents: false,
+          advanceGeneration: false,
+        );
+        if (!_isCurrentPlannerContext(
+          operation,
+          userId: userId,
+          groupId: group.id,
+        )) {
+          await cancelPendingSubscriptions();
+          return;
+        }
+      }
       if (!preserveOperationGeneration ||
           _operationGeneration == selectionGeneration) {
         errorMessage = metadataError;
-        isOffline = streamFailed;
+        isOffline = streamFailed || rangeError != null;
       }
       if (!_isCurrentPlannerContext(
         operation,
@@ -2597,6 +2760,48 @@ class PlannerController extends ChangeNotifier {
     return event.ownerId == current.id || isGroupOwner;
   }
 
+  /// Loads a detail-route event that may fall outside the current bounded
+  /// calendar page. The result is deliberately kept out of [events] so it
+  /// cannot disturb page cursors or the selected-range projection; the editor
+  /// owns the returned detail snapshot. A late response after sign-out,
+  /// identity change, or group switch is discarded rather than exposed.
+  Future<PlannerEvent?> loadEventById(String eventId) async {
+    final current = user;
+    final group = selectedGroup;
+    if (current == null || group == null) return null;
+    if (eventId.trim().isEmpty || eventId != eventId.trim()) {
+      throw const ScheduleValidationException('일정 식별자를 확인해 주세요.');
+    }
+    final inProjection = events
+        .where((event) => event.id == eventId && !event.isDeleted)
+        .firstOrNull;
+    if (inProjection != null) return inProjection;
+    final repository = _repository;
+    if (!supportsEventById) return null;
+    final revision = _plannerRevision;
+    final sessionGeneration = _plannerSessionGeneration;
+    final userId = current.id;
+    final groupId = group.id;
+    final capability = repository as EventByIdReadCapability;
+    final event = await capability.eventById(
+      userId: userId,
+      groupId: groupId,
+      eventId: eventId,
+    );
+    if (_disposed ||
+        _plannerRevision != revision ||
+        _plannerSessionGeneration != sessionGeneration ||
+        user?.id != userId ||
+        selectedGroup?.id != groupId) {
+      return null;
+    }
+    if (event == null || event.isDeleted) return null;
+    if (event.id != eventId || event.groupId != groupId) {
+      throw const ScheduleConflictException('일정 응답을 확인할 수 없습니다.');
+    }
+    return event;
+  }
+
   Future<void> deactivateMember(PlannerMember member) async {
     final current = user;
     final group = selectedGroup;
@@ -2699,8 +2904,165 @@ class PlannerController extends ChangeNotifier {
     }
   }
 
+  EventRange? _rangeForCalendarSelection({
+    PlannerGroup? group,
+    DateTime? day,
+    CalendarViewMode? mode,
+  }) {
+    final selectedGroup = group ?? this.selectedGroup;
+    if (selectedGroup == null) return null;
+    final selected = dateOnly(day ?? selectedDay);
+    final selectedMode = mode ?? calendarView;
+    return switch (selectedMode) {
+      CalendarViewMode.day => calendarDayBounds(
+        selected,
+        selectedGroup.timezone,
+      ).toEventRange(),
+      CalendarViewMode.month => calendarMonthBounds(
+        selected.year,
+        selected.month,
+        selectedGroup.timezone,
+      ).toEventRange(),
+      CalendarViewMode.agenda => calendarAgendaBounds(
+        selected.year,
+        selected.month,
+        selectedGroup.timezone,
+      ).toEventRange(),
+    };
+  }
+
+  String _rangeIdentity(EventRange range, String? participantId) {
+    return '${range.viewTimezone}|${range.startUtc.toIso8601String()}|'
+        '${range.endUtc.toIso8601String()}|${participantId ?? ''}';
+  }
+
+  bool _isCurrentRangeContext({
+    required int plannerRevision,
+    required int sessionGeneration,
+    required int rangeGeneration,
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    required String rangeKey,
+  }) {
+    return !_disposed &&
+        _plannerRevision == plannerRevision &&
+        _plannerSessionGeneration == sessionGeneration &&
+        _rangeGeneration == rangeGeneration &&
+        user?.id == userId &&
+        selectedGroup?.id == groupId &&
+        selectedEventRange == range &&
+        _rangeKey == rangeKey;
+  }
+
+  void _resetRangeState({bool clearRange = true}) {
+    _rangeInvalidationTimer?.cancel();
+    _rangeInvalidationTimer = null;
+    _rangeGeneration++;
+    _rangeKey = null;
+    _rangeCursor = null;
+    hasMoreEvents = false;
+    isLoadingEvents = false;
+    isLoadingMoreEvents = false;
+    rangeError = null;
+    _rangeRefreshQueued = false;
+    _rangeRefreshInFlight = false;
+    _rangeRefreshOwnerGeneration = null;
+    _rangeLoadMoreInFlight = false;
+    _rangeLoadMoreOwnerGeneration = null;
+    if (clearRange) selectedEventRange = null;
+  }
+
+  void _beginSelectedRange({required bool fetch}) {
+    final range = _rangeForCalendarSelection();
+    if (range == null || !_usesBoundedEventRangeReads) {
+      selectedEventRange = null;
+      notifyListeners();
+      return;
+    }
+    final participantId = showAllMembers ? null : selectedMemberId;
+    final nextKey = _rangeIdentity(range, participantId);
+    if (selectedEventRange == range && _rangeKey == nextKey) {
+      // Month and agenda cells can change the selected day while keeping the
+      // same fetched range. Preserve the current snapshot instead of
+      // blanking and reloading an identical page; callers can use the public
+      // refresh method when an explicit revalidation is needed.
+      notifyListeners();
+      return;
+    }
+    _rangeInvalidationTimer?.cancel();
+    _rangeInvalidationTimer = null;
+    _rangeGeneration++;
+    // A new range supersedes any in-flight first-page/load-more request. Old
+    // futures retain their captured generation and therefore cannot clear or
+    // overwrite the flags owned by this new request.
+    _rangeRefreshQueued = false;
+    _rangeRefreshInFlight = false;
+    _rangeRefreshOwnerGeneration = null;
+    _rangeLoadMoreInFlight = false;
+    _rangeLoadMoreOwnerGeneration = null;
+    isLoadingMoreEvents = false;
+    _rangeKey = nextKey;
+    selectedEventRange = range;
+    _rangeCursor = null;
+    hasMoreEvents = false;
+    rangeError = null;
+    events = const <PlannerEvent>[];
+    isLoadingEvents = fetch;
+    notifyListeners();
+    if (fetch) {
+      unawaited(
+        _fetchRangeFirstPage(
+          force: true,
+          preserveCurrentEvents: false,
+          advanceGeneration: false,
+        ),
+      );
+    }
+  }
+
+  void _scheduleRangeInvalidation({
+    required int operation,
+    required String userId,
+    required String groupId,
+  }) {
+    if (!_isCurrentPlannerContext(
+      operation,
+      userId: userId,
+      groupId: groupId,
+    )) {
+      return;
+    }
+    _rangeInvalidationTimer?.cancel();
+    _rangeInvalidationTimer = Timer(const Duration(milliseconds: 80), () {
+      _rangeInvalidationTimer = null;
+      if (!_isCurrentPlannerContext(
+        operation,
+        userId: userId,
+        groupId: groupId,
+      )) {
+        return;
+      }
+      unawaited(refreshSelectedEventRange(force: true));
+    });
+  }
+
+  void setCalendarView(CalendarViewMode mode) {
+    if (calendarView == mode) return;
+    calendarView = mode;
+    if (selectedGroup != null && _usesBoundedEventRangeReads) {
+      _beginSelectedRange(fetch: true);
+      return;
+    }
+    notifyListeners();
+  }
+
   void setSelectedDay(DateTime day) {
-    selectedDay = DateTime(day.year, day.month, day.day);
+    selectedDay = dateOnly(day);
+    if (selectedGroup != null && _usesBoundedEventRangeReads) {
+      _beginSelectedRange(fetch: true);
+      return;
+    }
     notifyListeners();
   }
 
@@ -2715,9 +3077,352 @@ class PlannerController extends ChangeNotifier {
     );
   }
 
+  void jumpToToday() {
+    final group = selectedGroup;
+    final today = group == null
+        ? DateTime.now()
+        : utcToWallTime(DateTime.now().toUtc(), group.timezone);
+    setSelectedDay(today);
+  }
+
+  Future<void> refreshSelectedEventRange({bool force = true}) async {
+    if (!_usesBoundedEventRangeReads) {
+      // Older adapters do not expose bounded pages, but the home screen's
+      // RefreshIndicator still has to refresh their selected-group stream.
+      // Route through the established groups/selectGroup lifecycle so the
+      // legacy watcher is cancelled and restarted with the same auth guards.
+      final current = user;
+      final group = selectedGroup;
+      if (current == null || group == null) return;
+      await loadGroups(preserveOperationGeneration: true);
+      return;
+    }
+    final current = user;
+    final group = selectedGroup;
+    final range = selectedEventRange ?? _rangeForCalendarSelection();
+    if (current == null || group == null || range == null) return;
+    if (!force && _rangeCursor == null && events.isNotEmpty) return;
+    await _fetchRangeFirstPage(
+      force: force,
+      preserveCurrentEvents: force && selectedEventRange == range,
+      advanceGeneration: force,
+    );
+  }
+
+  Future<void> _fetchRangeFirstPage({
+    required bool force,
+    required bool preserveCurrentEvents,
+    required bool advanceGeneration,
+  }) async {
+    final rangeCapability = _repository;
+    if (!_usesBoundedEventRangeReads ||
+        rangeCapability is! BoundedEventRangeReadCapability) {
+      return;
+    }
+    final capability = rangeCapability as BoundedEventRangeReadCapability;
+    final current = user;
+    final group = selectedGroup;
+    final range = selectedEventRange ?? _rangeForCalendarSelection();
+    if (current == null || group == null || range == null) return;
+    if (_rangeRefreshInFlight) {
+      _rangeRefreshQueued = true;
+      return;
+    }
+    if (!force && events.isNotEmpty) return;
+    if (advanceGeneration) {
+      _rangeGeneration++;
+      _rangeLoadMoreInFlight = false;
+      _rangeLoadMoreOwnerGeneration = null;
+      isLoadingMoreEvents = false;
+    }
+    final plannerRevision = _plannerRevision;
+    final sessionGeneration = _plannerSessionGeneration;
+    final rangeGeneration = _rangeGeneration;
+    final participantId = showAllMembers ? null : selectedMemberId;
+    final rangeKey = _rangeIdentity(range, participantId);
+    _rangeKey = rangeKey;
+    selectedEventRange = range;
+    _rangeRefreshInFlight = true;
+    _rangeRefreshOwnerGeneration = rangeGeneration;
+    _rangeCursor = null;
+    hasMoreEvents = false;
+    isLoadingEvents = true;
+    if (!preserveCurrentEvents) events = const <PlannerEvent>[];
+    rangeError = null;
+    notifyListeners();
+    try {
+      final page = await capability.eventsForRange(
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        limit: 100,
+        participantId: participantId,
+      );
+      if (!_isCurrentRangeContext(
+        plannerRevision: plannerRevision,
+        sessionGeneration: sessionGeneration,
+        rangeGeneration: rangeGeneration,
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        rangeKey: rangeKey,
+      )) {
+        return;
+      }
+      _validateRangePage(
+        page,
+        groupId: group.id,
+        range: range,
+        cursor: null,
+        participantId: participantId,
+        limit: 100,
+      );
+      events = List<PlannerEvent>.unmodifiable(page.events);
+      _rangeCursor = page.nextCursor;
+      hasMoreEvents = page.hasMore;
+      rangeError = null;
+      isOffline = false;
+      notifyListeners();
+    } catch (error) {
+      if (_isCurrentRangeContext(
+        plannerRevision: plannerRevision,
+        sessionGeneration: sessionGeneration,
+        rangeGeneration: rangeGeneration,
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        rangeKey: rangeKey,
+      )) {
+        rangeError = _friendlyError(error);
+        isOffline = true;
+        // A successful authorization denial is authoritative: retaining a
+        // prior group-scoped snapshot would expose private rows after the
+        // membership/group became unavailable.  Transport/parse failures are
+        // different and intentionally preserve the last-good snapshot during
+        // a forced revalidation.
+        if (!preserveCurrentEvents || _isAuthoritativeRangeDenial(error)) {
+          events = const <PlannerEvent>[];
+          _rangeCursor = null;
+          hasMoreEvents = false;
+        }
+        notifyListeners();
+      }
+    } finally {
+      if (_rangeRefreshOwnerGeneration == rangeGeneration) {
+        _rangeRefreshInFlight = false;
+        _rangeRefreshOwnerGeneration = null;
+        isLoadingEvents = false;
+        if (_isCurrentRangeContext(
+          plannerRevision: _plannerRevision,
+          sessionGeneration: _plannerSessionGeneration,
+          rangeGeneration: _rangeGeneration,
+          userId: current.id,
+          groupId: group.id,
+          range: range,
+          rangeKey: rangeKey,
+        )) {
+          notifyListeners();
+        }
+      }
+      if (_rangeRefreshQueued && !_disposed) {
+        _rangeRefreshQueued = false;
+        if (_isCurrentRangeContext(
+          plannerRevision: _plannerRevision,
+          sessionGeneration: _plannerSessionGeneration,
+          rangeGeneration: _rangeGeneration,
+          userId: current.id,
+          groupId: group.id,
+          range: range,
+          rangeKey: _rangeKey ?? rangeKey,
+        )) {
+          unawaited(
+            _fetchRangeFirstPage(
+              force: true,
+              preserveCurrentEvents: true,
+              advanceGeneration: true,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> loadMoreEvents() async {
+    final rangeCapability = _repository;
+    final current = user;
+    final group = selectedGroup;
+    final range = selectedEventRange;
+    final cursor = _rangeCursor;
+    if (rangeCapability is! BoundedEventRangeReadCapability ||
+        current == null ||
+        group == null ||
+        range == null ||
+        cursor == null ||
+        !hasMoreEvents ||
+        _rangeLoadMoreInFlight ||
+        _rangeRefreshInFlight) {
+      return;
+    }
+    final capability = rangeCapability as BoundedEventRangeReadCapability;
+    final plannerRevision = _plannerRevision;
+    final sessionGeneration = _plannerSessionGeneration;
+    final rangeGeneration = _rangeGeneration;
+    final participantId = showAllMembers ? null : selectedMemberId;
+    final rangeKey = _rangeIdentity(range, participantId);
+    _rangeLoadMoreInFlight = true;
+    _rangeLoadMoreOwnerGeneration = rangeGeneration;
+    isLoadingMoreEvents = true;
+    notifyListeners();
+    try {
+      final page = await capability.eventsForRange(
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        cursor: cursor,
+        limit: 100,
+        participantId: participantId,
+      );
+      if (!_isCurrentRangeContext(
+        plannerRevision: plannerRevision,
+        sessionGeneration: sessionGeneration,
+        rangeGeneration: rangeGeneration,
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        rangeKey: rangeKey,
+      )) {
+        return;
+      }
+      _validateRangePage(
+        page,
+        groupId: group.id,
+        range: range,
+        cursor: cursor,
+        participantId: participantId,
+        limit: 100,
+      );
+      // A parent invalidation can insert an event that is also present in a
+      // page already in flight.  Identical immutable payloads are safe
+      // idempotent duplicates; a same-id payload with any changed field is a
+      // conflicting response and must fail closed.
+      for (final event in page.events) {
+        final previous = events
+            .where((item) => item.id == event.id)
+            .firstOrNull;
+        if (previous != null && previous != event) {
+          throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+        }
+      }
+      final merged = <String, PlannerEvent>{
+        for (final event in events) event.id: event,
+      };
+      for (final event in page.events) {
+        final previous = merged[event.id];
+        if (previous == null || previous.version <= event.version) {
+          merged[event.id] = event;
+        }
+      }
+      final ordered = merged.values.toList(growable: false)
+        ..sort(_comparePlannerEvents);
+      events = List<PlannerEvent>.unmodifiable(ordered);
+      _rangeCursor = page.nextCursor;
+      hasMoreEvents = page.hasMore;
+      rangeError = null;
+      isOffline = false;
+      notifyListeners();
+    } catch (error) {
+      if (_isCurrentRangeContext(
+        plannerRevision: plannerRevision,
+        sessionGeneration: sessionGeneration,
+        rangeGeneration: rangeGeneration,
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        rangeKey: rangeKey,
+      )) {
+        rangeError = _friendlyError(error);
+        isOffline = true;
+        notifyListeners();
+      }
+    } finally {
+      if (_rangeLoadMoreOwnerGeneration == rangeGeneration) {
+        _rangeLoadMoreInFlight = false;
+        _rangeLoadMoreOwnerGeneration = null;
+        isLoadingMoreEvents = false;
+        if (_isCurrentRangeContext(
+          plannerRevision: _plannerRevision,
+          sessionGeneration: _plannerSessionGeneration,
+          rangeGeneration: _rangeGeneration,
+          userId: current.id,
+          groupId: group.id,
+          range: range,
+          rangeKey: rangeKey,
+        )) {
+          notifyListeners();
+        }
+      }
+    }
+  }
+
+  static int _comparePlannerEvents(PlannerEvent left, PlannerEvent right) {
+    final byStart = left.startAt.toUtc().compareTo(right.startAt.toUtc());
+    return byStart != 0 ? byStart : left.id.compareTo(right.id);
+  }
+
+  void _validateRangePage(
+    EventRangePage page, {
+    required String groupId,
+    required EventRange range,
+    required EventRangeCursor? cursor,
+    required String? participantId,
+    required int limit,
+  }) {
+    if (limit < 1 || limit > 200 || page.events.length > limit) {
+      throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+    }
+    final seen = <String>{};
+    PlannerEvent? previous;
+    for (final event in page.events) {
+      if (event.groupId != groupId ||
+          event.isDeleted ||
+          !eventOverlapsCalendarRange(event, range) ||
+          !seen.add(event.id) ||
+          (participantId != null && !event.memberIds.contains(participantId))) {
+        throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+      }
+      if (previous != null && _comparePlannerEvents(previous, event) >= 0) {
+        throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+      }
+      if (cursor != null &&
+          (event.startAt.toUtc().isBefore(cursor.startsAtUtc) ||
+              (event.startAt.toUtc() == cursor.startsAtUtc &&
+                  event.id.compareTo(cursor.eventId) <= 0))) {
+        throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+      }
+      previous = event;
+    }
+    if (page.hasMore && page.nextCursor == null) {
+      throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+    }
+    if (page.nextCursor != null && page.events.isEmpty) {
+      throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+    }
+    if (page.nextCursor != null && page.events.isNotEmpty) {
+      final last = page.events.last;
+      if (page.nextCursor!.startsAtUtc != last.startAt.toUtc() ||
+          page.nextCursor!.eventId != last.id) {
+        throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
+      }
+    }
+  }
+
   void setMemberFilter(String? memberId) {
     selectedMemberId = memberId;
     showAllMembers = memberId == null;
+    if (selectedEventRange != null && _usesBoundedEventRangeReads) {
+      _beginSelectedRange(fetch: true);
+      return;
+    }
     notifyListeners();
   }
 
@@ -2727,10 +3432,17 @@ class PlannerController extends ChangeNotifier {
   void _setMembersSnapshot(Iterable<PlannerMember> incoming) {
     members = List<PlannerMember>.unmodifiable(incoming);
     final selected = selectedMemberId;
+    var filterCleared = false;
     if (selected != null &&
         !members.any((member) => member.id == selected && member.isActive)) {
       selectedMemberId = null;
       showAllMembers = true;
+      filterCleared = true;
+    }
+    if (filterCleared &&
+        selectedEventRange != null &&
+        _usesBoundedEventRangeReads) {
+      _beginSelectedRange(fetch: true);
     }
   }
 
@@ -2790,7 +3502,12 @@ class PlannerController extends ChangeNotifier {
           requestedMemberIds: normalizedDraft.hasExplicitMemberIds
               ? requestedMemberIds
               : <String>[userId],
-          allowLegacyCreatorDefault: true,
+          // Only pre-capability adapters may need the historical client
+          // default when their response omitted the creator assignment.
+          // A capable adapter promises the exact persisted member set, so
+          // an omitted creator in its response is malformed rather than a
+          // value the controller may fabricate locally.
+          allowLegacyCreatorDefault: !_requiresExactEventMutationResults,
         );
         _upsertEvent(normalizedCreated);
       } else {
@@ -2991,13 +3708,31 @@ class PlannerController extends ChangeNotifier {
     final index = events.indexWhere(
       (event) => event.id == normalizedIncoming.id,
     );
+    if (selectedEventRange != null &&
+        (normalizedIncoming.isDeleted ||
+            !eventOverlapsCalendarRange(
+              normalizedIncoming,
+              selectedEventRange!,
+            ) ||
+            (!showAllMembers &&
+                selectedMemberId != null &&
+                !normalizedIncoming.memberIds.contains(selectedMemberId)))) {
+      if (index >= 0) {
+        final next = <PlannerEvent>[...events]..removeAt(index);
+        events = List<PlannerEvent>.unmodifiable(next);
+      }
+      return;
+    }
     if (index == -1) {
-      events = <PlannerEvent>[...events, normalizedIncoming];
+      final next = <PlannerEvent>[...events, normalizedIncoming]
+        ..sort(_comparePlannerEvents);
+      events = List<PlannerEvent>.unmodifiable(next);
       return;
     }
     if (events[index].version > normalizedIncoming.version) return;
     final next = <PlannerEvent>[...events];
     next[index] = normalizedIncoming;
+    next.sort(_comparePlannerEvents);
     events = List<PlannerEvent>.unmodifiable(next);
   }
 
@@ -3039,6 +3774,13 @@ class PlannerController extends ChangeNotifier {
         plannerRevision: revision,
       )) {
         return;
+      }
+      if (selectedEventRange != null) {
+        final next = <PlannerEvent>[
+          ...events.where((candidate) => candidate.id != event.id),
+        ];
+        events = List<PlannerEvent>.unmodifiable(next);
+        notifyListeners();
       }
     } catch (error) {
       if (_isOperationCurrent(
@@ -3093,6 +3835,28 @@ class PlannerController extends ChangeNotifier {
     return '잠시 후 다시 시도해 주세요.';
   }
 
+  /// Identifies an authoritative access loss without guessing from localized
+  /// error text.  PostgREST's `42501` is the SQL insufficient-privilege code;
+  /// the explicit HTTP/auth statuses cover session revocation responses.
+  bool _isAuthoritativeRangeDenial(Object error) {
+    if (error is ScheduleAuthorizationException) return true;
+    if (error is PostgrestException) {
+      final code = error.code;
+      return code == '42501' || code == '401' || code == '403';
+    }
+    if (error is AuthException) {
+      final status = error.statusCode;
+      return status == '401' || status == '403';
+    }
+    return false;
+  }
+
+  /// Exposes the structural lifecycle/authorization classification to detail
+  /// routes. Localized error strings are intentionally not inspected by the
+  /// editor when deciding whether a missing event is terminal or retryable.
+  bool isAuthoritativeAccessDenial(Object error) =>
+      _isAuthoritativeRangeDenial(error);
+
   bool _isConflictError(Object error) {
     return error is ScheduleConflictException ||
         (error is PostgrestException && error.code == '40001');
@@ -3123,7 +3887,10 @@ class PlannerController extends ChangeNotifier {
     _operationToken++;
     _plannerRevision++;
     _groupOperationToken = 0;
+    _resetRangeState();
     _cancelGroupMetadataRefresh();
+    unawaited(_eventInvalidationSubscription?.cancel());
+    _eventInvalidationSubscription = null;
     _oauthTimeoutTimer?.cancel();
     _oauthTimeoutTimer = null;
     unawaited(_authSubscription?.cancel());

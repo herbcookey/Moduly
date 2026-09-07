@@ -1,8 +1,72 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 
-/// Returns a defensive, duplicate-free participant list while preserving the
-/// caller's order.  Repositories perform the authorization check that every
-/// id belongs to an active membership in the event's group.
+/// Parses the explicit-offset ISO-8601 timestamp shape used by Supabase
+/// event rows and v1 range cursors.  Dart's [DateTime.parse] normalizes
+/// impossible calendar/time components (for example February 30), so wire
+/// values are validated component-by-component before constructing the UTC
+/// instant.  Postgres emits `Z` or `+/-HH:MM` offsets with up to six fractional
+/// second digits; those forms remain supported.
+DateTime? parseStrictExplicitOffsetTimestamp(Object? value) {
+  if (value is DateTime) return value.toUtc();
+  if (value is! String) return null;
+  final match = RegExp(
+    r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})'
+    r'(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$',
+  ).firstMatch(value);
+  if (match == null) return null;
+  final year = int.tryParse(match.group(1)!);
+  final month = int.tryParse(match.group(2)!);
+  final day = int.tryParse(match.group(3)!);
+  final hour = int.tryParse(match.group(4)!);
+  final minute = int.tryParse(match.group(5)!);
+  final second = int.tryParse(match.group(6)!);
+  if (year == null ||
+      month == null ||
+      day == null ||
+      hour == null ||
+      minute == null ||
+      second == null ||
+      month < 1 ||
+      month > 12 ||
+      hour > 23 ||
+      minute > 59 ||
+      second > 59) {
+    return null;
+  }
+  final calendar = DateTime.utc(year, month, day);
+  if (calendar.year != year || calendar.month != month || calendar.day != day) {
+    return null;
+  }
+  final fraction = match.group(7) ?? '';
+  final micros = fraction.isEmpty ? 0 : int.parse(fraction.padRight(6, '0'));
+  final base = DateTime.utc(
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    micros ~/ 1000,
+    micros % 1000,
+  );
+  final zone = match.group(8)!;
+  if (zone == 'Z') return base;
+  final offsetHour = int.parse(zone.substring(1, 3));
+  final offsetMinute = int.parse(zone.substring(4, 6));
+  if (offsetHour > 23 || offsetMinute > 59) return null;
+  final sign = zone.codeUnitAt(0) == 45 ? -1 : 1;
+  return base.subtract(
+    Duration(minutes: sign * (offsetHour * 60 + offsetMinute)),
+  );
+}
+
+/// Returns a defensive, duplicate-free participant list in one canonical
+/// lexicographic order. Repositories perform the authorization check that
+/// every id belongs to an active membership in the event's group. Sorting at
+/// the model boundary keeps local, RPC, and realtime child projections equal
+/// even when a caller or transport returns a different row order.
 List<String> canonicalEventMemberIds(Iterable<String> memberIds) {
   final result = <String>[];
   final seen = <String>{};
@@ -13,6 +77,7 @@ List<String> canonicalEventMemberIds(Iterable<String> memberIds) {
     }
     if (seen.add(id)) result.add(id);
   }
+  result.sort();
   return List<String>.unmodifiable(result);
 }
 
@@ -425,4 +490,183 @@ class EventDraft {
     allDayStartDate,
     allDayEndDate,
   );
+}
+
+/// Calendar projections supported by the planner.  The model lives outside
+/// the widget layer so repository/state contracts can share the same mode
+/// vocabulary without importing Flutter screens.
+enum CalendarViewMode { day, month, agenda }
+
+/// An inclusive-start, exclusive-end UTC interval used by bounded event
+/// reads.  Calendar callers construct it from local-midnight wall times and
+/// repositories validate the timezone against the IANA database before use.
+@immutable
+class EventRange {
+  EventRange({
+    required DateTime startUtc,
+    required DateTime endUtc,
+    required String viewTimezone,
+  }) : startUtc = startUtc.toUtc(),
+       endUtc = endUtc.toUtc(),
+       viewTimezone = viewTimezone {
+    if (viewTimezone.isEmpty || viewTimezone.trim() != viewTimezone) {
+      throw const FormatException('시간대를 확인해 주세요.');
+    }
+    if (!this.endUtc.isAfter(this.startUtc)) {
+      throw const FormatException('일정 범위를 확인해 주세요.');
+    }
+  }
+
+  final DateTime startUtc;
+  final DateTime endUtc;
+  final String viewTimezone;
+
+  Duration get duration => endUtc.difference(startUtc);
+
+  @override
+  bool operator ==(Object other) {
+    return other is EventRange &&
+        other.startUtc == startUtc &&
+        other.endUtc == endUtc &&
+        other.viewTimezone == viewTimezone;
+  }
+
+  @override
+  int get hashCode => Object.hash(startUtc, endUtc, viewTimezone);
+
+  @override
+  String toString() =>
+      'EventRange($startUtc, $endUtc, timezone: $viewTimezone)';
+}
+
+/// The v1 keyset tuple returned by the bounded range RPC.  The wire token is
+/// intentionally opaque to callers; this class only exists so local paging
+/// can apply the same strict tuple ordering as the server.  Future recurrence
+/// support can populate [occurrenceKey] in a versioned cursor without
+/// changing the current v1 payload shape.
+@immutable
+class EventRangeCursor {
+  EventRangeCursor({
+    required DateTime startsAtUtc,
+    required String eventId,
+    this.occurrenceKey = '',
+  }) : startsAtUtc = startsAtUtc.toUtc(),
+       eventId = eventId {
+    if (eventId.isEmpty || eventId.trim() != eventId) {
+      throw const FormatException('페이지 커서를 확인해 주세요.');
+    }
+    if (occurrenceKey.trim() != occurrenceKey) {
+      throw const FormatException('페이지 커서를 확인해 주세요.');
+    }
+  }
+
+  final DateTime startsAtUtc;
+  final String eventId;
+  final String occurrenceKey;
+
+  /// Encodes the current v1 token expected by `events_for_range`.  Recurrence
+  /// keys are reserved for a future cursor version and therefore cannot be
+  /// silently dropped from a v1 request.
+  String encode() {
+    if (occurrenceKey.isNotEmpty) {
+      throw const FormatException('지원하지 않는 페이지 커서 버전입니다.');
+    }
+    final payload = <String, Object>{
+      'v': 1,
+      'starts_at': startsAtUtc.toIso8601String(),
+      'event_id': eventId,
+    };
+    return base64Url
+        .encode(utf8.encode(jsonEncode(payload)))
+        .replaceAll('=', '');
+  }
+
+  String toToken() => encode();
+
+  static EventRangeCursor decode(String token) {
+    if (token.isEmpty ||
+        token.trim() != token ||
+        token.length > 4096 ||
+        !RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(token)) {
+      throw const FormatException('페이지 커서를 확인해 주세요.');
+    }
+    try {
+      final decoded = utf8.decode(base64Url.decode(base64Url.normalize(token)));
+      final raw = jsonDecode(decoded);
+      if (raw is! Map || raw.keys.any((key) => key is! String)) {
+        throw const FormatException('페이지 커서를 확인해 주세요.');
+      }
+      final payload = raw.cast<String, dynamic>();
+      const expectedKeys = <String>{'v', 'starts_at', 'event_id'};
+      final startsAtRaw = payload['starts_at'];
+      if (payload.length != expectedKeys.length ||
+          !payload.keys.toSet().containsAll(expectedKeys) ||
+          payload['v'] != 1 ||
+          startsAtRaw is! String ||
+          payload['event_id'] is! String) {
+        throw const FormatException('페이지 커서를 확인해 주세요.');
+      }
+      final startsAt = parseStrictExplicitOffsetTimestamp(startsAtRaw);
+      if (startsAt == null) {
+        throw const FormatException('페이지 커서를 확인해 주세요.');
+      }
+      final eventId = payload['event_id'] as String;
+      return EventRangeCursor(startsAtUtc: startsAt, eventId: eventId);
+    } on FormatException {
+      rethrow;
+    } catch (_) {
+      throw const FormatException('페이지 커서를 확인해 주세요.');
+    }
+  }
+
+  static EventRangeCursor fromToken(String token) => decode(token);
+
+  @override
+  bool operator ==(Object other) {
+    return other is EventRangeCursor &&
+        other.startsAtUtc == startsAtUtc &&
+        other.eventId == eventId &&
+        other.occurrenceKey == occurrenceKey;
+  }
+
+  @override
+  int get hashCode => Object.hash(startsAtUtc, eventId, occurrenceKey);
+
+  @override
+  String toString() => 'EventRangeCursor($startsAtUtc, $eventId)';
+}
+
+/// Immutable page returned by a bounded event range read.
+@immutable
+class EventRangePage {
+  EventRangePage({
+    required Iterable<PlannerEvent> events,
+    required this.nextCursor,
+    required this.hasMore,
+  }) : events = List<PlannerEvent>.unmodifiable(events) {
+    if (hasMore != (nextCursor != null)) {
+      throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+    }
+  }
+
+  final List<PlannerEvent> events;
+  final EventRangeCursor? nextCursor;
+  final bool hasMore;
+
+  static EventRangePage empty() => EventRangePage(
+    events: const <PlannerEvent>[],
+    nextCursor: null,
+    hasMore: false,
+  );
+
+  @override
+  bool operator ==(Object other) {
+    return other is EventRangePage &&
+        listEquals(other.events, events) &&
+        other.nextCursor == nextCursor &&
+        other.hasMore == hasMore;
+  }
+
+  @override
+  int get hashCode => Object.hash(Object.hashAll(events), nextCursor, hasMore);
 }

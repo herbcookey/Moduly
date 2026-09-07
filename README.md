@@ -132,6 +132,59 @@ same neutral fallback for inactive or unknown assignments. The participant
 list is parent-scrollable rather than a nested unbounded list, and the editor
 is covered for 320x568 layouts, 2x text, and a 300 px bottom keyboard inset.
 
+### Calendar views and bounded ranges (Feature 1)
+
+Home keeps the existing daily week strip, swipe navigation, event cards, participant
+filter, routes, and add-event action. The toolbar adds accessible `일간`, `월간`,
+and `Agenda` modes, previous/next period controls, `오늘`, and a date picker.
+Month mode uses a Monday-first 35/42-cell grid; each cell remains individually
+focusable/tappable, reports its date and event count to assistive technology, and
+shows event dots or compact titles. Agenda mode groups the selected calendar month
+by the first overlapping group-timezone date, puts all-day events before timed
+events, and sorts timed rows by UTC start and id. A cross-midnight event appears
+once with a next-day marker. Selecting a month cell or picker date changes the
+selected day without changing the current mode; cancelling the picker is a no-op.
+
+Calendar boundaries are based on the selected group's IANA timezone, not the
+device timezone. Every read is a half-open `[start, end)` UTC range produced from
+local calendar midnights, so DST transition days can be 23 or 25 hours. The
+`supabase/migrations/20260907130003_calendar_range.sql` migration adds the
+participant-aware `events_for_range` RPC with a bounded limit and a keyset cursor
+over `(starts_at, id)`. Timed events use UTC overlap while all-day events use their
+half-open local date range. `PlannerController` replaces the current range when
+the group, mode, date, or participant filter changes; `더 불러오기` follows the
+cursor and never downloads an unbounded group history. A same-range refresh keeps
+the last good list visible while the new page is in flight and reports a retryable
+error if the read fails.
+
+The Local and Supabase adapters implement the same range and cursor contract. A
+parent `events` Realtime invalidation schedules a range refetch; child participant
+rows are intentionally not published. This avoids exposing DELETE payloads that
+RLS cannot safely authorize, while still reflecting participant changes after the
+parent version changes. The UI has no offline-sync promise: an offline banner or
+last-good snapshot is informational only, and a failed range must be retried when
+connectivity returns.
+
+For a release check, run `supabase db reset` (or the reviewed migration job),
+enable Realtime for the parent `events` table, and run the credential-free checks:
+
+```sh
+flutter test --no-pub test/calendar_views_ui_test.dart \
+  test/controller_test.dart test/timezone_test.dart
+flutter analyze --no-pub
+```
+
+Against a disposable Supabase/Auth deployment, create a group with a DST-observing
+timezone and a dataset of 1,000+ events. Verify the day/month/Agenda pages return
+only their half-open range, keyset paging has no duplicates/gaps, a participant
+filter resets the cursor, and a parent event INSERT/UPDATE/soft-delete causes one
+coalesced refetch. Change an event in a second authenticated session and confirm
+the first session updates without a child-table Realtime payload. Repeat the
+manual checks on a 320x568 viewport with 2x text, a 300 px keyboard inset, hardware
+keyboard focus, VoiceOver/TalkBack, and both 35- and 42-cell months. These live
+Supabase, load, network, and real-device checks are external to this repository
+and are not claimed as executed here.
+
 ## Flutter development
 
 1. Keep `.env.example` as the checked-in placeholder reference. For Flutter

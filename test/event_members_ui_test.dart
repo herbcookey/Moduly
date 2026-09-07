@@ -141,6 +141,27 @@ class _CaptureRepository extends LocalScheduleRepository {
   }
 }
 
+class _DeepLinkRepository extends _CaptureRepository {
+  PlannerEvent? lookupResult;
+  Object? lookupError;
+  int lookupCalls = 0;
+
+  @override
+  bool get useBoundedEventRangeReads => true;
+
+  @override
+  Future<PlannerEvent?> eventById({
+    required String userId,
+    required String groupId,
+    required String eventId,
+  }) async {
+    lookupCalls += 1;
+    final error = lookupError;
+    if (error != null) throw error;
+    return lookupResult;
+  }
+}
+
 PlannerController _controller({
   required _TestAuth auth,
   required _CaptureRepository repository,
@@ -538,6 +559,78 @@ void main() {
     await tester.tap(find.widgetWithText(OutlinedButton, '돌아가기'));
     await tester.pump();
     semantics.dispose();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('transient detail lookup offers retry and then opens the event', (
+    tester,
+  ) async {
+    final auth = _TestAuth();
+    final repository = _DeepLinkRepository()
+      ..lookupError = StateError('temporary network failure');
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: _creator,
+      group: _group,
+      members: <PlannerMember>[_member(_creator.id, '작성자', isOwner: true)],
+      events: const <PlannerEvent>[],
+    );
+    addTearDown(auth.dispose);
+
+    await tester.pumpWidget(
+      _app(controller, const EventEditorScreen(eventId: 'outside-range')),
+    );
+    await tester.pump();
+    expect(repository.lookupCalls, 1);
+    expect(find.text('일정을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '다시 시도'), findsOneWidget);
+    expect(find.text('일정을 찾을 수 없어요.'), findsNothing);
+
+    repository
+      ..lookupError = null
+      ..lookupResult = _event(id: 'outside-range', title: '복구된 일정');
+    await tester.tap(find.widgetWithText(FilledButton, '다시 시도'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is TextFormField && widget.controller?.text == '복구된 일정',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('일정을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.'), findsNothing);
+    expect(repository.lookupCalls, 2);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('authoritative null detail lookup remains terminal', (
+    tester,
+  ) async {
+    final auth = _TestAuth();
+    final repository = _DeepLinkRepository();
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: _creator,
+      group: _group,
+      members: <PlannerMember>[_member(_creator.id, '작성자', isOwner: true)],
+      events: const <PlannerEvent>[],
+    );
+    addTearDown(auth.dispose);
+
+    await tester.pumpWidget(
+      _app(controller, const EventEditorScreen(eventId: 'missing-event')),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(repository.lookupCalls, 1);
+    expect(find.text('일정을 찾을 수 없어요.'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '다시 시도'), findsNothing);
+    expect(find.widgetWithText(OutlinedButton, '돌아가기'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
