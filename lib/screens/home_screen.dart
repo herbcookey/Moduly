@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../app.dart';
 import '../core/timezone_utils.dart';
 import '../models/app_models.dart';
+import 'widgets/recurrence_controls.dart';
 import '../state/app_state.dart';
 
 class HomeScreen extends ConsumerWidget {
@@ -618,6 +619,8 @@ class _MonthCell extends StatelessWidget {
       if (today) '오늘',
       if (selected) '선택됨',
       if (!inMonth) '해당 월 외',
+      if (events.any(_isRecurringEvent))
+        '반복 일정 ${events.where(_isRecurringEvent).length}개',
     ];
     final label =
         '$_dateLabel${state.isEmpty ? '' : ', ${state.join(', ')}'}'
@@ -707,6 +710,16 @@ class _MonthCell extends StatelessWidget {
                                     ).textTheme.labelSmall,
                                   ),
                                 ),
+                              if (events.length <= 2 &&
+                                  events.any(_isRecurringEvent))
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 2),
+                                  child: Icon(
+                                    Icons.repeat,
+                                    size: 14,
+                                    color: scheme.primary,
+                                  ),
+                                ),
                             ],
                           ),
                         )
@@ -717,16 +730,33 @@ class _MonthCell extends StatelessWidget {
                               (event) => Padding(
                                 padding: const EdgeInsets.only(bottom: 2),
                                 child: ExcludeSemantics(
-                                  child: Text(
-                                    event.title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .labelSmall
-                                        ?.copyWith(
-                                          color: scheme.onSurfaceVariant,
+                                  child: Row(
+                                    children: <Widget>[
+                                      if (_isRecurringEvent(event))
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            right: 3,
+                                          ),
+                                          child: Icon(
+                                            Icons.repeat,
+                                            size: 12,
+                                            color: scheme.primary,
+                                          ),
                                         ),
+                                      Expanded(
+                                        child: Text(
+                                          event.title,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .labelSmall
+                                              ?.copyWith(
+                                                color: scheme.onSurfaceVariant,
+                                              ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),
@@ -785,7 +815,8 @@ class _AgendaSliver extends StatelessWidget {
           if (a.allDay != b.allDay) return a.allDay ? -1 : 1;
           final byStart = a.startAt.compareTo(b.startAt);
           if (byStart != 0) return byStart;
-          return a.id.compareTo(b.id);
+          final byId = a.id.compareTo(b.id);
+          return byId != 0 ? byId : a.occurrenceKey.compareTo(b.occurrenceKey);
         });
       entries.add(_AgendaEntry.header(date));
       entries.addAll(dayEvents.map((event) => _AgendaEntry.event(date, event)));
@@ -1194,17 +1225,24 @@ class _EventCard extends StatelessWidget {
         .toSet()
         .length;
     final participantLabel = _participantLabel(assigned, previousMemberCount);
+    final repeated = _isRecurringEvent(event);
+    final repeatLabel = repeated
+        ? (event.recurrenceRule == null
+              ? '반복 일정'
+              : recurrenceSummary(event.recurrenceRule!, start: localStart))
+        : null;
     final timeLabel = event.allDay
         ? '종일'
         : '${formatTime(localStart)}부터 ${formatTime(localEnd)}';
     return Semantics(
       button: true,
       label:
-          '${event.title}, $timeLabel${contextLabel == null ? '' : ', $contextLabel'}, $participantLabel',
+          '${event.title}, $timeLabel${contextLabel == null ? '' : ', $contextLabel'}, '
+          '${repeatLabel == null ? '' : '반복 일정, $repeatLabel, '}$participantLabel',
       child: Card(
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: () => context.push('/event/${event.id}'),
+          onTap: () => context.push(_eventRoute(event)),
           child: IntrinsicHeight(
             child: Row(
               children: <Widget>[
@@ -1218,12 +1256,56 @@ class _EventCard extends StatelessWidget {
                         Row(
                           children: <Widget>[
                             Expanded(
-                              child: Text(
-                                event.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.titleMedium
-                                    ?.copyWith(fontWeight: FontWeight.w700),
+                              child: Row(
+                                children: <Widget>[
+                                  Flexible(
+                                    child: Text(
+                                      event.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                  ),
+                                  if (repeated) ...<Widget>[
+                                    const SizedBox(width: 6),
+                                    Semantics(
+                                      label: '반복 일정',
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 2,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Theme.of(
+                                            context,
+                                          ).colorScheme.secondaryContainer,
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: <Widget>[
+                                            Icon(
+                                              Icons.repeat,
+                                              size: 16,
+                                              color: Theme.of(
+                                                context,
+                                              ).colorScheme.primary,
+                                            ),
+                                            const SizedBox(width: 2),
+                                            const Text('반복'),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
                             Text(
@@ -1304,6 +1386,20 @@ class _EventCard extends StatelessWidget {
       ),
     );
   }
+}
+
+bool _isRecurringEvent(PlannerEvent event) =>
+    event.recurrenceRule != null ||
+    event.isOccurrence ||
+    event.occurrenceKey != 'single';
+
+String _eventRoute(PlannerEvent event) {
+  final seriesId = event.seriesId.trim().isEmpty ? event.id : event.seriesId;
+  if (event.occurrenceKey == 'single') return '/event/${event.id}';
+  return Uri(
+    path: '/event/$seriesId',
+    queryParameters: <String, String>{'occurrence': event.occurrenceKey},
+  ).toString();
 }
 
 bool _isCurrentMember(PlannerMember member) =>

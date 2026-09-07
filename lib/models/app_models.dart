@@ -81,6 +81,418 @@ List<String> canonicalEventMemberIds(Iterable<String> memberIds) {
   return List<String>.unmodifiable(result);
 }
 
+/// The only recurrence frequencies persisted by the v2 wire contract.
+enum RecurrenceFrequency { daily, weekly, monthly }
+
+extension RecurrenceFrequencyWire on RecurrenceFrequency {
+  String get wireName => switch (this) {
+    RecurrenceFrequency.daily => 'daily',
+    RecurrenceFrequency.weekly => 'weekly',
+    RecurrenceFrequency.monthly => 'monthly',
+  };
+
+  static RecurrenceFrequency parse(Object? value) => switch (value) {
+    'daily' => RecurrenceFrequency.daily,
+    'weekly' => RecurrenceFrequency.weekly,
+    'monthly' => RecurrenceFrequency.monthly,
+    _ => throw const FormatException('반복 규칙을 확인해 주세요.'),
+  };
+}
+
+enum RecurrenceEnd { never, count, until }
+
+extension RecurrenceEndWire on RecurrenceEnd {
+  String get wireName => switch (this) {
+    RecurrenceEnd.never => 'never',
+    RecurrenceEnd.count => 'count',
+    RecurrenceEnd.until => 'until',
+  };
+
+  static RecurrenceEnd parse(Object? value) => switch (value) {
+    'never' => RecurrenceEnd.never,
+    'count' => RecurrenceEnd.count,
+    'until' => RecurrenceEnd.until,
+    _ => throw const FormatException('반복 종료 조건을 확인해 주세요.'),
+  };
+}
+
+/// Scope used by recurring occurrence mutations.  `thisOccurrence` is named
+/// instead of `this` because the latter is a Dart keyword; its wire value is
+/// exactly `this`.
+enum EventEditScope { thisOccurrence, future, all }
+
+extension EventEditScopeWire on EventEditScope {
+  String get wireName => switch (this) {
+    EventEditScope.thisOccurrence => 'this',
+    EventEditScope.future => 'future',
+    EventEditScope.all => 'all',
+  };
+
+  static EventEditScope parse(Object? value) => switch (value) {
+    'this' => EventEditScope.thisOccurrence,
+    'future' => EventEditScope.future,
+    'all' => EventEditScope.all,
+    _ => throw const FormatException('일정 변경 범위를 확인해 주세요.'),
+  };
+}
+
+DateTime? _strictDateOnly(Object? value) {
+  if (value is! String || !RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) {
+    return null;
+  }
+  final year = int.tryParse(value.substring(0, 4));
+  final month = int.tryParse(value.substring(5, 7));
+  final day = int.tryParse(value.substring(8, 10));
+  if (year == null || month == null || day == null) return null;
+  final result = DateTime.utc(year, month, day);
+  return result.year == year && result.month == month && result.day == day
+      ? DateTime(year, month, day)
+      : null;
+}
+
+int _strictIntegral(Object? value) {
+  if (value is int) return value;
+  throw const FormatException('반복 규칙을 확인해 주세요.');
+}
+
+/// Immutable, validated recurrence rule.  The JSON representation is kept
+/// deliberately exact: adding an unknown field or using an end-specific field
+/// with the wrong end mode is rejected instead of being silently ignored.
+@immutable
+class RecurrenceRule {
+  RecurrenceRule({
+    required this.frequency,
+    this.interval = 1,
+    Iterable<int> weekdays = const <int>[],
+    this.end = RecurrenceEnd.never,
+    this.count,
+    DateTime? untilDate,
+    this.monthlyDay,
+  }) : weekdays = _validateWeekdays(frequency, weekdays),
+       untilDate = untilDate == null
+           ? null
+           : DateTime(untilDate.year, untilDate.month, untilDate.day) {
+    if (untilDate != null &&
+        (untilDate.hour != 0 ||
+            untilDate.minute != 0 ||
+            untilDate.second != 0 ||
+            untilDate.millisecond != 0 ||
+            untilDate.microsecond != 0)) {
+      throw const FormatException('반복 종료 날짜를 확인해 주세요.');
+    }
+    if (interval < 1 || interval > 999) {
+      throw const FormatException('반복 간격을 확인해 주세요.');
+    }
+    if (frequency == RecurrenceFrequency.monthly &&
+        (monthlyDay == null || monthlyDay! < 1 || monthlyDay! > 31)) {
+      throw const FormatException('반복 날짜를 확인해 주세요.');
+    }
+    if (frequency != RecurrenceFrequency.monthly && monthlyDay != null) {
+      throw const FormatException('반복 규칙을 확인해 주세요.');
+    }
+    switch (end) {
+      case RecurrenceEnd.never:
+        if (count != null || this.untilDate != null) {
+          throw const FormatException('반복 종료 조건을 확인해 주세요.');
+        }
+      case RecurrenceEnd.count:
+        if (count == null ||
+            count! < 1 ||
+            count! > 1000000 ||
+            this.untilDate != null) {
+          throw const FormatException('반복 횟수를 확인해 주세요.');
+        }
+      case RecurrenceEnd.until:
+        if (this.untilDate == null || count != null) {
+          throw const FormatException('반복 종료 날짜를 확인해 주세요.');
+        }
+    }
+  }
+
+  final RecurrenceFrequency frequency;
+  final int interval;
+  final List<int> weekdays;
+  final RecurrenceEnd end;
+  final int? count;
+  final DateTime? untilDate;
+  final int? monthlyDay;
+
+  static List<int> _validateWeekdays(
+    RecurrenceFrequency frequency,
+    Iterable<int> values,
+  ) {
+    final supplied = values.toList(growable: false);
+    if (supplied.any((value) => value < 1 || value > 7)) {
+      throw const FormatException('반복 요일을 확인해 주세요.');
+    }
+    for (var index = 1; index < supplied.length; index++) {
+      if (supplied[index - 1] >= supplied[index]) {
+        throw const FormatException('반복 요일은 중복 없이 오름차순이어야 합니다.');
+      }
+    }
+    final result = supplied.toList(growable: true);
+    if (frequency == RecurrenceFrequency.weekly && result.isEmpty) {
+      throw const FormatException('주간 반복 요일을 선택해 주세요.');
+    }
+    if (frequency != RecurrenceFrequency.weekly && result.isNotEmpty) {
+      throw const FormatException('반복 요일은 주간 반복에서만 사용할 수 있습니다.');
+    }
+    return List<int>.unmodifiable(result);
+  }
+
+  factory RecurrenceRule.fromJson(Object? input) {
+    if (input is! Map || input.keys.any((key) => key is! String)) {
+      throw const FormatException('반복 규칙을 확인해 주세요.');
+    }
+    final raw = input.cast<String, dynamic>();
+    const keys = <String>{
+      'frequency',
+      'interval',
+      'weekdays',
+      'end',
+      'count',
+      'until_date',
+      'monthly_day',
+    };
+    if (raw.length != keys.length ||
+        raw.keys.toSet().difference(keys).isNotEmpty) {
+      throw const FormatException('반복 규칙을 확인해 주세요.');
+    }
+    final frequency = RecurrenceFrequencyWire.parse(raw['frequency']);
+    final interval = _strictIntegral(raw['interval']);
+    final end = RecurrenceEndWire.parse(raw['end']);
+    final weekdaysRaw = raw['weekdays'];
+    if (weekdaysRaw is! List || weekdaysRaw.any((value) => value is! int)) {
+      throw const FormatException('반복 요일을 확인해 주세요.');
+    }
+    final count = raw['count'] == null ? null : _strictIntegral(raw['count']);
+    final untilDate = raw['until_date'] == null
+        ? null
+        : _strictDateOnly(raw['until_date']);
+    if (raw['until_date'] != null && untilDate == null) {
+      throw const FormatException('반복 종료 날짜를 확인해 주세요.');
+    }
+    final monthlyDay = raw['monthly_day'] == null
+        ? null
+        : _strictIntegral(raw['monthly_day']);
+    return RecurrenceRule(
+      frequency: frequency,
+      interval: interval,
+      weekdays: weekdaysRaw.cast<int>(),
+      end: end,
+      count: count,
+      untilDate: untilDate,
+      monthlyDay: monthlyDay,
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'frequency': frequency.wireName,
+    'interval': interval,
+    'weekdays': weekdays,
+    'end': end.wireName,
+    'count': count,
+    'until_date': untilDate == null ? null : _dateOnlyString(untilDate!),
+    'monthly_day': monthlyDay,
+  };
+
+  RecurrenceRule copyWith({
+    RecurrenceFrequency? frequency,
+    int? interval,
+    Iterable<int>? weekdays,
+    RecurrenceEnd? end,
+    int? count,
+    DateTime? untilDate,
+    int? monthlyDay,
+    bool clearCount = false,
+    bool clearUntilDate = false,
+    bool clearMonthlyDay = false,
+  }) {
+    return RecurrenceRule(
+      frequency: frequency ?? this.frequency,
+      interval: interval ?? this.interval,
+      weekdays: weekdays ?? this.weekdays,
+      end: end ?? this.end,
+      count: clearCount ? null : (count ?? this.count),
+      untilDate: clearUntilDate ? null : (untilDate ?? this.untilDate),
+      monthlyDay: clearMonthlyDay ? null : (monthlyDay ?? this.monthlyDay),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is RecurrenceRule &&
+      other.frequency == frequency &&
+      other.interval == interval &&
+      listEquals(other.weekdays, weekdays) &&
+      other.end == end &&
+      other.count == count &&
+      other.untilDate == untilDate &&
+      other.monthlyDay == monthlyDay;
+
+  @override
+  int get hashCode => Object.hash(
+    frequency,
+    interval,
+    Object.hashAll(weekdays),
+    end,
+    count,
+    untilDate,
+    monthlyDay,
+  );
+}
+
+/// Builder-friendly value object.  It deliberately does not bypass
+/// [RecurrenceRule]'s validation; [toRule] is the only conversion boundary.
+@immutable
+class RecurrenceRuleDraft {
+  RecurrenceRuleDraft({
+    required this.frequency,
+    this.interval = 1,
+    Iterable<int> weekdays = const <int>[],
+    this.end = RecurrenceEnd.never,
+    this.count,
+    this.untilDate,
+    this.monthlyDay,
+  }) : weekdays = List<int>.unmodifiable(weekdays);
+
+  final RecurrenceFrequency frequency;
+  final int interval;
+  final List<int> weekdays;
+  final RecurrenceEnd end;
+  final int? count;
+  final DateTime? untilDate;
+  final int? monthlyDay;
+
+  RecurrenceRule toRule() => RecurrenceRule(
+    frequency: frequency,
+    interval: interval,
+    weekdays: weekdays,
+    end: end,
+    count: count,
+    untilDate: untilDate,
+    monthlyDay: monthlyDay,
+  );
+}
+
+String _dateOnlyString(DateTime value) =>
+    '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+
+/// PostgreSQL recurrence ordinals are signed `bigint`s.  Keep the wire key
+/// decimal and fixed width, but reject values above bigint's signed maximum
+/// instead of accepting a 20-digit key that the database cannot represent.
+final BigInt maxOccurrenceOrdinal = BigInt.parse('9223372036854775807');
+
+String occurrenceKeyForIndex(int index) {
+  if (index < 0 || BigInt.from(index) > maxOccurrenceOrdinal) {
+    throw const FormatException('반복 일정 식별자를 확인해 주세요.');
+  }
+  return 'o${index.toString().padLeft(20, '0')}';
+}
+
+final RegExp _occurrenceKeyPattern = RegExp(r'^o\d{20}$');
+
+int? occurrenceIndexFromKey(Object? key) {
+  if (key == 'single') return null;
+  if (key is! String || !_occurrenceKeyPattern.hasMatch(key)) return null;
+  final value = BigInt.tryParse(key.substring(1));
+  if (value == null || value < BigInt.zero || value > maxOccurrenceOrdinal) {
+    return null;
+  }
+  // Every accepted ordinal is within Dart's signed 64-bit int range on the
+  // supported Flutter VM, so this conversion cannot truncate or wrap.
+  return value.toInt();
+}
+
+bool isValidOccurrenceKey(Object? key) {
+  if (key == 'single') return true;
+  if (key is! String || !_occurrenceKeyPattern.hasMatch(key)) return false;
+  final ordinal = BigInt.tryParse(key.substring(1));
+  return ordinal != null &&
+      ordinal >= BigInt.zero &&
+      ordinal <= maxOccurrenceOrdinal;
+}
+
+@immutable
+class RecurrenceMutationReceipt {
+  RecurrenceMutationReceipt({
+    required this.groupId,
+    required this.eventId,
+    required this.occurrenceKey,
+    required this.seriesVersion,
+    required this.occurrenceVersion,
+    required this.scope,
+    this.committed = true,
+    this.changed = true,
+  }) {
+    if (groupId.trim().isEmpty ||
+        eventId.trim().isEmpty ||
+        !isValidOccurrenceKey(occurrenceKey) ||
+        seriesVersion < 0 ||
+        occurrenceVersion < 0 ||
+        !committed) {
+      throw FormatException('일정 변경 응답을 확인해 주세요.');
+    }
+  }
+
+  final String groupId;
+  final String eventId;
+  final String occurrenceKey;
+  final int seriesVersion;
+  final int occurrenceVersion;
+  final EventEditScope scope;
+  final bool committed;
+  final bool changed;
+
+  factory RecurrenceMutationReceipt.fromJson(Object? input) {
+    if (input is! Map || input.keys.any((key) => key is! String)) {
+      throw const FormatException('일정 변경 응답을 확인해 주세요.');
+    }
+    final raw = input.cast<String, dynamic>();
+    const keys = <String>{
+      'group_id',
+      'event_id',
+      'occurrence_key',
+      'series_version',
+      'occurrence_version',
+      'scope',
+      'committed',
+      'changed',
+    };
+    if (raw.length != keys.length ||
+        raw.keys.toSet().difference(keys).isNotEmpty ||
+        !keys.every(raw.containsKey) ||
+        raw['group_id'] is! String ||
+        raw['event_id'] is! String ||
+        raw['occurrence_key'] is! String ||
+        raw['committed'] != true ||
+        raw['changed'] is! bool) {
+      throw const FormatException('일정 변경 응답을 확인해 주세요.');
+    }
+    return RecurrenceMutationReceipt(
+      groupId: raw['group_id'] as String,
+      eventId: raw['event_id'] as String,
+      occurrenceKey: raw['occurrence_key'] as String,
+      seriesVersion: _strictIntegral(raw['series_version']),
+      occurrenceVersion: _strictIntegral(raw['occurrence_version']),
+      scope: EventEditScopeWire.parse(raw['scope']),
+      committed: raw['committed'] as bool,
+      changed: raw['changed'] as bool,
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'group_id': groupId,
+    'event_id': eventId,
+    'occurrence_key': occurrenceKey,
+    'series_version': seriesVersion,
+    'occurrence_version': occurrenceVersion,
+    'scope': scope.wireName,
+    'committed': committed,
+    'changed': changed,
+  };
+}
+
 @immutable
 class PlannerUser {
   const PlannerUser({required this.id, required this.email, this.displayName});
@@ -396,8 +808,28 @@ class PlannerEvent {
     this.version = 1,
     DateTime? updatedAt,
     this.deletedAt,
+    String? seriesId,
+    this.occurrenceKey = 'single',
+    this.occurrenceIndex = 0,
+    DateTime? scheduledStartsAt,
+    DateTime? scheduledEndsAt,
+    int? occurrenceVersion,
+    this.isOccurrence = false,
+    this.recurrenceRule,
   }) : _memberIds = canonicalEventMemberIds(memberIds),
-       updatedAt = updatedAt ?? startAt;
+       updatedAt = updatedAt ?? startAt,
+       seriesId = seriesId ?? id,
+       scheduledStartsAt = scheduledStartsAt ?? startAt,
+       scheduledEndsAt = scheduledEndsAt ?? endAt,
+       occurrenceVersion = occurrenceVersion ?? version {
+    if (!isValidOccurrenceKey(occurrenceKey)) {
+      throw const FormatException('반복 일정 식별자를 확인해 주세요.');
+    }
+    if (occurrenceIndex < 0 ||
+        BigInt.from(occurrenceIndex) > maxOccurrenceOrdinal) {
+      throw const FormatException('반복 일정 순서를 확인해 주세요.');
+    }
+  }
 
   final String id;
   final String groupId;
@@ -425,6 +857,21 @@ class PlannerEvent {
   final DateTime updatedAt;
   final DateTime? deletedAt;
 
+  /// Series identity. Singleton events use their existing `id`, preserving
+  /// source compatibility while repeated projections share one anchor id.
+  final String seriesId;
+  final String occurrenceKey;
+  final int occurrenceIndex;
+
+  /// The occurrence's pre-override scheduled instant (UTC).
+  final DateTime? scheduledStartsAt;
+  final DateTime? scheduledEndsAt;
+  final int occurrenceVersion;
+  final bool isOccurrence;
+  final RecurrenceRule? recurrenceRule;
+
+  String get identityKey => '$seriesId|$occurrenceKey';
+
   bool get isDeleted => deletedAt != null;
 
   PlannerEvent copyWith({
@@ -446,6 +893,16 @@ class PlannerEvent {
     DateTime? deletedAt,
     bool clearDeletedAt = false,
     bool clearAllDayDates = false,
+    String? seriesId,
+    String? occurrenceKey,
+    int? occurrenceIndex,
+    DateTime? scheduledStartsAt,
+    DateTime? scheduledEndsAt,
+    int? occurrenceVersion,
+    bool? isOccurrence,
+    RecurrenceRule? recurrenceRule,
+    bool clearScheduledStartsAt = false,
+    bool clearRecurrenceRule = false,
   }) {
     return PlannerEvent(
       id: id ?? this.id,
@@ -468,6 +925,20 @@ class PlannerEvent {
       version: version ?? this.version,
       updatedAt: updatedAt ?? this.updatedAt,
       deletedAt: clearDeletedAt ? null : (deletedAt ?? this.deletedAt),
+      seriesId: seriesId ?? this.seriesId,
+      occurrenceKey: occurrenceKey ?? this.occurrenceKey,
+      occurrenceIndex: occurrenceIndex ?? this.occurrenceIndex,
+      scheduledStartsAt: clearScheduledStartsAt
+          ? null
+          : (scheduledStartsAt ?? this.scheduledStartsAt),
+      scheduledEndsAt: clearScheduledStartsAt
+          ? null
+          : (scheduledEndsAt ?? this.scheduledEndsAt),
+      occurrenceVersion: occurrenceVersion ?? this.occurrenceVersion,
+      isOccurrence: isOccurrence ?? this.isOccurrence,
+      recurrenceRule: clearRecurrenceRule
+          ? null
+          : (recurrenceRule ?? this.recurrenceRule),
     );
   }
 
@@ -489,11 +960,19 @@ class PlannerEvent {
         other.allDayEndDate == allDayEndDate &&
         other.version == version &&
         other.updatedAt == updatedAt &&
-        other.deletedAt == deletedAt;
+        other.deletedAt == deletedAt &&
+        other.seriesId == seriesId &&
+        other.occurrenceKey == occurrenceKey &&
+        other.occurrenceIndex == occurrenceIndex &&
+        other.scheduledStartsAt == scheduledStartsAt &&
+        other.scheduledEndsAt == scheduledEndsAt &&
+        other.occurrenceVersion == occurrenceVersion &&
+        other.isOccurrence == isOccurrence &&
+        other.recurrenceRule == recurrenceRule;
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll(<Object?>[
     id,
     groupId,
     title,
@@ -510,7 +989,15 @@ class PlannerEvent {
     version,
     updatedAt,
     deletedAt,
-  );
+    seriesId,
+    occurrenceKey,
+    occurrenceIndex,
+    scheduledStartsAt,
+    scheduledEndsAt,
+    occurrenceVersion,
+    isOccurrence,
+    recurrenceRule,
+  ]);
 }
 
 @immutable
@@ -526,6 +1013,7 @@ class EventDraft {
     this.timezone = 'UTC',
     this.allDayStartDate,
     this.allDayEndDate,
+    this.recurrence,
   }) : hasExplicitMemberIds = memberIds != null,
        _memberIds = canonicalEventMemberIds(memberIds ?? const <String>[]);
 
@@ -546,6 +1034,8 @@ class EventDraft {
   final String timezone;
   final DateTime? allDayStartDate;
   final DateTime? allDayEndDate;
+  final RecurrenceRule? recurrence;
+  RecurrenceRule? get recurrenceRule => recurrence;
 
   EventDraft copyWith({
     String? title,
@@ -559,6 +1049,8 @@ class EventDraft {
     DateTime? allDayStartDate,
     DateTime? allDayEndDate,
     bool clearAllDayDates = false,
+    RecurrenceRule? recurrence,
+    bool clearRecurrence = false,
   }) {
     final nextHasExplicitMemberIds = memberIds != null || hasExplicitMemberIds;
     return EventDraft(
@@ -578,6 +1070,7 @@ class EventDraft {
       allDayEndDate: clearAllDayDates
           ? null
           : (allDayEndDate ?? this.allDayEndDate),
+      recurrence: clearRecurrence ? null : (recurrence ?? this.recurrence),
     );
   }
 
@@ -594,7 +1087,8 @@ class EventDraft {
         other.colorValue == colorValue &&
         other.timezone == timezone &&
         other.allDayStartDate == allDayStartDate &&
-        other.allDayEndDate == allDayEndDate;
+        other.allDayEndDate == allDayEndDate &&
+        other.recurrence == recurrence;
   }
 
   @override
@@ -610,6 +1104,7 @@ class EventDraft {
     timezone,
     allDayStartDate,
     allDayEndDate,
+    recurrence,
   );
 }
 
@@ -660,11 +1155,9 @@ class EventRange {
       'EventRange($startUtc, $endUtc, timezone: $viewTimezone)';
 }
 
-/// The v1 keyset tuple returned by the bounded range RPC.  The wire token is
-/// intentionally opaque to callers; this class only exists so local paging
-/// can apply the same strict tuple ordering as the server.  Future recurrence
-/// support can populate [occurrenceKey] in a versioned cursor without
-/// changing the current v1 payload shape.
+/// A strict keyset tuple returned by the bounded range RPC.  Empty occurrence
+/// keys retain the legacy v1 payload; any materialized occurrence uses v2 and
+/// carries the complete `(starts_at,event_id,occurrence_key)` tuple.
 @immutable
 class EventRangeCursor {
   EventRangeCursor({
@@ -676,7 +1169,8 @@ class EventRangeCursor {
     if (eventId.isEmpty || eventId.trim() != eventId) {
       throw const FormatException('페이지 커서를 확인해 주세요.');
     }
-    if (occurrenceKey.trim() != occurrenceKey) {
+    if (occurrenceKey.trim() != occurrenceKey ||
+        (occurrenceKey.isNotEmpty && !isValidOccurrenceKey(occurrenceKey))) {
       throw const FormatException('페이지 커서를 확인해 주세요.');
     }
   }
@@ -685,18 +1179,23 @@ class EventRangeCursor {
   final String eventId;
   final String occurrenceKey;
 
-  /// Encodes the current v1 token expected by `events_for_range`.  Recurrence
-  /// keys are reserved for a future cursor version and therefore cannot be
-  /// silently dropped from a v1 request.
   String encode() {
-    if (occurrenceKey.isNotEmpty) {
-      throw const FormatException('지원하지 않는 페이지 커서 버전입니다.');
+    final isV2 = occurrenceKey.isNotEmpty;
+    if (isV2 && !isValidOccurrenceKey(occurrenceKey)) {
+      throw const FormatException('페이지 커서를 확인해 주세요.');
     }
-    final payload = <String, Object>{
-      'v': 1,
-      'starts_at': startsAtUtc.toIso8601String(),
-      'event_id': eventId,
-    };
+    final payload = isV2
+        ? <String, Object>{
+            'v': 2,
+            'starts_at': startsAtUtc.toIso8601String(),
+            'event_id': eventId,
+            'occurrence_key': occurrenceKey,
+          }
+        : <String, Object>{
+            'v': 1,
+            'starts_at': startsAtUtc.toIso8601String(),
+            'event_id': eventId,
+          };
     return base64Url
         .encode(utf8.encode(jsonEncode(payload)))
         .replaceAll('=', '');
@@ -718,11 +1217,17 @@ class EventRangeCursor {
         throw const FormatException('페이지 커서를 확인해 주세요.');
       }
       final payload = raw.cast<String, dynamic>();
-      const expectedKeys = <String>{'v', 'starts_at', 'event_id'};
       final startsAtRaw = payload['starts_at'];
+      final version = payload['v'];
+      if (version is! int || (version != 1 && version != 2)) {
+        throw const FormatException('페이지 커서를 확인해 주세요.');
+      }
+      final expectedKeys = version == 1
+          ? const <String>{'v', 'starts_at', 'event_id'}
+          : const <String>{'v', 'starts_at', 'event_id', 'occurrence_key'};
       if (payload.length != expectedKeys.length ||
-          !payload.keys.toSet().containsAll(expectedKeys) ||
-          payload['v'] != 1 ||
+          payload.keys.toSet().difference(expectedKeys).isNotEmpty ||
+          !expectedKeys.every(payload.containsKey) ||
           startsAtRaw is! String ||
           payload['event_id'] is! String) {
         throw const FormatException('페이지 커서를 확인해 주세요.');
@@ -732,7 +1237,15 @@ class EventRangeCursor {
         throw const FormatException('페이지 커서를 확인해 주세요.');
       }
       final eventId = payload['event_id'] as String;
-      return EventRangeCursor(startsAtUtc: startsAt, eventId: eventId);
+      final occurrenceKey = version == 1 ? '' : payload['occurrence_key'];
+      if (version == 2 && !isValidOccurrenceKey(occurrenceKey)) {
+        throw const FormatException('페이지 커서를 확인해 주세요.');
+      }
+      return EventRangeCursor(
+        startsAtUtc: startsAt,
+        eventId: eventId,
+        occurrenceKey: occurrenceKey as String? ?? '',
+      );
     } on FormatException {
       rethrow;
     } catch (_) {
@@ -754,7 +1267,8 @@ class EventRangeCursor {
   int get hashCode => Object.hash(startsAtUtc, eventId, occurrenceKey);
 
   @override
-  String toString() => 'EventRangeCursor($startsAtUtc, $eventId)';
+  String toString() =>
+      'EventRangeCursor($startsAtUtc, $eventId, $occurrenceKey)';
 }
 
 /// Immutable page returned by a bounded event range read.

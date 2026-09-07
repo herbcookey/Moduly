@@ -307,8 +307,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/event/:id',
-        builder: (context, state) =>
-            EventEditorScreen(eventId: state.pathParameters['id']),
+        builder: (context, state) => EventEditorScreen(
+          eventId: state.pathParameters['id'],
+          occurrenceKey:
+              state.uri.queryParameters['occurrence'] ??
+              state.uri.queryParameters['occurrence_key'],
+        ),
       ),
     ],
   );

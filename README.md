@@ -20,6 +20,8 @@ The application tables are:
 | `events` | Group events with UTC `timestamptz` boundaries, IANA timezone, all-day date range, and an unsigned ARGB color value. |
 | `audit_logs` | Append-only lifecycle audit records (minimal metadata). |
 | `invite_join_attempts` | Private rolling-window rate-limit ledger for invite attempts. |
+| `event_recurrence_rules` | Additive daily/weekly/monthly rule for an existing event series anchor. |
+| `event_occurrence_overrides` | Sparse, versioned exceptions and tombstones keyed by stable occurrence identity. |
 
 Every public table has RLS enabled. Policies derive identity from
 `auth.uid()`: active members can see active group data, owners control invites
@@ -184,6 +186,48 @@ manual checks on a 320x568 viewport with 2x text, a 300 px keyboard inset, hardw
 keyboard focus, VoiceOver/TalkBack, and both 35- and 42-cell months. These live
 Supabase, load, network, and real-device checks are external to this repository
 and are not claimed as executed here.
+
+### Recurring events (Feature 2)
+
+Recurring data is additive: the existing `events.id` remains the logical
+series anchor, while a materialized occurrence carries the same anchor id and
+an opaque, stable `occurrence_key`. Legacy single events keep the `single`
+key and the `/event/:id` route. Occurrences are expanded only inside the
+requested bounded calendar range, with a defensive cap; the client never
+creates an unbounded row set.
+
+The editor places `반복` immediately after the time fields. It supports
+`매일`, `매주`, and `매월`, a 1–999 interval, ISO Monday-first weekday chips,
+repeat count, or an inclusive end date. Weekly creation selects the DTSTART
+weekday by default. Monthly rules preserve the requested day and clamp to the
+last day in shorter months; the notice in the editor states this explicitly.
+The live Korean summary is announced to screen readers and is reused on day,
+month, and Agenda cards as a repeat badge.
+
+Editing or deleting an occurrence always opens a scrollable radio confirmation
+with the safest default, `이번 일정만`. The other choices are `이번 일정과
+이후` and `전체 일정`; cancelling or dismissing the dialog is a no-op. The
+future/all copy warns that existing exceptions can be reset. Participant
+assignments are series-wide inherited fields: they are shown on every
+occurrence and can change only when the full series scope is selected. Title,
+memo, color, timezone, duration, and all-day boundaries follow the same
+series/exception inheritance contract, and a committed mutation is followed
+by an authoritative bounded refresh rather than a client-side fan-out.
+
+For a credential-free UI check run:
+
+```sh
+flutter test --no-pub test/recurrence_ui_test.dart \
+  test/recurrence_accessibility_test.dart
+flutter analyze --no-pub
+```
+
+On a disposable Auth/Postgres deployment, also verify a daily rule across a
+DST transition, a monthly day 29–31 across short months, all-day boundaries,
+this/future/all exception deletion, stale-version rejection, and duplicate-free
+range paging. Repeat the UI checks at 320x568, 2x text, a 300 px keyboard
+inset, hardware keyboard focus, and VoiceOver/TalkBack. These live service and
+real-device checks are external to this checkout and are not claimed as run.
 
 ## Flutter development
 
@@ -528,14 +572,14 @@ revoked/expired/max-use, stale-version, and soft-delete cases.
 The current UI/remote adapter covers email/password auth, email confirmation and
 password recovery, group selection, member listing, owner member removal, invite
 creation/listing/revocation with expiry and max-use controls, event create/edit,
-timed/all-day events, participant assignment/filtering, creator-versus-group-owner
-participant permissions, optimistic conflict handling, parent-event realtime
-refreshes, and authenticated self-service account deletion with explicit
-owned-data cleanup. The backend additionally provides profile/timezone records
-for the next UI iteration. Useful follow-ups are profile editing, recurring events,
-reminders/notifications, attachment storage, pagination and rate-limit retention
-jobs, TLS/secret management in deployment, backups, and a full pgTAP/RLS
-integration suite.
+timed/all-day and recurring events, participant assignment/filtering,
+creator-versus-group-owner participant permissions, optimistic conflict handling,
+parent-event realtime refreshes, and authenticated self-service account deletion
+with explicit owned-data cleanup. The backend additionally provides
+profile/timezone records for the next UI iteration. Useful follow-ups are profile
+editing, reminders/notifications, attachment storage, pagination and rate-limit
+retention jobs, TLS/secret management in deployment, backups, and a full
+pgTAP/RLS integration suite.
 
 ### Manual group/account verification
 

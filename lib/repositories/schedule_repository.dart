@@ -6,6 +6,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../core/config/app_config.dart';
 import '../core/demo_identity.dart';
 import '../core/invite_code_utils.dart';
+import '../core/recurrence.dart';
 import '../core/timezone_utils.dart';
 import '../models/app_models.dart';
 
@@ -183,6 +184,18 @@ abstract interface class EventByIdReadCapability {
   });
 }
 
+/// Additive occurrence point lookup.  Keeping this separate means old detail
+/// route test doubles that implement [EventByIdReadCapability] continue to
+/// compile while recurring routes can use the exact occurrence key.
+abstract interface class EventOccurrenceReadCapability {
+  Future<PlannerEvent?> eventOccurrenceByKey({
+    required String userId,
+    required String groupId,
+    required String eventId,
+    required String occurrenceKey,
+  });
+}
+
 /// Optional capability for repositories that can atomically replace the
 /// participant rows belonging to an existing event.  The base repository
 /// deliberately does not require this method so older adapters and tests keep
@@ -198,6 +211,52 @@ abstract interface class EventMemberAssignmentCapability {
     String eventId, {
     required Iterable<String> memberIds,
     required int expectedVersion,
+    String? actorId,
+  });
+}
+
+/// Authenticated capability for replacing the participant assignment of a
+/// recurring series.  Recurring assignments are series-wide and must retain
+/// the event creator; the operation therefore uses the recurrence RPC and
+/// returns its committed receipt instead of the legacy event-row payload.
+///
+/// Keeping this additive prevents older singleton-only adapters and test
+/// doubles from accidentally taking the recurring path through the legacy
+/// participant RPC.
+abstract interface class RecurringEventMemberAssignmentCapability {
+  Future<RecurrenceMutationReceipt> replaceRecurringEventMembers({
+    required PlannerEvent event,
+    required Iterable<String> memberIds,
+    required int expectedVersion,
+    String? actorId,
+  });
+}
+
+/// Recurring-series capability.  Kept additive to [ScheduleRepository] so
+/// legacy adapters/fakes retain the singleton API.  Scope writes return a
+/// committed receipt; callers must refetch their bounded range rather than
+/// fan out an optimistic occurrence projection.
+abstract interface class RecurrenceCapability {
+  Future<PlannerEvent> createRecurringEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  );
+
+  Future<RecurrenceMutationReceipt> updateEventOccurrence({
+    required PlannerEvent event,
+    required EventDraft draft,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+    String? actorId,
+  });
+
+  Future<RecurrenceMutationReceipt> deleteEventOccurrence({
+    required PlannerEvent event,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
     String? actorId,
   });
 }
@@ -315,6 +374,16 @@ class _EventInvalidationChannelState {
   bool subscribedHandled = false;
 }
 
+class _LocalRecurrenceSegment {
+  const _LocalRecurrenceSegment({
+    required this.template,
+    required this.ordinalOffset,
+  });
+
+  final PlannerEvent template;
+  final int ordinalOffset;
+}
+
 /// 메모리 기반 미리보기 저장소다. Supabase URL과 공개 키가 없거나 초기화가
 /// 실패해 설정 화면에 오류가 표시될 때만 선택되므로, 설정된 백엔드를
 /// 실수로 가리지 않는다.
@@ -325,8 +394,11 @@ class LocalScheduleRepository
         UserScopedEventReadCapability,
         GroupLifecycleCapability,
         EventMemberAssignmentCapability,
+        RecurringEventMemberAssignmentCapability,
+        RecurrenceCapability,
         BoundedEventRangeReadCapability,
         EventByIdReadCapability,
+        EventOccurrenceReadCapability,
         InvitePreviewCapability {
   LocalScheduleRepository({
     Iterable<PlannerMember> seedMembers = const [],
@@ -358,6 +430,10 @@ class LocalScheduleRepository
       <String, List<PlannerMember>>{};
   final Map<String, List<PlannerEvent>> _events =
       <String, List<PlannerEvent>>{};
+  final Map<String, List<_LocalRecurrenceSegment>> _recurrenceSegments =
+      <String, List<_LocalRecurrenceSegment>>{};
+  final Map<String, Map<String, PlannerEvent>> _occurrenceOverrides =
+      <String, Map<String, PlannerEvent>>{};
   final Map<String, InviteCode> _invites = <String, InviteCode>{};
   final Map<String, StreamController<List<PlannerEvent>>> _controllers =
       <String, StreamController<List<PlannerEvent>>>{};
@@ -377,6 +453,9 @@ class LocalScheduleRepository
   int _inviteCounter = 0;
 
   DateTime _nowUtc() => _clock().toUtc();
+
+  static String _seriesSegmentsKey(String groupId, String eventId) =>
+      '$groupId|$eventId';
 
   /// Records one real invite attempt in an actor-scoped sliding-hour ledger.
   /// The ledgers intentionally contain timestamps only: bearer tokens never
@@ -599,15 +678,11 @@ class LocalScheduleRepository
       participantId: participantId,
     );
     final normalizedParticipant = participantId?.trim();
-    final candidates = (_events[groupId] ?? const <PlannerEvent>[])
-        .where(
-          (event) =>
-              !event.isDeleted &&
-              eventOverlapsCalendarRange(event, range) &&
-              (normalizedParticipant == null ||
-                  event.memberIds.contains(normalizedParticipant)),
-        )
-        .toList(growable: false);
+    final candidates = _materializedEventsForRange(
+      groupId: groupId,
+      range: range,
+      participantId: normalizedParticipant,
+    );
     candidates.sort(_compareEventRangeRows);
 
     final afterCursor = cursor == null
@@ -621,6 +696,9 @@ class LocalScheduleRepository
         ? EventRangeCursor(
             startsAtUtc: pageEvents.last.startAt.toUtc(),
             eventId: pageEvents.last.id,
+            occurrenceKey: pageEvents.last.occurrenceKey == 'single'
+                ? ''
+                : pageEvents.last.occurrenceKey,
           )
         : null;
     return EventRangePage(
@@ -646,6 +724,56 @@ class LocalScheduleRepository
     if (event == null || event.isDeleted) return null;
     if (event.groupId != groupId) return null;
     return event;
+  }
+
+  @override
+  Future<PlannerEvent?> eventOccurrenceByKey({
+    required String userId,
+    required String groupId,
+    required String eventId,
+    required String occurrenceKey,
+  }) async {
+    if (userId.trim().isEmpty ||
+        groupId.trim().isEmpty ||
+        eventId.trim().isEmpty ||
+        eventId != eventId.trim()) {
+      throw const ScheduleValidationException('로그인 세션과 일정을 확인해 주세요.');
+    }
+    if (!isValidOccurrenceKey(occurrenceKey)) {
+      throw const ScheduleValidationException('반복 일정 식별자를 확인해 주세요.');
+    }
+    _requireBoundedActiveMember(groupId, userId);
+    final event = (_events[groupId] ?? const <PlannerEvent>[])
+        .where((candidate) => candidate.id == eventId)
+        .firstOrNull;
+    if (event == null || event.isDeleted) return null;
+    if (occurrenceKey == 'single' && event.recurrenceRule == null) {
+      return event;
+    }
+    if (event.recurrenceRule == null) return null;
+    final requestedKey = occurrenceKey == 'single'
+        ? occurrenceKeyForIndex(0)
+        : occurrenceKey;
+    final index = occurrenceIndexFromKey(requestedKey);
+    if (index == null) return null;
+    final segments =
+        _recurrenceSegments[_seriesSegmentsKey(groupId, event.id)] ??
+        <_LocalRecurrenceSegment>[
+          _LocalRecurrenceSegment(template: event, ordinalOffset: 0),
+        ];
+    for (final segment in segments.reversed) {
+      if (index < segment.ordinalOffset) continue;
+      final projected = recurringOccurrenceAtIndex(
+        segment.template,
+        index,
+        ordinalOffset: segment.ordinalOffset,
+      );
+      if (projected == null) continue;
+      final overridden = _occurrenceOverrides[groupId]?[projected.identityKey];
+      if (overridden?.isDeleted == true) return null;
+      return overridden ?? projected;
+    }
+    return null;
   }
 
   @override
@@ -773,7 +901,9 @@ class LocalScheduleRepository
 
   static int _compareEventRangeRows(PlannerEvent left, PlannerEvent right) {
     final byStart = left.startAt.toUtc().compareTo(right.startAt.toUtc());
-    return byStart != 0 ? byStart : left.id.compareTo(right.id);
+    if (byStart != 0) return byStart;
+    final byId = left.id.compareTo(right.id);
+    return byId != 0 ? byId : left.occurrenceKey.compareTo(right.occurrenceKey);
   }
 
   static bool _isAfterEventRangeCursor(
@@ -781,8 +911,90 @@ class LocalScheduleRepository
     EventRangeCursor cursor,
   ) {
     final byStart = event.startAt.toUtc().compareTo(cursor.startsAtUtc);
-    return byStart > 0 ||
-        (byStart == 0 && event.id.compareTo(cursor.eventId) > 0);
+    if (byStart > 0) return true;
+    if (byStart < 0) return false;
+    final byId = event.id.compareTo(cursor.eventId);
+    if (byId > 0) return true;
+    if (byId < 0) return false;
+    // A v1 cursor intentionally has no occurrence component and therefore
+    // cannot resume a repeated projection for the same anchor.  v2 compares
+    // the complete tuple exactly.
+    return cursor.occurrenceKey.isNotEmpty &&
+        event.occurrenceKey.compareTo(cursor.occurrenceKey) > 0;
+  }
+
+  List<PlannerEvent> _materializedEventsForRange({
+    required String groupId,
+    required EventRange range,
+    String? participantId,
+  }) {
+    final raw = _events[groupId] ?? const <PlannerEvent>[];
+    final result = <PlannerEvent>[];
+    final recurring = <_LocalRecurrenceSegment>[];
+    for (final event in raw.where((event) => event.recurrenceRule != null)) {
+      final segments =
+          _recurrenceSegments[_seriesSegmentsKey(groupId, event.id)];
+      if (segments == null) {
+        recurring.add(
+          _LocalRecurrenceSegment(template: event, ordinalOffset: 0),
+        );
+      } else {
+        recurring.addAll(segments);
+      }
+    }
+    for (final event in raw.where((event) => event.recurrenceRule == null)) {
+      if (!event.isDeleted &&
+          eventOverlapsCalendarRange(event, range) &&
+          (participantId == null || event.memberIds.contains(participantId))) {
+        result.add(event);
+      }
+    }
+    // Keep track of identities emitted by the arithmetic schedule walk. An
+    // occurrence override may move its effective start into this range while
+    // its scheduled start is outside the bounded look-behind (or even years
+    // away). Discover such rows from the sparse override index before the
+    // final overlap filter instead of requiring the schedule walk to find the
+    // original occurrence first.
+    final emittedIdentities = <String>{
+      for (final event in result) event.identityKey,
+    };
+    for (final segment in recurring) {
+      for (final occurrence in expandRecurringEvent(
+        segment.template,
+        range,
+        ordinalOffset: segment.ordinalOffset,
+      )) {
+        final overridden =
+            _occurrenceOverrides[groupId]?[occurrence.identityKey];
+        final resolved = overridden ?? occurrence;
+        if (resolved.isDeleted ||
+            !eventOverlapsCalendarRange(resolved, range) ||
+            (participantId != null &&
+                !resolved.memberIds.contains(participantId))) {
+          continue;
+        }
+        result.add(resolved);
+        emittedIdentities.add(resolved.identityKey);
+      }
+    }
+    final overrides = _occurrenceOverrides[groupId];
+    if (overrides != null) {
+      for (final resolved in overrides.values) {
+        if (resolved.groupId != groupId ||
+            resolved.recurrenceRule == null ||
+            !resolved.isOccurrence ||
+            resolved.isDeleted ||
+            !isValidOccurrenceKey(resolved.occurrenceKey) ||
+            !eventOverlapsCalendarRange(resolved, range) ||
+            (participantId != null &&
+                !resolved.memberIds.contains(participantId)) ||
+            !emittedIdentities.add(resolved.identityKey)) {
+          continue;
+        }
+        result.add(resolved);
+      }
+    }
+    return result;
   }
 
   void _emitGroupLifecycle(String groupId) {
@@ -1280,6 +1492,9 @@ class LocalScheduleRepository
     String groupId,
     EventDraft draft,
   ) async {
+    if (draft.recurrence != null) {
+      return createRecurringEvent(userId, groupId, draft);
+    }
     _requireActiveMember(groupId, userId);
     final normalizedDraft = _normalizeDraft(draft);
     final memberIds = _normalizeEventMemberIds(
@@ -1296,7 +1511,7 @@ class LocalScheduleRepository
       endAt: normalizedDraft.endAt.toUtc(),
       allDay: normalizedDraft.allDay,
       ownerId: userId,
-      memberIds: memberIds,
+      memberIds: memberIds.toList(growable: false),
       colorValue: normalizedDraft.colorValue,
       timezone: normalizedDraft.timezone,
       updatedAt: DateTime.now().toUtc(),
@@ -1306,6 +1521,526 @@ class LocalScheduleRepository
     _events.putIfAbsent(groupId, () => <PlannerEvent>[]).add(event);
     _emit(groupId);
     return event;
+  }
+
+  @override
+  Future<PlannerEvent> createRecurringEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  ) async {
+    _requireActiveMember(groupId, userId);
+    final rule = draft.recurrence;
+    if (rule == null) return createEvent(userId, groupId, draft);
+    final normalizedDraft = _normalizeDraft(draft);
+    _validateRuleAnchor(rule, normalizedDraft);
+    final memberIds = _normalizeEventMemberIds(
+      groupId,
+      normalizedDraft.memberIds,
+      // Recurring series always include their creator in the canonical
+      // series-wide assignment, even when the caller supplied an explicit
+      // list.  This mirrors the create RPC's creator invariant.
+      defaultCreatorId: userId,
+    );
+    final id = 'event-${DateTime.now().microsecondsSinceEpoch}-${_counter++}';
+    final event = PlannerEvent(
+      id: id,
+      seriesId: id,
+      groupId: groupId,
+      title: normalizedDraft.title.trim(),
+      note: normalizedDraft.note,
+      startAt: normalizedDraft.startAt.toUtc(),
+      endAt: normalizedDraft.endAt.toUtc(),
+      allDay: normalizedDraft.allDay,
+      ownerId: userId,
+      memberIds: memberIds.toList(growable: false),
+      colorValue: normalizedDraft.colorValue,
+      timezone: normalizedDraft.timezone,
+      updatedAt: DateTime.now().toUtc(),
+      allDayStartDate: normalizedDraft.allDayStartDate,
+      allDayEndDate: normalizedDraft.allDayEndDate,
+      recurrenceRule: rule,
+      occurrenceKey: 'single',
+      occurrenceIndex: 0,
+      isOccurrence: false,
+    );
+    _events.putIfAbsent(groupId, () => <PlannerEvent>[]).add(event);
+    _recurrenceSegments
+        .putIfAbsent(
+          _seriesSegmentsKey(groupId, id),
+          () => <_LocalRecurrenceSegment>[],
+        )
+        .add(_LocalRecurrenceSegment(template: event, ordinalOffset: 0));
+    _emit(groupId);
+    // The first occurrence is the useful result of a create RPC.  Keep the
+    // series anchor in the backing list while returning the materialized row.
+    final firstRange = EventRange(
+      startUtc: event.startAt.subtract(const Duration(days: 1)),
+      endUtc: event.startAt.add(const Duration(days: 367)),
+      viewTimezone: event.timezone,
+    );
+    return expandRecurringEvent(event, firstRange).firstOrNull ?? event;
+  }
+
+  @override
+  Future<RecurrenceMutationReceipt> updateEventOccurrence({
+    required PlannerEvent event,
+    required EventDraft draft,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+    String? actorId,
+  }) async {
+    final effectiveActor = actorId ?? event.ownerId;
+    _requireActiveMember(event.groupId, effectiveActor);
+    final list = _events[event.groupId];
+    final baseIndex =
+        list?.indexWhere((candidate) => candidate.id == event.id) ?? -1;
+    if (list == null || baseIndex < 0) throw StateError('일정을 찾을 수 없습니다.');
+    final base = list[baseIndex];
+    if (base.ownerId != effectiveActor) {
+      throw const ScheduleConflictException('이 일정을 변경할 권한이 없습니다.');
+    }
+    if (base.version != expectedSeriesVersion ||
+        event.occurrenceVersion != expectedOccurrenceVersion) {
+      throw const ScheduleConflictException(
+        '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
+      );
+    }
+    final normalizedDraft = _normalizeDraft(draft);
+    final keyIsSingle = event.occurrenceKey == 'single';
+    final baseRule = base.recurrenceRule;
+    if (!keyIsSingle && baseRule == null) {
+      throw const ScheduleConflictException('반복 일정 규칙을 확인해 주세요.');
+    }
+    final isRecurringIdentity = baseRule != null || !keyIsSingle;
+    final convertsSingletonToRecurring =
+        keyIsSingle &&
+        baseRule == null &&
+        scope == EventEditScope.all &&
+        normalizedDraft.recurrence != null;
+    final convertsRecurringToSingleton =
+        isRecurringIdentity &&
+        scope == EventEditScope.all &&
+        normalizedDraft.recurrence == null;
+    if (!isRecurringIdentity && !convertsSingletonToRecurring) {
+      throw const ScheduleConflictException('반복 일정 항목을 확인해 주세요.');
+    }
+    // A series anchor (the singleton key) is only editable as an all-scope
+    // conversion/update.  Per-occurrence edits must carry an ordinal key.
+    if (keyIsSingle &&
+        !convertsSingletonToRecurring &&
+        !convertsRecurringToSingleton) {
+      throw const ScheduleConflictException('반복 일정 항목을 확인해 주세요.');
+    }
+    final requestedMembers = normalizedDraft.hasExplicitMemberIds
+        ? _normalizeEventMemberIds(event.groupId, normalizedDraft.memberIds)
+        : event.memberIds;
+    final effectiveRule = normalizedDraft.recurrence ?? baseRule;
+    if (!convertsRecurringToSingleton) {
+      final rule = effectiveRule;
+      if (rule == null) {
+        throw const ScheduleConflictException('반복 일정 규칙을 확인해 주세요.');
+      }
+      _validateRuleAnchor(rule, normalizedDraft);
+    }
+    if (scope != EventEditScope.all &&
+        !_sameMemberIdSet(requestedMembers, event.memberIds)) {
+      throw const ScheduleConflictException('반복 일정 멤버는 전체 범위에서만 변경할 수 있습니다.');
+    }
+    final now = _nowUtc();
+    final nextSeriesVersion = base.version + 1;
+    final targetOrdinal = event.occurrenceIndex;
+    final desiredMembers = normalizedDraft.hasExplicitMemberIds
+        ? requestedMembers
+        : event.memberIds;
+    final sameDraftAsOccurrence = _draftMatchesEvent(
+      normalizedDraft,
+      event,
+      desiredMembers,
+    );
+    final existingOverride =
+        _occurrenceOverrides[event.groupId]?[event.identityKey];
+    final thisNoOp =
+        scope == EventEditScope.thisOccurrence &&
+        !keyIsSingle &&
+        existingOverride?.isDeleted != true &&
+        sameDraftAsOccurrence &&
+        normalizedDraft.recurrence == null;
+    final rootSegments =
+        _recurrenceSegments[_seriesSegmentsKey(event.groupId, event.id)];
+    final hasSparseSeriesState =
+        (rootSegments?.length ?? 0) != 1 ||
+        (rootSegments?.firstOrNull?.ordinalOffset ?? 0) != 0 ||
+        _hasSeriesOverrides(event.groupId, event.seriesId);
+    final allNoOp =
+        scope == EventEditScope.all &&
+        !convertsSingletonToRecurring &&
+        !convertsRecurringToSingleton &&
+        effectiveRule == baseRule &&
+        _draftMatchesEvent(normalizedDraft, base, desiredMembers) &&
+        !hasSparseSeriesState;
+    if (thisNoOp || allNoOp) {
+      return RecurrenceMutationReceipt(
+        groupId: event.groupId,
+        eventId: event.id,
+        occurrenceKey: event.occurrenceKey,
+        seriesVersion: expectedSeriesVersion,
+        // The occurrence version is meaningful only for a `this` override.
+        // Future/all operate on the parent series and therefore return the
+        // scope-wide zero even when the request is an idempotent no-op.  This
+        // keeps the local adapter byte-for-byte compatible with the receipt
+        // contract enforced by the Supabase parser.
+        occurrenceVersion: scope == EventEditScope.thisOccurrence
+            ? expectedOccurrenceVersion
+            : 0,
+        scope: scope,
+        changed: false,
+      );
+    }
+    switch (scope) {
+      case EventEditScope.thisOccurrence:
+        if (keyIsSingle || baseRule == null) {
+          throw const ScheduleConflictException('반복 일정 항목을 확인해 주세요.');
+        }
+        final overridden = _eventFromDraft(
+          event,
+          normalizedDraft,
+          memberIds: event.memberIds,
+          occurrenceVersion: expectedOccurrenceVersion + 1,
+        );
+        _occurrenceOverrides.putIfAbsent(
+          event.groupId,
+          () => <String, PlannerEvent>{},
+        )[event.identityKey] = overridden;
+      case EventEditScope.future:
+        if (keyIsSingle || baseRule == null) {
+          throw const ScheduleConflictException('반복 일정 항목을 확인해 주세요.');
+        }
+        _splitFutureSeries(
+          groupId: event.groupId,
+          base: base,
+          target: event,
+          draft: normalizedDraft,
+          now: now,
+        );
+        _clearOccurrenceOverrides(
+          event.groupId,
+          targetOrdinal,
+          seriesId: event.seriesId,
+        );
+      case EventEditScope.all:
+        final allMembers = normalizedDraft.hasExplicitMemberIds
+            ? requestedMembers
+            : base.memberIds;
+        if (!allMembers.contains(base.ownerId)) {
+          throw const ScheduleAuthorizationException(
+            '일정 작성자는 활성 멤버로 유지되어야 합니다.',
+          );
+        }
+        final updatedBase =
+            _eventFromDraft(
+              base,
+              normalizedDraft,
+              memberIds: allMembers,
+              occurrenceVersion: convertsRecurringToSingleton
+                  ? 0
+                  : nextSeriesVersion,
+            ).copyWith(
+              version: nextSeriesVersion,
+              updatedAt: now,
+              recurrenceRule: effectiveRule,
+              clearRecurrenceRule: convertsRecurringToSingleton,
+              occurrenceKey: 'single',
+              occurrenceIndex: 0,
+              isOccurrence: false,
+              // The all-scope draft becomes the new series anchor (or singleton
+              // instant). Do not retain the pre-edit scheduled wall timestamp.
+              clearScheduledStartsAt: true,
+              seriesId: base.seriesId,
+            );
+        list[baseIndex] = updatedBase;
+        if (convertsRecurringToSingleton) {
+          _recurrenceSegments.remove(
+            _seriesSegmentsKey(event.groupId, event.id),
+          );
+        } else {
+          _recurrenceSegments[_seriesSegmentsKey(
+            event.groupId,
+            event.id,
+          )] = <_LocalRecurrenceSegment>[
+            _LocalRecurrenceSegment(template: updatedBase, ordinalOffset: 0),
+          ];
+        }
+        _clearSeriesOverrides(event.groupId, base.seriesId);
+    }
+    list[baseIndex] = list[baseIndex].copyWith(
+      version: nextSeriesVersion,
+      updatedAt: now,
+    );
+    _emit(event.groupId);
+    return RecurrenceMutationReceipt(
+      groupId: event.groupId,
+      eventId: event.id,
+      occurrenceKey: event.occurrenceKey,
+      seriesVersion: nextSeriesVersion,
+      occurrenceVersion: scope == EventEditScope.thisOccurrence
+          ? expectedOccurrenceVersion + 1
+          : 0,
+      scope: scope,
+      changed: true,
+    );
+  }
+
+  @override
+  Future<RecurrenceMutationReceipt> deleteEventOccurrence({
+    required PlannerEvent event,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+    String? actorId,
+  }) async {
+    final effectiveActor = actorId ?? event.ownerId;
+    _requireActiveMember(event.groupId, effectiveActor);
+    final list = _events[event.groupId];
+    final baseIndex =
+        list?.indexWhere((candidate) => candidate.id == event.id) ?? -1;
+    if (list == null || baseIndex < 0) throw StateError('일정을 찾을 수 없습니다.');
+    final base = list[baseIndex];
+    if (base.recurrenceRule == null || event.occurrenceKey == 'single') {
+      throw const ScheduleConflictException('반복 일정 항목을 확인해 주세요.');
+    }
+    if (base.ownerId != effectiveActor ||
+        base.version != expectedSeriesVersion ||
+        event.occurrenceVersion != expectedOccurrenceVersion) {
+      throw const ScheduleConflictException(
+        '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
+      );
+    }
+    final priorOverride =
+        _occurrenceOverrides[event.groupId]?[event.identityKey];
+    if (scope == EventEditScope.thisOccurrence &&
+        priorOverride?.isDeleted == true) {
+      return RecurrenceMutationReceipt(
+        groupId: event.groupId,
+        eventId: event.id,
+        occurrenceKey: event.occurrenceKey,
+        seriesVersion: expectedSeriesVersion,
+        occurrenceVersion: priorOverride!.occurrenceVersion,
+        scope: scope,
+        changed: false,
+      );
+    }
+    final now = _nowUtc();
+    final nextSeriesVersion = base.version + 1;
+    switch (scope) {
+      case EventEditScope.thisOccurrence:
+        _occurrenceOverrides.putIfAbsent(
+          event.groupId,
+          () => <String, PlannerEvent>{},
+        )[event.identityKey] = event.copyWith(
+          deletedAt: now,
+          version: event.version + 1,
+          occurrenceVersion: expectedOccurrenceVersion + 1,
+          updatedAt: now,
+        );
+      case EventEditScope.future:
+        if (event.occurrenceIndex == 0) {
+          // Ordinal zero is the persisted series anchor. Removing only the
+          // recurrence segment would make the materializer fall back to that
+          // still-live anchor and resurrect the deleted first occurrence.
+          // Tombstone the anchor itself before clearing sparse state so every
+          // read path remains deletion-safe.
+          list[baseIndex] = base.copyWith(
+            deletedAt: now,
+            version: nextSeriesVersion,
+            updatedAt: now,
+          );
+          _recurrenceSegments.remove(
+            _seriesSegmentsKey(event.groupId, event.id),
+          );
+          _clearSeriesOverrides(event.groupId, base.seriesId);
+        } else {
+          _splitFutureSeries(
+            groupId: event.groupId,
+            base: base,
+            target: event,
+            draft: null,
+            now: now,
+            deleteFuture: true,
+          );
+          _clearOccurrenceOverrides(
+            event.groupId,
+            event.occurrenceIndex,
+            seriesId: event.seriesId,
+          );
+        }
+      case EventEditScope.all:
+        list[baseIndex] = base.copyWith(
+          deletedAt: now,
+          version: nextSeriesVersion,
+          updatedAt: now,
+        );
+        _recurrenceSegments.remove(_seriesSegmentsKey(event.groupId, event.id));
+        _clearSeriesOverrides(event.groupId, base.seriesId);
+    }
+    list[baseIndex] = list[baseIndex].copyWith(
+      version: nextSeriesVersion,
+      updatedAt: now,
+    );
+    _emit(event.groupId);
+    return RecurrenceMutationReceipt(
+      groupId: event.groupId,
+      eventId: event.id,
+      occurrenceKey: event.occurrenceKey,
+      seriesVersion: nextSeriesVersion,
+      occurrenceVersion: scope == EventEditScope.thisOccurrence
+          ? expectedOccurrenceVersion + 1
+          : 0,
+      scope: scope,
+      changed: true,
+    );
+  }
+
+  PlannerEvent _eventFromDraft(
+    PlannerEvent original,
+    EventDraft draft, {
+    required Iterable<String> memberIds,
+    required int occurrenceVersion,
+  }) {
+    return original.copyWith(
+      title: draft.title.trim(),
+      note: draft.note,
+      startAt: draft.startAt.toUtc(),
+      endAt: draft.endAt.toUtc(),
+      allDay: draft.allDay,
+      memberIds: memberIds.toList(growable: false),
+      colorValue: draft.colorValue,
+      timezone: draft.timezone,
+      allDayStartDate: draft.allDayStartDate,
+      allDayEndDate: draft.allDayEndDate,
+      clearAllDayDates: !draft.allDay,
+      occurrenceVersion: occurrenceVersion,
+      version: original.version + 1,
+      updatedAt: _nowUtc(),
+      scheduledStartsAt: original.scheduledStartsAt,
+      recurrenceRule: original.recurrenceRule,
+      isOccurrence: original.isOccurrence,
+    );
+  }
+
+  void _splitFutureSeries({
+    required String groupId,
+    required PlannerEvent base,
+    required PlannerEvent target,
+    required EventDraft? draft,
+    required DateTime now,
+    bool deleteFuture = false,
+  }) {
+    final ordinal = target.occurrenceIndex;
+    final segments = _recurrenceSegments.putIfAbsent(
+      _seriesSegmentsKey(groupId, base.id),
+      () => <_LocalRecurrenceSegment>[
+        _LocalRecurrenceSegment(template: base, ordinalOffset: 0),
+      ],
+    );
+    final inheritedSegment = segments.reversed
+        .where((segment) => segment.ordinalOffset <= ordinal)
+        .firstOrNull;
+    final inheritedRule =
+        inheritedSegment?.template.recurrenceRule ?? base.recurrenceRule!;
+    final inheritedLocalOrdinal = inheritedSegment == null
+        ? ordinal
+        : ordinal - inheritedSegment.ordinalOffset;
+    segments.removeWhere((segment) => segment.ordinalOffset >= ordinal);
+    if (segments.isNotEmpty && ordinal > 0) {
+      // A prior future edit may already have created several segments. Close
+      // the segment immediately preceding this split; shortening only the
+      // original anchor would leave an older later segment extending through
+      // the new boundary and would materialize duplicate occurrences.
+      final lastIndex = segments.length - 1;
+      final prior = segments[lastIndex];
+      final oldRule = prior.template.recurrenceRule!;
+      // A future edit/delete closes the prior segment at the target ordinal
+      // regardless of whether the original rule was never/count/until.  A
+      // plain never/until rule left intact would resurrect occurrences after
+      // the requested split.
+      final shortened = oldRule.copyWith(
+        end: RecurrenceEnd.count,
+        count: ordinal - prior.ordinalOffset,
+        clearUntilDate: true,
+      );
+      segments[lastIndex] = _LocalRecurrenceSegment(
+        template: prior.template.copyWith(recurrenceRule: shortened),
+        ordinalOffset: prior.ordinalOffset,
+      );
+    }
+    if (deleteFuture || draft == null) return;
+    final rule = draft.recurrence ?? inheritedRule;
+    final remainingRule =
+        draft.recurrence == null && inheritedRule.end == RecurrenceEnd.count
+        ? inheritedRule.copyWith(
+            end: RecurrenceEnd.count,
+            count: (inheritedRule.count! - inheritedLocalOrdinal).clamp(
+              1,
+              1 << 30,
+            ),
+            clearUntilDate: true,
+          )
+        : rule;
+    final template = PlannerEvent(
+      id: base.id,
+      seriesId: base.seriesId,
+      groupId: base.groupId,
+      title: draft.title.trim(),
+      note: draft.note,
+      startAt: target.startAt,
+      endAt: target.endAt,
+      allDay: draft.allDay,
+      ownerId: base.ownerId,
+      memberIds: base.memberIds,
+      colorValue: draft.colorValue,
+      timezone: draft.timezone,
+      allDayStartDate: draft.allDayStartDate,
+      allDayEndDate: draft.allDayEndDate,
+      version: base.version + 1,
+      updatedAt: now,
+      recurrenceRule: remainingRule,
+    );
+    segments.add(
+      _LocalRecurrenceSegment(template: template, ordinalOffset: ordinal),
+    );
+  }
+
+  bool _hasSeriesOverrides(String groupId, String seriesId) {
+    final overrides = _occurrenceOverrides[groupId];
+    if (overrides == null || overrides.isEmpty) return false;
+    final prefix = '$seriesId|';
+    return overrides.keys.any((key) => key.startsWith(prefix));
+  }
+
+  void _clearSeriesOverrides(String groupId, String seriesId) {
+    final overrides = _occurrenceOverrides[groupId];
+    if (overrides == null) return;
+    final prefix = '$seriesId|';
+    overrides.removeWhere((key, _) => key.startsWith(prefix));
+    if (overrides.isEmpty) _occurrenceOverrides.remove(groupId);
+  }
+
+  void _clearOccurrenceOverrides(
+    String groupId,
+    int fromOrdinal, {
+    required String seriesId,
+  }) {
+    final overrides = _occurrenceOverrides[groupId];
+    if (overrides == null) return;
+    final prefix = '$seriesId|';
+    overrides.removeWhere((key, _) {
+      if (!key.startsWith(prefix)) return false;
+      final ordinal = occurrenceIndexFromKey(key.substring(prefix.length));
+      return ordinal != null && ordinal >= fromOrdinal;
+    });
+    if (overrides.isEmpty) _occurrenceOverrides.remove(groupId);
   }
 
   @override
@@ -1356,6 +2091,52 @@ class LocalScheduleRepository
   }
 
   @override
+  Future<RecurrenceMutationReceipt> replaceRecurringEventMembers({
+    required PlannerEvent event,
+    required Iterable<String> memberIds,
+    required int expectedVersion,
+    String? actorId,
+  }) async {
+    final stored = _events.values
+        .expand((items) => items)
+        .where((candidate) => candidate.id == event.id)
+        .firstOrNull;
+    final recurring =
+        stored != null &&
+        (stored.recurrenceRule != null || stored.occurrenceKey != 'single');
+    if (stored == null ||
+        stored.groupId != event.groupId ||
+        stored.ownerId != event.ownerId ||
+        stored.seriesId != event.seriesId ||
+        !recurring ||
+        !isValidOccurrenceKey(event.occurrenceKey)) {
+      throw const ScheduleValidationException('반복 일정 항목을 확인해 주세요.');
+    }
+    final normalizedMemberIds = canonicalEventMemberIds(memberIds);
+    if (!normalizedMemberIds.contains(stored.ownerId)) {
+      throw const ScheduleValidationException('반복 일정 작성자는 멤버에서 제외할 수 없습니다.');
+    }
+    final updated = await replaceEventMembers(
+      stored.id,
+      memberIds: normalizedMemberIds,
+      expectedVersion: expectedVersion,
+      actorId: actorId,
+    );
+    final selectedKey = event.occurrenceKey == 'single'
+        ? occurrenceKeyForIndex(0)
+        : event.occurrenceKey;
+    return RecurrenceMutationReceipt(
+      groupId: stored.groupId,
+      eventId: stored.id,
+      occurrenceKey: selectedKey,
+      seriesVersion: updated.version,
+      occurrenceVersion: 0,
+      scope: EventEditScope.all,
+      changed: updated.version != expectedVersion,
+    );
+  }
+
+  @override
   Future<PlannerEvent> replaceEventMembers(
     String eventId, {
     required Iterable<String> memberIds,
@@ -1394,12 +2175,18 @@ class LocalScheduleRepository
         '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
       );
     }
-    // An empty replacement is intentional and differs from create's default:
-    // the immutable event owner may remain unassigned.
+    // An empty replacement is intentional for legacy singleton events and
+    // differs from create's creator default. Recurring series are checked
+    // below and must retain their creator assignment.
     final normalizedMemberIds = _normalizeEventMemberIds(
       existing.groupId,
       memberIds,
     );
+    final recurring =
+        existing.recurrenceRule != null || existing.occurrenceKey != 'single';
+    if (recurring && !normalizedMemberIds.contains(existing.ownerId)) {
+      throw const ScheduleValidationException('반복 일정 작성자는 멤버에서 제외할 수 없습니다.');
+    }
     if (_sameMemberIdSet(existing.memberIds, normalizedMemberIds)) {
       // Replacing with the canonical current set is an idempotent no-op.  Do
       // not manufacture a version transition or realtime event for a write
@@ -1412,6 +2199,33 @@ class LocalScheduleRepository
       updatedAt: DateTime.now().toUtc(),
     );
     list[index] = updated;
+    final segments =
+        _recurrenceSegments[_seriesSegmentsKey(existing.groupId, existing.id)];
+    if (segments != null && existing.recurrenceRule != null) {
+      for (
+        var segmentIndex = 0;
+        segmentIndex < segments.length;
+        segmentIndex++
+      ) {
+        final segment = segments[segmentIndex];
+        if (segment.template.id != existing.id) continue;
+        segments[segmentIndex] = _LocalRecurrenceSegment(
+          template: segment.template.copyWith(
+            memberIds: normalizedMemberIds,
+            version: updated.version,
+            updatedAt: updated.updatedAt,
+          ),
+          ordinalOffset: segment.ordinalOffset,
+        );
+      }
+    }
+    _syncSeriesOverrideMembers(
+      existing.groupId,
+      existing.seriesId,
+      normalizedMemberIds,
+      version: updated.version,
+      updatedAt: updated.updatedAt,
+    );
     _emit(existing.groupId);
     return updated;
   }
@@ -1420,6 +2234,50 @@ class LocalScheduleRepository
     final leftSet = left.toSet();
     final rightSet = right.toSet();
     return leftSet.length == rightSet.length && leftSet.containsAll(rightSet);
+  }
+
+  void _syncSeriesOverrideMembers(
+    String groupId,
+    String seriesId,
+    Iterable<String> memberIds, {
+    required int version,
+    required DateTime updatedAt,
+  }) {
+    final overrides = _occurrenceOverrides[groupId];
+    if (overrides == null || overrides.isEmpty) return;
+    final canonical = canonicalEventMemberIds(memberIds);
+    for (final entry in overrides.entries.toList(growable: false)) {
+      final override = entry.value;
+      if (override.seriesId != seriesId) continue;
+      overrides[entry.key] = override.copyWith(
+        memberIds: canonical,
+        version: version,
+        updatedAt: updatedAt,
+      );
+    }
+  }
+
+  static bool _draftMatchesEvent(
+    EventDraft draft,
+    PlannerEvent event,
+    Iterable<String> memberIds,
+  ) {
+    final sameDates = !draft.allDay
+        ? event.allDay == false &&
+              event.allDayStartDate == null &&
+              event.allDayEndDate == null
+        : event.allDay == true &&
+              draft.allDayStartDate == event.allDayStartDate &&
+              draft.allDayEndDate == event.allDayEndDate;
+    return draft.title.trim() == event.title &&
+        draft.note == event.note &&
+        draft.startAt.toUtc() == event.startAt.toUtc() &&
+        draft.endAt.toUtc() == event.endAt.toUtc() &&
+        draft.allDay == event.allDay &&
+        sameDates &&
+        draft.colorValue == event.colorValue &&
+        draft.timezone == event.timezone &&
+        _sameMemberIdSet(memberIds, event.memberIds);
   }
 
   @override
@@ -1537,6 +2395,7 @@ class LocalScheduleRepository
         timezone: draft.timezone,
         allDayStartDate: startDate,
         allDayEndDate: endDate,
+        recurrence: draft.recurrence,
       );
     }
     final startDate = _allDayDate(
@@ -1578,6 +2437,7 @@ class LocalScheduleRepository
       timezone: draft.timezone,
       allDayStartDate: startDate,
       allDayEndDate: endDate,
+      recurrence: draft.recurrence,
     );
   }
 
@@ -1683,7 +2543,9 @@ class LocalScheduleRepository
 
   /// Canonicalizes and validates a participant list against the current
   /// active memberships.  [defaultCreatorId] is used only for new-event
-  /// creation; an explicit empty replacement remains an intentional clear.
+  /// creation. When supplied, the creator is always included in the returned
+  /// canonical series assignment; callers that intentionally clear an
+  /// existing assignment omit this argument.
   List<String> _normalizeEventMemberIds(
     String groupId,
     Iterable<String> memberIds, {
@@ -1701,12 +2563,12 @@ class LocalScheduleRepository
       }
       normalized.add(id);
     }
-    if (normalized.isEmpty && defaultCreatorId != null) {
+    if (defaultCreatorId != null) {
       final creator = defaultCreatorId.trim();
       if (creator.isEmpty || !_isActiveMember(groupId, creator)) {
         throw const ScheduleConflictException('일정 작성자는 활성 멤버여야 합니다.');
       }
-      normalized.add(creator);
+      if (!normalized.contains(creator)) normalized.add(creator);
     }
     normalized.sort();
     return List<String>.unmodifiable(normalized);
@@ -1728,6 +2590,40 @@ class LocalScheduleRepository
         memberIds: event.memberIds.where((id) => id != userId).toList(),
         version: event.version + 1,
         updatedAt: now,
+      );
+      final updated = list[index];
+      final segments =
+          _recurrenceSegments[_seriesSegmentsKey(groupId, event.id)];
+      if (segments != null && updated.recurrenceRule != null) {
+        for (
+          var segmentIndex = 0;
+          segmentIndex < segments.length;
+          segmentIndex++
+        ) {
+          final segment = segments[segmentIndex];
+          if (segment.template.id != updated.id) continue;
+          segments[segmentIndex] = _LocalRecurrenceSegment(
+            template: segment.template.copyWith(
+              memberIds: updated.memberIds,
+              version: updated.version,
+              updatedAt: updated.updatedAt,
+            ),
+            ordinalOffset: segment.ordinalOffset,
+          );
+        }
+      }
+      // Occurrence overrides are full PlannerEvent snapshots in the local
+      // adapter. Keep their inherited series assignment and parent version
+      // in lockstep with the anchor/segments; otherwise a this-occurrence
+      // override can keep a deactivated participant and still pass a later
+      // participant-filtered materialization (unlike the SQL path, which
+      // derives every row's members from event_members).
+      _syncSeriesOverrideMembers(
+        groupId,
+        updated.seriesId,
+        updated.memberIds,
+        version: updated.version,
+        updatedAt: updated.updatedAt,
       );
     }
     // The caller emits the membership/lifecycle changes after this helper so
@@ -1766,6 +2662,45 @@ class LocalScheduleRepository
     }
     validateIanaTimezone(draft.timezone);
     _validateColorValue(draft.colorValue);
+  }
+
+  static void _validateRuleAnchor(RecurrenceRule rule, EventDraft draft) {
+    final anchorDate = draft.allDay
+        ? dateOnly(
+            draft.allDayStartDate ??
+                utcToWallTime(draft.startAt, draft.timezone),
+          )
+        : dateOnly(utcToWallTime(draft.startAt, draft.timezone));
+    if (rule.end == RecurrenceEnd.until &&
+        (rule.untilDate == null ||
+            dateOnly(rule.untilDate!).isBefore(anchorDate))) {
+      throw const FormatException('반복 종료 날짜는 시작 날짜 이후여야 합니다.');
+    }
+    final duration = draft.allDay
+        ? civilDateOnly(
+            draft.allDayEndDate ?? utcToWallTime(draft.endAt, draft.timezone),
+          ).difference(
+            civilDateOnly(
+              draft.allDayStartDate ??
+                  utcToWallTime(draft.startAt, draft.timezone),
+            ),
+          )
+        // SQL validates a timed recurrence's maximum length in the event's
+        // IANA wall clock (`at time zone`), not as elapsed UTC seconds. A
+        // civil 366-day span crossing fall-back is 366 days + 1h in UTC,
+        // while one crossing spring-forward is 366 days - 1h. Use UTC-tagged
+        // civil tuples so this check is deterministic on every device.
+        : utcToCivilWallTimePrecise(draft.endAt, draft.timezone).difference(
+            utcToCivilWallTimePrecise(draft.startAt, draft.timezone),
+          );
+    if (duration <= Duration.zero || duration > const Duration(days: 366)) {
+      throw const FormatException('반복 일정의 길이는 366일 이내여야 합니다.');
+    }
+    if (rule.frequency != RecurrenceFrequency.weekly) return;
+    final wall = utcToWallTimePrecise(draft.startAt, draft.timezone);
+    if (!rule.weekdays.contains(wall.weekday)) {
+      throw const FormatException('주간 반복 요일에 시작 요일을 포함해 주세요.');
+    }
   }
 
   static void _validateEvent(PlannerEvent event) {
@@ -1947,6 +2882,40 @@ class ConfigurationBlockedScheduleRepository extends LocalScheduleRepository {
   }) => Future<PlannerEvent>.error(_error);
 
   @override
+  Future<PlannerEvent> createRecurringEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  ) => Future<PlannerEvent>.error(_error);
+
+  @override
+  Future<RecurrenceMutationReceipt> updateEventOccurrence({
+    required PlannerEvent event,
+    required EventDraft draft,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+    String? actorId,
+  }) => Future<RecurrenceMutationReceipt>.error(_error);
+
+  @override
+  Future<RecurrenceMutationReceipt> deleteEventOccurrence({
+    required PlannerEvent event,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+    String? actorId,
+  }) => Future<RecurrenceMutationReceipt>.error(_error);
+
+  @override
+  Future<PlannerEvent?> eventOccurrenceByKey({
+    required String userId,
+    required String groupId,
+    required String eventId,
+    required String occurrenceKey,
+  }) => Future<PlannerEvent?>.error(_error);
+
+  @override
   Future<PlannerEvent> replaceEventMembers(
     String eventId, {
     required Iterable<String> memberIds,
@@ -1971,8 +2940,11 @@ class SupabaseScheduleRepository
         UserScopedEventReadCapability,
         GroupLifecycleCapability,
         EventMemberAssignmentCapability,
+        RecurringEventMemberAssignmentCapability,
+        RecurrenceCapability,
         BoundedEventRangeReadCapability,
         EventByIdReadCapability,
+        EventOccurrenceReadCapability,
         InvitePreviewCapability {
   /// Current authenticated actor used by authenticated-only capabilities.
   /// Kept as a small overridable seam so transport tests can provide a
@@ -2082,15 +3054,21 @@ class SupabaseScheduleRepository
       throw const ScheduleValidationException('로그인 세션과 그룹을 확인해 주세요.');
     }
     _validateRemoteRangeShape(range, limit);
+    // The v2 RPC is the default production calendar path.  Do not issue a
+    // request with a missing or mismatched auth context: the local user id is
+    // only a routing hint and must agree with the current Supabase session.
+    _requireCurrentRemoteUser(userId);
     final normalizedParticipant = participantId?.trim();
     if (participantId != null && normalizedParticipant!.isEmpty) {
       throw const ScheduleValidationException('일정 멤버를 확인해 주세요.');
     }
-    if (cursor?.occurrenceKey.isNotEmpty == true) {
+    if (cursor != null &&
+        cursor.occurrenceKey.isNotEmpty &&
+        !isValidOccurrenceKey(cursor.occurrenceKey)) {
       throw const ScheduleValidationException('지원하지 않는 페이지 커서 버전입니다.');
     }
     final result = await _client.rpc<dynamic>(
-      'events_for_range',
+      'events_for_range_v2',
       params: <String, dynamic>{
         'p_group_id': groupId,
         'p_range_start': range.startUtc.toIso8601String(),
@@ -2123,6 +3101,7 @@ class SupabaseScheduleRepository
         eventId != eventId.trim()) {
       throw const ScheduleValidationException('로그인 세션과 일정을 확인해 주세요.');
     }
+    _requireCurrentRemoteUser(userId);
     final usableGroup = await _readUsableGroup(userId, groupId);
     if (usableGroup == null) {
       throw const ScheduleAuthorizationException('그룹을 사용할 수 없습니다.');
@@ -2151,6 +3130,53 @@ class SupabaseScheduleRepository
       throw const ScheduleConflictException('일정 응답을 확인할 수 없습니다.');
     }
     return _eventFromRow(complete, memberIds: memberIds);
+  }
+
+  @override
+  Future<PlannerEvent?> eventOccurrenceByKey({
+    required String userId,
+    required String groupId,
+    required String eventId,
+    required String occurrenceKey,
+  }) async {
+    if (userId.trim().isEmpty ||
+        groupId.trim().isEmpty ||
+        eventId.trim().isEmpty ||
+        eventId != eventId.trim() ||
+        !isValidOccurrenceKey(occurrenceKey)) {
+      throw const ScheduleValidationException('로그인 세션과 일정을 확인해 주세요.');
+    }
+    _requireCurrentRemoteUser(userId);
+    final usableGroup = await _readUsableGroup(userId, groupId);
+    if (usableGroup == null) {
+      throw const ScheduleAuthorizationException('그룹을 사용할 수 없습니다.');
+    }
+    final result = await _client.rpc<dynamic>(
+      'event_occurrence_by_key',
+      params: <String, dynamic>{
+        'p_event_id': eventId,
+        'p_occurrence_key': occurrenceKey,
+      },
+    );
+    final row = _strictSingleRpcMap(result);
+    final returnedKey = row?['occurrence_key'];
+    final isRecurringAlias =
+        occurrenceKey == 'single' && returnedKey == occurrenceKeyForIndex(0);
+    if (row == null ||
+        !_hasCompleteEventFields(row, strictLifecycleTimestamps: true) ||
+        row['group_id'] != groupId ||
+        row['id'] != eventId ||
+        (returnedKey != occurrenceKey && !isRecurringAlias) ||
+        (isRecurringAlias
+            ? (row['is_occurrence'] != true || row['recurrence_rule'] == null)
+            : (occurrenceKey != 'single' && row['is_occurrence'] != true))) {
+      throw const ScheduleConflictException('일정 응답을 확인할 수 없습니다.');
+    }
+    final memberIds = _strictMemberIds(row['member_ids']);
+    if (memberIds == null) {
+      throw const ScheduleConflictException('일정 멤버 응답을 확인할 수 없습니다.');
+    }
+    return _eventFromRow(row, memberIds: memberIds);
   }
 
   @override
@@ -2601,6 +3627,41 @@ class SupabaseScheduleRepository
     }
     final group = _groupFromRow(groupRow);
     return group.isArchived ? null : group;
+  }
+
+  void _requireCurrentRemoteUser(String? expectedUserId) {
+    final current = currentSessionUserId;
+    if (expectedUserId == null ||
+        expectedUserId.trim().isEmpty ||
+        current == null ||
+        current != expectedUserId) {
+      throw const ScheduleAuthorizationException('로그인 세션을 다시 확인해 주세요.');
+    }
+  }
+
+  Future<dynamic> _recurrenceRpc(
+    String functionName, {
+    required Map<String, dynamic> params,
+  }) async {
+    try {
+      return await _client.rpc<dynamic>(functionName, params: params);
+    } catch (error) {
+      if (error is PostgrestException) {
+        switch (error.code) {
+          case '28000':
+            throw const ScheduleAuthorizationException('로그인 세션을 다시 확인해 주세요.');
+          case '42501':
+            throw const ScheduleAuthorizationException('일정을 사용할 권한이 없습니다.');
+          case '22023':
+            throw const ScheduleValidationException('반복 일정 요청을 확인해 주세요.');
+          case '40001':
+            throw const ScheduleConflictException(
+              '다른 사용자가 반복 일정을 변경했습니다. 최신 내용을 불러왔어요.',
+            );
+        }
+      }
+      rethrow;
+    }
   }
 
   /// Builds a requester-scoped event stream with independent subscriptions to
@@ -3271,6 +4332,395 @@ class SupabaseScheduleRepository
   }
 
   @override
+  Future<PlannerEvent> createRecurringEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  ) async {
+    if (userId.trim().isEmpty ||
+        groupId.trim().isEmpty ||
+        draft.recurrence == null) {
+      throw const ScheduleValidationException('로그인 세션과 반복 일정을 확인해 주세요.');
+    }
+    _requireCurrentRemoteUser(userId);
+    final normalizedDraft = LocalScheduleRepository._normalizeDraft(draft);
+    final rule = normalizedDraft.recurrence!;
+    LocalScheduleRepository._validateRuleAnchor(rule, normalizedDraft);
+    final memberIds = normalizedDraft.hasExplicitMemberIds
+        ? canonicalEventMemberIds(normalizedDraft.memberIds)
+        : null;
+    final result = await _recurrenceRpc(
+      'create_recurring_event_with_members',
+      params: <String, dynamic>{
+        'p_group_id': groupId,
+        'p_title': normalizedDraft.title.trim(),
+        'p_description': normalizedDraft.note.trim(),
+        'p_starts_at': normalizedDraft.startAt.toUtc().toIso8601String(),
+        'p_ends_at': normalizedDraft.endAt.toUtc().toIso8601String(),
+        'p_timezone': normalizedDraft.timezone,
+        'p_is_all_day': normalizedDraft.allDay,
+        'p_all_day_start': normalizedDraft.allDay
+            ? _dateString(normalizedDraft.allDayStartDate!)
+            : null,
+        'p_all_day_end': normalizedDraft.allDay
+            ? _dateString(normalizedDraft.allDayEndDate!)
+            : null,
+        'p_color_value': normalizedDraft.colorValue,
+        'p_member_ids': memberIds,
+        'p_frequency': rule.frequency.wireName,
+        'p_interval': rule.interval,
+        'p_weekdays': rule.weekdays,
+        'p_end': rule.end.wireName,
+        'p_count': rule.count,
+        'p_until_date': rule.untilDate == null
+            ? null
+            : _dateString(rule.untilDate!),
+        'p_monthly_day': rule.monthlyDay,
+      },
+    );
+    final row = _strictSingleRpcMap(result);
+    if (row == null ||
+        !_hasCompleteEventFields(row, strictLifecycleTimestamps: true) ||
+        !_isStrictRecurringCreateRow(
+          row,
+          groupId: groupId,
+          userId: userId,
+          draft: normalizedDraft,
+          rule: rule,
+        )) {
+      throw const ScheduleConflictException('반복 일정 변경 응답을 확인할 수 없습니다.');
+    }
+    final parsedMembers = _strictMemberIds(row['member_ids']);
+    if (parsedMembers == null) {
+      throw const ScheduleConflictException('일정 멤버 응답을 확인할 수 없습니다.');
+    }
+    return _eventFromRow(row, memberIds: parsedMembers);
+  }
+
+  /// Validates the create RPC's first materialized occurrence as a complete,
+  /// canonical response.  The row is the only authoritative result of the
+  /// atomic event/rule/member write; accepting a partial or mismatched row
+  /// would leave the controller with a phantom series that cannot be safely
+  /// retried.
+  bool _isStrictRecurringCreateRow(
+    Map<String, dynamic> row, {
+    required String groupId,
+    required String userId,
+    required EventDraft draft,
+    required RecurrenceRule rule,
+  }) {
+    final id = row['id'];
+    final starts = _strictDateTimeValue(row['starts_at']);
+    final ends = _strictDateTimeValue(row['ends_at']);
+    final scheduledStarts = _strictDateTimeValue(row['scheduled_starts_at']);
+    final scheduledEnds = _strictDateTimeValue(row['scheduled_ends_at']);
+    final rowRule = row['recurrence_rule'];
+    RecurrenceRule? parsedRule;
+    if (rowRule != null) {
+      try {
+        parsedRule = RecurrenceRule.fromJson(rowRule);
+      } on FormatException {
+        return false;
+      }
+    }
+    final expectedMembers = canonicalEventMemberIds(<String>[
+      ...draft.memberIds,
+      userId,
+    ]);
+    final returnedMembers = _strictMemberIds(row['member_ids']);
+    // The first materialized row is not necessarily the raw event anchor:
+    // monthly rules may deliberately start on a different day (for example,
+    // a Jan 15 anchor with monthly_day=31 returns Jan 31), and timezone
+    // conversion can move a wall-clock boundary across a DST transition.
+    // Reconstruct the canonical ordinal-zero projection with the same bounded
+    // arithmetic used by the local adapter instead of comparing against the
+    // input anchor instants directly.
+    final expectedSeries = PlannerEvent(
+      id: id is String ? id : 'invalid',
+      groupId: groupId,
+      title: draft.title.trim(),
+      note: draft.note.trim(),
+      startAt: draft.startAt.toUtc(),
+      endAt: draft.endAt.toUtc(),
+      allDay: draft.allDay,
+      ownerId: userId,
+      memberIds: expectedMembers,
+      colorValue: draft.colorValue,
+      timezone: draft.timezone,
+      allDayStartDate: draft.allDayStartDate,
+      allDayEndDate: draft.allDayEndDate,
+      recurrenceRule: rule,
+    );
+    final expectedOccurrence = recurringOccurrenceAtIndex(expectedSeries, 0);
+    if (expectedOccurrence == null) return false;
+    final expectedAllDayStart = draft.allDay
+        ? _dateString(expectedOccurrence.allDayStartDate!)
+        : null;
+    final expectedAllDayEnd = draft.allDay
+        ? _dateString(expectedOccurrence.allDayEndDate!)
+        : null;
+    return id is String &&
+        id.trim().isNotEmpty &&
+        row['event_id'] == id &&
+        row['series_id'] == id &&
+        row['group_id'] == groupId &&
+        row['created_by'] == userId &&
+        _strictVersionValue(row['version']) == 1 &&
+        row['deleted_at'] == null &&
+        row['occurrence_key'] == occurrenceKeyForIndex(0) &&
+        _strictVersionValue(row['occurrence_index']) == 0 &&
+        _strictVersionValue(row['occurrence_version']) == 0 &&
+        row['is_occurrence'] == true &&
+        parsedRule == rule &&
+        starts == expectedOccurrence.startAt.toUtc() &&
+        ends == expectedOccurrence.endAt.toUtc() &&
+        scheduledStarts == expectedOccurrence.scheduledStartsAt?.toUtc() &&
+        scheduledEnds == expectedOccurrence.scheduledEndsAt?.toUtc() &&
+        row['title'] == draft.title.trim() &&
+        row['description'] == draft.note.trim() &&
+        row['timezone'] == draft.timezone &&
+        row['is_all_day'] == draft.allDay &&
+        row['all_day_start'] == expectedAllDayStart &&
+        row['all_day_end'] == expectedAllDayEnd &&
+        _strictColorValue(row['color_value']) == draft.colorValue &&
+        returnedMembers != null &&
+        LocalScheduleRepository._sameMemberIdSet(
+          returnedMembers,
+          expectedMembers,
+        );
+  }
+
+  @override
+  Future<RecurrenceMutationReceipt> updateEventOccurrence({
+    required PlannerEvent event,
+    required EventDraft draft,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+    String? actorId,
+  }) async {
+    if (event.groupId.trim().isEmpty ||
+        event.id.trim().isEmpty ||
+        !isValidOccurrenceKey(event.occurrenceKey) ||
+        (event.occurrenceKey == 'single' &&
+            (scope != EventEditScope.all || event.recurrenceRule == null) &&
+            draft.recurrence == null)) {
+      throw const ScheduleValidationException('반복 일정 항목을 확인해 주세요.');
+    }
+    _requireCurrentRemoteUser(actorId ?? currentSessionUserId);
+    final normalizedDraft = LocalScheduleRepository._normalizeDraft(draft);
+    final keyIsSingle = event.occurrenceKey == 'single';
+    if (!keyIsSingle && event.recurrenceRule == null) {
+      throw const ScheduleValidationException('반복 일정 규칙을 확인해 주세요.');
+    }
+    final hasRecurringIdentity = event.recurrenceRule != null || !keyIsSingle;
+    final convertsSingletonToRecurring =
+        keyIsSingle &&
+        !hasRecurringIdentity &&
+        scope == EventEditScope.all &&
+        normalizedDraft.recurrence != null;
+    final convertsRecurringToSingleton =
+        hasRecurringIdentity &&
+        scope == EventEditScope.all &&
+        normalizedDraft.recurrence == null;
+    if (!hasRecurringIdentity && !convertsSingletonToRecurring) {
+      throw const ScheduleConflictException('반복 일정 항목을 확인해 주세요.');
+    }
+    if (keyIsSingle &&
+        !convertsSingletonToRecurring &&
+        !convertsRecurringToSingleton) {
+      throw const ScheduleConflictException('반복 일정 항목을 확인해 주세요.');
+    }
+    final rule = normalizedDraft.recurrence ?? event.recurrenceRule;
+    if (!convertsRecurringToSingleton) {
+      if (rule == null) {
+        throw const ScheduleValidationException('반복 일정 규칙을 확인해 주세요.');
+      }
+      LocalScheduleRepository._validateRuleAnchor(rule, normalizedDraft);
+    }
+    if (scope != EventEditScope.all &&
+        normalizedDraft.hasExplicitMemberIds &&
+        !LocalScheduleRepository._sameMemberIdSet(
+          canonicalEventMemberIds(normalizedDraft.memberIds),
+          canonicalEventMemberIds(event.memberIds),
+        )) {
+      throw const ScheduleConflictException('반복 일정 멤버는 전체 범위에서만 변경할 수 있습니다.');
+    }
+    final result = await _recurrenceRpc(
+      'update_event_occurrence_scope_if_version',
+      params: <String, dynamic>{
+        'p_event_id': event.id,
+        'p_expected_version': expectedSeriesVersion,
+        'p_occurrence_key': event.occurrenceKey,
+        'p_scope': scope.wireName,
+        'p_title': normalizedDraft.title.trim(),
+        'p_description': normalizedDraft.note.trim(),
+        'p_starts_at': normalizedDraft.startAt.toUtc().toIso8601String(),
+        'p_ends_at': normalizedDraft.endAt.toUtc().toIso8601String(),
+        'p_timezone': normalizedDraft.timezone,
+        'p_is_all_day': normalizedDraft.allDay,
+        'p_all_day_start': normalizedDraft.allDay
+            ? _dateString(normalizedDraft.allDayStartDate!)
+            : null,
+        'p_all_day_end': normalizedDraft.allDay
+            ? _dateString(normalizedDraft.allDayEndDate!)
+            : null,
+        'p_color_value': normalizedDraft.colorValue,
+        // The all-scope RPC requires the complete participant set so member
+        // replacement is atomic with the body/rule write.  When the draft
+        // omits members, preserve the event's current series assignment.
+        // NULL is reserved for this/future scopes, where participant edits
+        // are rejected and the server inherits the existing rows.
+        'p_member_ids': scope == EventEditScope.all
+            ? canonicalEventMemberIds(
+                normalizedDraft.hasExplicitMemberIds
+                    ? normalizedDraft.memberIds
+                    : event.memberIds,
+              )
+            : null,
+        'p_frequency': convertsRecurringToSingleton
+            ? null
+            : rule?.frequency.wireName,
+        'p_interval': convertsRecurringToSingleton ? null : rule?.interval,
+        'p_weekdays': convertsRecurringToSingleton ? null : rule?.weekdays,
+        'p_end': convertsRecurringToSingleton ? null : rule?.end.wireName,
+        'p_count': convertsRecurringToSingleton ? null : rule?.count,
+        'p_until_date': convertsRecurringToSingleton || rule?.untilDate == null
+            ? null
+            : _dateString(rule!.untilDate!),
+        'p_monthly_day': convertsRecurringToSingleton ? null : rule?.monthlyDay,
+      },
+    );
+    return _receiptFromRpcResult(
+      result,
+      expectedGroupId: event.groupId,
+      expectedEventId: event.id,
+      expectedKey: event.occurrenceKey,
+      expectedScope: scope,
+      expectedSeriesVersion: expectedSeriesVersion,
+      expectedOccurrenceVersion: expectedOccurrenceVersion,
+    );
+  }
+
+  @override
+  Future<RecurrenceMutationReceipt> deleteEventOccurrence({
+    required PlannerEvent event,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+    String? actorId,
+  }) async {
+    if (event.groupId.trim().isEmpty ||
+        event.id.trim().isEmpty ||
+        !isValidOccurrenceKey(event.occurrenceKey) ||
+        event.occurrenceKey == 'single') {
+      throw const ScheduleValidationException('반복 일정 항목을 확인해 주세요.');
+    }
+    _requireCurrentRemoteUser(actorId ?? currentSessionUserId);
+    final result = await _recurrenceRpc(
+      'delete_event_occurrence_scope_if_version',
+      params: <String, dynamic>{
+        'p_event_id': event.id,
+        'p_expected_version': expectedSeriesVersion,
+        'p_occurrence_key': event.occurrenceKey,
+        'p_scope': scope.wireName,
+      },
+    );
+    return _receiptFromRpcResult(
+      result,
+      expectedGroupId: event.groupId,
+      expectedEventId: event.id,
+      expectedKey: event.occurrenceKey,
+      expectedScope: scope,
+      expectedSeriesVersion: expectedSeriesVersion,
+      expectedOccurrenceVersion: expectedOccurrenceVersion,
+    );
+  }
+
+  static RecurrenceMutationReceipt _receiptFromRpcResult(
+    Object? result, {
+    required String expectedGroupId,
+    required String expectedEventId,
+    required String expectedKey,
+    required EventEditScope expectedScope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+  }) {
+    final row = _strictSingleRpcMap(result);
+    if (row == null) {
+      throw const ScheduleConflictException('일정 변경 응답을 확인할 수 없습니다.');
+    }
+    try {
+      final receipt = RecurrenceMutationReceipt.fromJson(row);
+      final expectedReceiptSeriesVersion = receipt.changed
+          ? expectedSeriesVersion + 1
+          : expectedSeriesVersion;
+      final expectedReceiptOccurrenceVersion =
+          expectedScope == EventEditScope.thisOccurrence
+          ? (receipt.changed
+                ? expectedOccurrenceVersion + 1
+                : expectedOccurrenceVersion)
+          : 0;
+      if (receipt.groupId != expectedGroupId ||
+          receipt.eventId != expectedEventId ||
+          receipt.occurrenceKey != expectedKey ||
+          receipt.scope != expectedScope ||
+          receipt.seriesVersion != expectedReceiptSeriesVersion ||
+          receipt.occurrenceVersion != expectedReceiptOccurrenceVersion) {
+        throw const FormatException('일정 변경 응답을 확인해 주세요.');
+      }
+      return receipt;
+    } on FormatException {
+      throw const ScheduleConflictException('일정 변경 응답을 확인할 수 없습니다.');
+    }
+  }
+
+  @override
+  Future<RecurrenceMutationReceipt> replaceRecurringEventMembers({
+    required PlannerEvent event,
+    required Iterable<String> memberIds,
+    required int expectedVersion,
+    String? actorId,
+  }) async {
+    final recurring =
+        event.recurrenceRule != null || event.occurrenceKey != 'single';
+    if (event.groupId.trim().isEmpty ||
+        event.id.trim().isEmpty ||
+        event.ownerId.trim().isEmpty ||
+        !recurring ||
+        !isValidOccurrenceKey(event.occurrenceKey) ||
+        expectedVersion < 0) {
+      throw const ScheduleValidationException('반복 일정 항목을 확인해 주세요.');
+    }
+    final normalizedMemberIds = canonicalEventMemberIds(memberIds);
+    if (!normalizedMemberIds.contains(event.ownerId)) {
+      throw const ScheduleValidationException('반복 일정 작성자는 멤버에서 제외할 수 없습니다.');
+    }
+    _requireCurrentRemoteUser(actorId ?? currentSessionUserId);
+    final selectedKey = event.occurrenceKey == 'single'
+        ? occurrenceKeyForIndex(0)
+        : event.occurrenceKey;
+    final result = await _recurrenceRpc(
+      'replace_recurring_event_members_if_version',
+      params: <String, dynamic>{
+        'p_event_id': event.id,
+        'p_expected_version': expectedVersion,
+        'p_occurrence_key': event.occurrenceKey,
+        'p_member_ids': normalizedMemberIds,
+      },
+    );
+    return _receiptFromRpcResult(
+      result,
+      expectedGroupId: event.groupId,
+      expectedEventId: event.id,
+      expectedKey: selectedKey,
+      expectedScope: EventEditScope.all,
+      expectedSeriesVersion: expectedVersion,
+      expectedOccurrenceVersion: 0,
+    );
+  }
+
+  @override
   Future<PlannerEvent> updateEvent(
     PlannerEvent event, {
     required int expectedVersion,
@@ -3412,6 +4862,7 @@ class SupabaseScheduleRepository
   static bool _hasCompleteEventFields(
     Map<String, dynamic> row, {
     bool requireMemberIds = true,
+    bool strictLifecycleTimestamps = false,
   }) {
     final required = <String>[
       'id',
@@ -3433,7 +4884,23 @@ class SupabaseScheduleRepository
     ];
     if (requireMemberIds) required.add('member_ids');
     if (!required.every(row.containsKey)) return false;
-    return row['id'] is String &&
+    final occurrenceFieldNames = <String>{
+      'event_id',
+      'series_id',
+      'occurrence_key',
+      'occurrence_index',
+      'occurrence_version',
+      'is_occurrence',
+      'scheduled_starts_at',
+      'scheduled_ends_at',
+      'recurrence_rule',
+    };
+    final hasOccurrenceFields = row.keys.any(occurrenceFieldNames.contains);
+    if (hasOccurrenceFields && !occurrenceFieldNames.every(row.containsKey)) {
+      return false;
+    }
+    final baseValid =
+        row['id'] is String &&
         (row['id'] as String).trim().isNotEmpty &&
         row['group_id'] is String &&
         (row['group_id'] as String).trim().isNotEmpty &&
@@ -3447,14 +4914,92 @@ class SupabaseScheduleRepository
         (row['timezone'] as String).trim().isNotEmpty &&
         isValidIanaTimezone(row['timezone'] as String) &&
         row['is_all_day'] is bool &&
-        _strictVersionValue(row['version']) != null &&
-        _dateTimeValue(row['created_at']) != null &&
-        _dateTimeValue(row['updated_at']) != null &&
+        _strictVersionValue(row['version']) is int &&
+        (_strictVersionValue(row['version']) ?? -1) >= 0 &&
+        _lifecycleTimestamp(
+              row['created_at'],
+              strict: strictLifecycleTimestamps,
+            ) !=
+            null &&
+        _lifecycleTimestamp(
+              row['updated_at'],
+              strict: strictLifecycleTimestamps,
+            ) !=
+            null &&
         (row['deleted_at'] == null ||
-            _dateTimeValue(row['deleted_at']) != null) &&
+            _lifecycleTimestamp(
+                  row['deleted_at'],
+                  strict: strictLifecycleTimestamps,
+                ) !=
+                null) &&
         _strictColorValue(row['color_value']) != null &&
         _validEventDates(row) &&
         (!requireMemberIds || _strictMemberIds(row['member_ids']) != null);
+    if (!baseValid || !hasOccurrenceFields) return baseValid;
+    if (row['event_id'] is! String ||
+        row['event_id'] != row['id'] ||
+        row['series_id'] is! String ||
+        (row['series_id'] as String).trim().isEmpty ||
+        row['occurrence_key'] is! String ||
+        !isValidOccurrenceKey(row['occurrence_key']) ||
+        (row['occurrence_index'] != null && row['occurrence_index'] is! num) ||
+        row['occurrence_version'] is! num ||
+        row['is_occurrence'] is! bool ||
+        row['scheduled_starts_at'] == null ||
+        _strictDateTimeValue(row['scheduled_starts_at']) == null ||
+        row['scheduled_ends_at'] == null ||
+        _strictDateTimeValue(row['scheduled_ends_at']) == null) {
+      return false;
+    }
+    final index = _strictVersionValue(row['occurrence_index']);
+    final occurrenceVersion = _strictVersionValue(row['occurrence_version']);
+    final isOccurrence = row['is_occurrence'] == true;
+    if ((row['occurrence_key'] != 'single' &&
+            (index == null ||
+                index < 0 ||
+                index != occurrenceIndexFromKey(row['occurrence_key']))) ||
+        (row['occurrence_key'] == 'single' && index != null && index != 0) ||
+        occurrenceVersion == null ||
+        occurrenceVersion < 0) {
+      return false;
+    }
+    final recurrenceRaw = row['recurrence_rule'];
+    if (recurrenceRaw != null) {
+      try {
+        RecurrenceRule.fromJson(recurrenceRaw);
+      } on FormatException {
+        return false;
+      }
+    }
+    // Every materialized row keeps the parent event id in all three identity
+    // columns. A recurring projection is always an occurrence with a
+    // non-single ordinal key and a valid rule; a singleton projection is the
+    // only legal `single` row and must not carry a recurrence rule. These
+    // checks prevent malformed rows from being merged under a colliding
+    // composite identity or from being edited through the wrong path.
+    if (row['series_id'] != row['id'] ||
+        occurrenceVersion > (_strictVersionValue(row['version']) ?? -1) ||
+        (isOccurrence &&
+            (row['occurrence_key'] == 'single' || recurrenceRaw == null)) ||
+        (!isOccurrence &&
+            (row['occurrence_key'] != 'single' || recurrenceRaw != null))) {
+      return false;
+    }
+    if (row['occurrence_key'] == 'single' && isOccurrence) {
+      return false;
+    }
+    if (row['occurrence_key'] != 'single' &&
+        (!isOccurrence || recurrenceRaw == null)) {
+      return false;
+    }
+    final scheduledStart = _strictDateTimeValue(row['scheduled_starts_at']);
+    final scheduledEnd = _strictDateTimeValue(row['scheduled_ends_at']);
+    if (scheduledStart == null ||
+        scheduledEnd == null ||
+        !scheduledEnd.isAfter(scheduledStart)) {
+      return false;
+    }
+    return true;
   }
 
   static bool _validEventDates(Map<String, dynamic> row) {
@@ -3668,9 +5213,14 @@ class SupabaseScheduleRepository
         throw const FormatException('일정 페이지 응답을 확인해 주세요.');
       }
       final envelope = result.cast<String, dynamic>();
-      if (!envelope.containsKey('events') ||
-          !envelope.containsKey('next_cursor') ||
-          !envelope.containsKey('has_more') ||
+      const expectedEnvelopeKeys = <String>{
+        'events',
+        'next_cursor',
+        'has_more',
+      };
+      if (envelope.length != expectedEnvelopeKeys.length ||
+          envelope.keys.toSet().difference(expectedEnvelopeKeys).isNotEmpty ||
+          !expectedEnvelopeKeys.every(envelope.containsKey) ||
           envelope['events'] is! List ||
           envelope['has_more'] is! bool) {
         throw const FormatException('일정 페이지 응답을 확인해 주세요.');
@@ -3690,6 +5240,12 @@ class SupabaseScheduleRepository
       if (hasMore != (nextCursor != null)) {
         throw const FormatException('일정 페이지 응답을 확인해 주세요.');
       }
+      // A true continuation flag is meaningful only when the server returned
+      // a complete requested page. Accepting a short page with has_more=true
+      // can make the client repeat a cursor forever or silently skip rows.
+      if (hasMore && rawEvents.length != limit) {
+        throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+      }
       final events = <PlannerEvent>[];
       final seenIds = <String>{};
       for (final raw in rawEvents) {
@@ -3697,7 +5253,7 @@ class SupabaseScheduleRepository
           throw const FormatException('일정 페이지 응답을 확인해 주세요.');
         }
         final row = raw.cast<String, dynamic>();
-        if (!_hasCompleteEventFields(row)) {
+        if (!_hasCompleteEventFields(row, strictLifecycleTimestamps: true)) {
           throw const FormatException('일정 페이지 응답을 확인해 주세요.');
         }
         final memberIds = _strictMemberIds(row['member_ids']);
@@ -3707,7 +5263,7 @@ class SupabaseScheduleRepository
         final event = _eventFromRow(row, memberIds: memberIds);
         if (event.groupId != expectedGroupId ||
             event.isDeleted ||
-            !seenIds.add(event.id) ||
+            !seenIds.add(event.identityKey) ||
             !eventOverlapsCalendarRange(event, range) ||
             (participantId != null &&
                 !event.memberIds.contains(participantId))) {
@@ -3731,7 +5287,10 @@ class SupabaseScheduleRepository
         if (events.isEmpty ||
             nextCursor.startsAtUtc != events.last.startAt.toUtc() ||
             nextCursor.eventId != events.last.id ||
-            nextCursor.occurrenceKey.isNotEmpty) {
+            (events.last.occurrenceKey == 'single'
+                ? !(nextCursor.occurrenceKey.isEmpty ||
+                      nextCursor.occurrenceKey == 'single')
+                : nextCursor.occurrenceKey != events.last.occurrenceKey)) {
           throw const FormatException('일정 페이지 응답을 확인해 주세요.');
         }
       }
@@ -3845,13 +5404,37 @@ class SupabaseScheduleRepository
   }) {
     final ownerId = '${row['created_by']}';
     final parsedMemberIds = memberIds ?? _legacyMemberIds(row, ownerId);
+    final startsAt = _strictDateTimeValue(row['starts_at']);
+    final endsAt = _strictDateTimeValue(row['ends_at']);
+    if (startsAt == null || endsAt == null) {
+      throw const ScheduleConflictException('일정 응답을 확인할 수 없습니다.');
+    }
+    RecurrenceRule? recurrence;
+    if (row.containsKey('recurrence_rule') && row['recurrence_rule'] != null) {
+      try {
+        recurrence = RecurrenceRule.fromJson(row['recurrence_rule']);
+      } on FormatException {
+        throw const ScheduleConflictException('반복 규칙 응답을 확인할 수 없습니다.');
+      }
+    }
+    final occurrenceKey = row['occurrence_key'] is String
+        ? row['occurrence_key'] as String
+        : 'single';
+    final occurrenceIndex = _strictVersionValue(row['occurrence_index']) ?? 0;
+    final occurrenceVersion =
+        _strictVersionValue(row['occurrence_version']) ??
+        _strictVersionValue(row['version']) ??
+        1;
     return PlannerEvent(
       id: '${row['id']}',
+      seriesId: row['series_id'] is String
+          ? row['series_id'] as String
+          : '${row['id']}',
       groupId: '${row['group_id']}',
       title: '${row['title'] ?? ''}',
       note: '${row['description'] ?? ''}',
-      startAt: DateTime.parse('${row['starts_at']}').toUtc(),
-      endAt: DateTime.parse('${row['ends_at']}').toUtc(),
+      startAt: startsAt,
+      endAt: endsAt,
       allDay: row['is_all_day'] == true,
       ownerId: ownerId,
       memberIds: parsedMemberIds,
@@ -3860,10 +5443,21 @@ class SupabaseScheduleRepository
       version: _intValue(row['version'], 1),
       allDayStartDate: _parseDate(row['all_day_start']),
       allDayEndDate: _parseDate(row['all_day_end']),
-      updatedAt: DateTime.tryParse('${row['updated_at']}')?.toUtc(),
+      updatedAt: _strictDateTimeValue(row['updated_at']) ?? startsAt,
       deletedAt: row['deleted_at'] == null
           ? null
-          : DateTime.tryParse('${row['deleted_at']}')?.toUtc(),
+          : _strictDateTimeValue(row['deleted_at']),
+      occurrenceKey: occurrenceKey,
+      occurrenceIndex: occurrenceIndex,
+      occurrenceVersion: occurrenceVersion,
+      isOccurrence: row['is_occurrence'] == true,
+      scheduledStartsAt: row['scheduled_starts_at'] == null
+          ? startsAt
+          : _strictDateTimeValue(row['scheduled_starts_at']),
+      scheduledEndsAt: row['scheduled_ends_at'] == null
+          ? endsAt
+          : _strictDateTimeValue(row['scheduled_ends_at']),
+      recurrenceRule: recurrence,
     );
   }
 
@@ -3909,6 +5503,16 @@ class SupabaseScheduleRepository
   /// timezone, which would make an RPC response vary by device location.
   static DateTime? _strictDateTimeValue(Object? value) {
     return parseStrictExplicitOffsetTimestamp(value);
+  }
+
+  /// Lifecycle columns on the v2 JSON projection are wire timestamps, not
+  /// already-typed Dart values. Require the explicit offset/Z shape there so
+  /// `_eventFromRow` cannot silently reinterpret a timezone-less value in the
+  /// device timezone (or fall back to a different timestamp). Legacy table
+  /// and realtime adapters keep their permissive parser for compatibility.
+  static DateTime? _lifecycleTimestamp(Object? value, {required bool strict}) {
+    if (strict && value is! String) return null;
+    return strict ? _strictDateTimeValue(value) : _dateTimeValue(value);
   }
 
   static int _intValue(Object? value, int fallback) =>

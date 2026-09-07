@@ -64,6 +64,16 @@ SupabaseClient _client(http.BaseClient transport) => SupabaseClient(
   httpClient: transport,
 );
 
+class _AuthenticatedSupabaseScheduleRepository
+    extends SupabaseScheduleRepository {
+  _AuthenticatedSupabaseScheduleRepository(super.client, this._userId);
+
+  final String? _userId;
+
+  @override
+  String? get currentSessionUserId => _userId;
+}
+
 Map<String, dynamic> _eventRow({
   String id = 'event-1',
   String groupId = 'group-1',
@@ -438,6 +448,117 @@ void main() {
           actorId: 'owner-1',
         );
         expect(noOp.version, 4);
+      },
+    );
+
+    test(
+      'recurring replacement uses dedicated RPC, creator guard, and strict receipts',
+      () async {
+        final receipt = <String, dynamic>{
+          'group_id': 'group-1',
+          'event_id': 'event-series',
+          'occurrence_key': occurrenceKeyForIndex(2),
+          'series_version': 3,
+          'occurrence_version': 0,
+          'scope': 'all',
+          'committed': true,
+          'changed': true,
+        };
+        final transport = _RpcTransport(receipt);
+        final client = _client(transport);
+        final repository = _AuthenticatedSupabaseScheduleRepository(
+          client,
+          'group-owner',
+        );
+        addTearDown(client.dispose);
+        final event = PlannerEvent(
+          id: 'event-series',
+          seriesId: 'event-series',
+          groupId: 'group-1',
+          title: 'Series',
+          startAt: _eventStart,
+          endAt: _eventEnd,
+          ownerId: 'creator-1',
+          memberIds: const <String>['creator-1'],
+          timezone: 'UTC',
+          version: 2,
+          occurrenceKey: occurrenceKeyForIndex(2),
+          occurrenceIndex: 2,
+          occurrenceVersion: 1,
+          isOccurrence: true,
+          recurrenceRule: RecurrenceRule(frequency: RecurrenceFrequency.daily),
+        );
+
+        await expectLater(
+          repository.replaceRecurringEventMembers(
+            event: event,
+            memberIds: const <String>[],
+            expectedVersion: event.version,
+            actorId: 'group-owner',
+          ),
+          throwsA(isA<ScheduleValidationException>()),
+        );
+        expect(transport.requests, isEmpty);
+
+        final changed = await repository.replaceRecurringEventMembers(
+          event: event,
+          memberIds: const <String>['member-2', 'creator-1', 'member-2'],
+          expectedVersion: event.version,
+          actorId: 'group-owner',
+        );
+        expect(changed.groupId, 'group-1');
+        expect(changed.eventId, event.id);
+        expect(changed.occurrenceKey, event.occurrenceKey);
+        expect(changed.seriesVersion, 3);
+        expect(changed.occurrenceVersion, 0);
+        expect(changed.scope, EventEditScope.all);
+        expect(changed.changed, isTrue);
+        final request =
+            transport.requests.singleWhere(
+                  (item) =>
+                      item is http.Request && item.url.path.contains('/rpc/'),
+                )
+                as http.Request;
+        expect(
+          request.url.path,
+          contains('/rpc/replace_recurring_event_members_if_version'),
+        );
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        expect(body['p_event_id'], event.id);
+        expect(body['p_expected_version'], event.version);
+        expect(body['p_occurrence_key'], event.occurrenceKey);
+        expect(body['p_member_ids'], <Object?>['creator-1', 'member-2']);
+
+        transport.payload = <String, dynamic>{
+          ...receipt,
+          'series_version': 3,
+          'changed': false,
+        };
+        final noOp = await repository.replaceRecurringEventMembers(
+          event: event,
+          memberIds: const <String>['creator-1'],
+          expectedVersion: 3,
+          actorId: 'group-owner',
+        );
+        expect(noOp.changed, isFalse);
+        expect(noOp.seriesVersion, 3);
+        expect(noOp.occurrenceVersion, 0);
+
+        transport.payload = <String, dynamic>{
+          ...receipt,
+          'occurrence_key': occurrenceKeyForIndex(1),
+          'series_version': 3,
+          'changed': false,
+        };
+        await expectLater(
+          repository.replaceRecurringEventMembers(
+            event: event,
+            memberIds: const <String>['creator-1'],
+            expectedVersion: 3,
+            actorId: 'group-owner',
+          ),
+          throwsA(isA<ScheduleConflictException>()),
+        );
       },
     );
 

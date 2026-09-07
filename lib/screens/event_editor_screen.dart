@@ -1,30 +1,40 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../app.dart';
 import '../core/timezone_utils.dart';
 import '../models/app_models.dart';
+import 'widgets/recurrence_controls.dart';
 import '../state/app_state.dart';
 
 class EventEditorScreen extends ConsumerStatefulWidget {
-  const EventEditorScreen({this.eventId, super.key});
+  const EventEditorScreen({this.eventId, this.occurrenceKey, super.key});
   final String? eventId;
+
+  /// Opaque, stable occurrence key from a calendar-card deep link.  Null and
+  /// `single` preserve the legacy `/event/:id` route semantics.
+  final String? occurrenceKey;
 
   @override
   ConsumerState<EventEditorScreen> createState() => _EventEditorScreenState();
 }
 
 class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
-  final _formKey = GlobalKey<FormState>();
+  GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   late final TextEditingController _titleController;
   late final TextEditingController _noteController;
   late DateTime _start;
   late DateTime _end;
   bool _allDay = false;
   int _colorValue = 0xff477b76;
+  RecurrenceRule? _recurrenceRule;
+  EventEditScope? _recurrenceScope;
+  GlobalKey<RecurrenceEditorState> _recurrenceKey =
+      GlobalKey<RecurrenceEditorState>();
   bool _didSeed = false;
   final Set<String> _selectedMemberIds = <String>{};
   int? _bodyDraftBaseVersion;
@@ -40,6 +50,10 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   bool _eventLookupSettled = false;
   bool _eventLookupRetryable = false;
   String? _eventLookupError;
+  // Incremented whenever the route identity changes or a new detail request
+  // starts.  A completed lookup must match this generation as well as the
+  // event/occurrence identity before it may seed the editor.
+  int _eventLookupGeneration = 0;
 
   final _colors = const <int>[
     0xff477b76,
@@ -52,11 +66,11 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   PlannerEvent? _existing(PlannerController controller) {
     if (widget.eventId == null) return null;
     for (final event in controller.events) {
-      if (event.id == widget.eventId && !event.isDeleted) return event;
+      if (_matchesRouteEvent(event) && !event.isDeleted) return event;
     }
     final cached = _deepLinkedEvent;
     if (cached != null &&
-        cached.id == widget.eventId &&
+        _matchesRouteEvent(cached) &&
         !cached.isDeleted &&
         cached.groupId == controller.selectedGroup?.id &&
         _deepLinkedUserId == controller.user?.id &&
@@ -66,18 +80,49 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     return null;
   }
 
+  bool _matchesRouteEvent(PlannerEvent event) {
+    final eventId = widget.eventId;
+    if (eventId == null) return false;
+    if (widget.occurrenceKey == null || widget.occurrenceKey == 'single') {
+      return event.id == eventId;
+    }
+    return (event.seriesId == eventId || event.id == eventId) &&
+        event.occurrenceKey == widget.occurrenceKey;
+  }
+
+  String get _routeOccurrenceKey => widget.occurrenceKey ?? 'single';
+
+  bool _isCurrentLookupRoute(
+    int generation,
+    String eventId,
+    String occurrenceKey,
+  ) {
+    return mounted &&
+        _eventLookupGeneration == generation &&
+        widget.eventId == eventId &&
+        _routeOccurrenceKey == occurrenceKey;
+  }
+
   void _maybeLoadDeepLinkedEvent(PlannerController controller) {
     final eventId = widget.eventId;
     final current = controller.user;
     final group = controller.selectedGroup;
+    final occurrenceLookup =
+        widget.occurrenceKey != null && widget.occurrenceKey != 'single';
+    final canLookup = occurrenceLookup
+        ? controller.supportsEventOccurrenceByKey
+        : controller.supportsEventById;
     if (eventId == null ||
         _eventLookupStarted ||
         current == null ||
         group == null ||
-        !controller.supportsEventById ||
+        !canLookup ||
         controller.isLoading) {
       return;
     }
+    final requestEventId = eventId;
+    final requestOccurrenceKey = widget.occurrenceKey ?? 'single';
+    final requestGeneration = ++_eventLookupGeneration;
     _eventLookupStarted = true;
     _eventLookupInFlight = true;
     _eventLookupSettled = false;
@@ -87,9 +132,17 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     final groupId = group.id;
     unawaited(
       controller
-          .loadEventById(eventId)
+          .loadEventById(requestEventId, occurrenceKey: requestOccurrenceKey)
           .then((event) {
-            if (!mounted) return;
+            // Route A may complete after the same editor state has been
+            // reused for route B.  Do not even touch B's state in that case.
+            if (!_isCurrentLookupRoute(
+              requestGeneration,
+              requestEventId,
+              requestOccurrenceKey,
+            )) {
+              return;
+            }
             final latest = ref.read(plannerControllerProvider);
             if (latest.user?.id != userId ||
                 latest.selectedGroup?.id != groupId) {
@@ -118,7 +171,13 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
             });
           })
           .catchError((Object error) {
-            if (!mounted) return;
+            if (!_isCurrentLookupRoute(
+              requestGeneration,
+              requestEventId,
+              requestOccurrenceKey,
+            )) {
+              return;
+            }
             final latest = ref.read(plannerControllerProvider);
             if (latest.user?.id != userId ||
                 latest.selectedGroup?.id != groupId) {
@@ -153,6 +212,7 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   void _retryDeepLinkedEvent() {
     if (!mounted) return;
     setState(() {
+      _eventLookupGeneration++;
       _eventUnavailable = false;
       _eventLookupStarted = false;
       _eventLookupInFlight = false;
@@ -188,6 +248,11 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     }
     _allDay = event.allDay;
     _colorValue = event.colorValue;
+    _recurrenceRule = event.recurrenceRule;
+    // Occurrence routes start participant controls locked until the user
+    // explicitly chooses an all-scope mutation. The same gate applies to a
+    // series anchor so an accidental this/future choice cannot leak members.
+    _recurrenceScope = null;
   }
 
   void _syncIncomingEventDraft(PlannerEvent event) {
@@ -213,6 +278,81 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
         ..addAll(event.memberIds);
       _participantDraftBaseVersion = event.version;
     }
+  }
+
+  void _seedExistingEvent(PlannerEvent event) {
+    _applyEventToBody(event);
+    _selectedMemberIds
+      ..clear()
+      ..addAll(event.memberIds);
+    _bodyDraftBaseVersion = event.version;
+    _participantDraftBaseVersion = event.version;
+    _bodyDraftDirty = false;
+    _memberSelectionDirty = false;
+  }
+
+  void _seedCreateDraft(PlannerController controller) {
+    _start = DateTime(
+      controller.selectedDay.year,
+      controller.selectedDay.month,
+      controller.selectedDay.day,
+      9,
+    );
+    _end = _start.add(const Duration(hours: 1));
+    final currentUserId = controller.user?.id;
+    if (currentUserId != null && currentUserId.isNotEmpty) {
+      _selectedMemberIds.add(currentUserId);
+    }
+    _bodyDraftBaseVersion = null;
+    _participantDraftBaseVersion = null;
+    _recurrenceRule = null;
+    _recurrenceScope = null;
+    _bodyDraftDirty = false;
+    _memberSelectionDirty = false;
+  }
+
+  /// Fully reseeds every route-dependent field when GoRouter reuses this
+  /// state object for a different event or occurrence.  In particular, a
+  /// recurrence child/form key is replaced so its own touched fields cannot
+  /// survive an A→B route update.
+  void _resetForRouteIdentity(PlannerController controller) {
+    _eventLookupGeneration++;
+    _titleController.clear();
+    _noteController.clear();
+    final now = DateTime.now();
+    _start = DateTime(now.year, now.month, now.day, now.hour + 1);
+    _end = _start.add(const Duration(hours: 1));
+    _allDay = false;
+    _colorValue = _colors.first;
+    _selectedMemberIds.clear();
+    _bodyDraftBaseVersion = null;
+    _participantDraftBaseVersion = null;
+    _bodyDraftDirty = false;
+    _memberSelectionDirty = false;
+    _recurrenceRule = null;
+    _recurrenceScope = null;
+    _formKey = GlobalKey<FormState>();
+    _recurrenceKey = GlobalKey<RecurrenceEditorState>();
+    _eventUnavailable = false;
+    _deepLinkedEvent = null;
+    _deepLinkedUserId = null;
+    _deepLinkedGroupId = null;
+    _eventLookupStarted = false;
+    _eventLookupInFlight = false;
+    _eventLookupSettled = false;
+    _eventLookupRetryable = false;
+    _eventLookupError = null;
+
+    final existing = _existing(controller);
+    if (existing != null) {
+      _seedExistingEvent(existing);
+    } else if (widget.eventId == null) {
+      _seedCreateDraft(controller);
+    }
+    // Mark the route as seeded even when its detail must be loaded.  The
+    // eventual authoritative response is merged by _syncIncomingEventDraft;
+    // this prevents didChangeDependencies from reseeding the new route.
+    _didSeed = true;
   }
 
   int _combinedDraftBaseVersion(PlannerEvent event) {
@@ -247,62 +387,17 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (_didSeed) return;
-    _didSeed = true;
-    final controller = ref.read(plannerControllerProvider);
-    final existing = _existing(controller);
-    if (existing != null) {
-      _applyEventToBody(existing);
-      _selectedMemberIds
-        ..clear()
-        ..addAll(existing.memberIds);
-      _bodyDraftBaseVersion = existing.version;
-      _participantDraftBaseVersion = existing.version;
-      _bodyDraftDirty = false;
-      _memberSelectionDirty = false;
-    } else if (widget.eventId == null) {
-      _start = DateTime(
-        controller.selectedDay.year,
-        controller.selectedDay.month,
-        controller.selectedDay.day,
-        9,
-      );
-      _end = _start.add(const Duration(hours: 1));
-      final currentUserId = controller.user?.id;
-      if (currentUserId != null && currentUserId.isNotEmpty) {
-        _selectedMemberIds
-          ..clear()
-          ..add(currentUserId);
-      }
-      _bodyDraftBaseVersion = null;
-      _participantDraftBaseVersion = null;
-      _bodyDraftDirty = false;
-      _memberSelectionDirty = false;
-    } else {
-      // An edit deep link must never be treated as a create route while its
-      // target is unavailable. The loading/terminal view is selected in build
-      // once the controller has finished its authoritative snapshot.
-      _selectedMemberIds.clear();
-      _bodyDraftBaseVersion = null;
-      _participantDraftBaseVersion = null;
-      _bodyDraftDirty = false;
-      _memberSelectionDirty = false;
-    }
+    _resetForRouteIdentity(ref.read(plannerControllerProvider));
   }
 
   @override
   void didUpdateWidget(covariant EventEditorScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.eventId == widget.eventId) return;
-    _deepLinkedEvent = null;
-    _deepLinkedUserId = null;
-    _deepLinkedGroupId = null;
-    _eventLookupStarted = false;
-    _eventLookupInFlight = false;
-    _eventLookupSettled = false;
-    _eventLookupRetryable = false;
-    _eventLookupError = null;
-    _eventUnavailable = false;
-    _didSeed = false;
+    if (oldWidget.eventId == widget.eventId &&
+        oldWidget.occurrenceKey == widget.occurrenceKey) {
+      return;
+    }
+    _resetForRouteIdentity(ref.read(plannerControllerProvider));
   }
 
   @override
@@ -386,9 +481,34 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     final existing = _existing(controller);
     if (widget.eventId != null && existing == null) return;
     final canEditBody = existing == null || existing.ownerId == currentUserId;
-    final canEditParticipants = existing == null
+    final canManageParticipants = existing == null
         ? currentUserId != null && controller.selectedGroup != null
         : controller.canEditEventParticipants(existing);
+    final recurringEvent = existing?.recurrenceRule != null;
+    final recurringOccurrence =
+        recurringEvent && existing?.occurrenceKey != 'single';
+    final canEditParticipants = existing == null
+        ? canManageParticipants
+        : canManageParticipants &&
+              (!recurringEvent || _recurrenceScope == EventEditScope.all);
+    // Recurring series assignments always retain the event creator.  Keep the
+    // check at the save boundary as well as on the protected checkbox: a
+    // stale detail payload may omit the creator, and silently adding it here
+    // would hide the invalid external state instead of asking for a refresh.
+    final protectedCreatorId =
+        existing?.ownerId ??
+        (existing == null && _recurrenceRule != null ? currentUserId : null);
+    final protectsCreator = existing != null
+        ? (recurringEvent || _recurrenceRule != null)
+        : _recurrenceRule != null;
+    if (protectsCreator &&
+        protectedCreatorId != null &&
+        !_selectedMemberIds.contains(protectedCreatorId)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('작성자 참여 정보를 확인한 뒤 다시 저장해 주세요.')),
+      );
+      return;
+    }
     if (!canEditBody && !canEditParticipants) {
       ScaffoldMessenger.of(
         context,
@@ -396,6 +516,15 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       return;
     }
     if (canEditBody && !(_formKey.currentState?.validate() ?? false)) return;
+    if (canEditBody) {
+      final recurrenceEditor = _recurrenceKey.currentState;
+      final recurrence = recurrenceEditor?.validateRule();
+      if (recurrenceEditor?.hasRecurrenceSelection == true &&
+          recurrence == null) {
+        return;
+      }
+      _recurrenceRule = recurrence;
+    }
     if (existing != null && !canEditBody && canEditParticipants) {
       try {
         final participantDraft = existing.copyWith(
@@ -463,9 +592,50 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
               _end.day,
             ).add(const Duration(days: 1))
           : null,
+      recurrence: _recurrenceRule,
     );
+    var scope = EventEditScope.all;
+    if (existing != null &&
+        (recurringEvent || existing.occurrenceKey != 'single')) {
+      final selectedScope =
+          _recurrenceScope ??
+          await showRecurrenceScopeDialog(context, deleting: false);
+      if (selectedScope == null || !mounted) return;
+      scope = selectedScope;
+    }
+    if (recurringOccurrence &&
+        scope != EventEditScope.all &&
+        _memberSelectionDirty) {
+      // A stale all-scope participant draft must never leak into a this/future
+      // mutation. Revert it and ask the user to choose all before editing
+      // participants again.
+      final recurringTarget = existing;
+      if (recurringTarget == null) return;
+      setState(() {
+        _selectedMemberIds
+          ..clear()
+          ..addAll(recurringTarget.memberIds);
+        _memberSelectionDirty = false;
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('참여자 변경은 전체 일정에서만 적용돼요.')));
+      return;
+    }
+    if (recurringEvent &&
+        existing?.occurrenceKey == 'single' &&
+        scope != EventEditScope.all) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('시리즈 일정은 전체 일정 범위에서만 변경할 수 있어요.')),
+      );
+      return;
+    }
     try {
-      await controller.saveEvent(existing: existingDraft, draft: draft);
+      await controller.saveEvent(
+        existing: existingDraft,
+        draft: draft,
+        scope: scope,
+      );
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -477,6 +647,30 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     }
   }
 
+  Future<void> _chooseRecurrenceScope(PlannerEvent event) async {
+    final selected = await showRecurrenceScopeDialog(
+      context,
+      deleting: false,
+      initial: _recurrenceScope ?? EventEditScope.thisOccurrence,
+    );
+    if (selected == null || !mounted) return;
+    final participantDraftWasDirty = _memberSelectionDirty;
+    setState(() {
+      _recurrenceScope = selected;
+      if (selected != EventEditScope.all && participantDraftWasDirty) {
+        _selectedMemberIds
+          ..clear()
+          ..addAll(event.memberIds);
+        _memberSelectionDirty = false;
+      }
+    });
+    if (selected != EventEditScope.all && participantDraftWasDirty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('참여자 변경은 전체 일정에서만 적용돼요. 변경을 되돌렸어요.')),
+      );
+    }
+  }
+
   Future<void> _delete(PlannerEvent event) async {
     final currentUserId = ref.read(plannerControllerProvider).user?.id;
     if (event.ownerId != currentUserId) {
@@ -485,26 +679,34 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       ).showSnackBar(const SnackBar(content: Text('이 일정은 작성자만 삭제할 수 있어요.')));
       return;
     }
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('일정을 삭제할까요?'),
-        content: const Text('삭제한 일정은 캘린더에서 바로 사라집니다.'),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('취소'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('삭제'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
+    EventEditScope? scope;
+    if (event.recurrenceRule != null || event.occurrenceKey != 'single') {
+      scope = await showRecurrenceScopeDialog(context, deleting: true);
+    } else {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('일정을 삭제할까요?'),
+          content: const Text('삭제한 일정은 캘린더에서 바로 사라집니다.'),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('삭제'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed == true) scope = EventEditScope.all;
+    }
+    if (scope == null || !mounted) return;
     try {
-      await ref.read(plannerControllerProvider).deleteEvent(event);
+      await ref
+          .read(plannerControllerProvider)
+          .deleteEvent(event, scope: scope);
       if (mounted) context.go('/home');
     } catch (_) {
       if (mounted) setState(() {});
@@ -522,7 +724,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
         widget.eventId != null &&
         controller.user != null &&
         controller.selectedGroup != null &&
-        controller.supportsEventById;
+        ((widget.occurrenceKey != null && widget.occurrenceKey != 'single')
+            ? controller.supportsEventOccurrenceByKey
+            : controller.supportsEventById);
     final lookupPending =
         widget.eventId != null &&
         existing == null &&
@@ -616,10 +820,32 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     if (existing != null) _syncIncomingEventDraft(existing);
     final canEditBody =
         existing == null || existing.ownerId == controller.user?.id;
-    final canEditParticipants = existing == null
+    final recurringEvent = existing?.recurrenceRule != null;
+    final recurringOccurrence =
+        recurringEvent && existing?.occurrenceKey != 'single';
+    final canManageParticipants = existing == null
         ? controller.user != null && controller.selectedGroup != null
         : controller.canEditEventParticipants(existing);
+    final canEditParticipants = existing == null
+        ? canManageParticipants
+        : canManageParticipants &&
+              (!recurringEvent || _recurrenceScope == EventEditScope.all);
     final canSave = canEditBody || canEditParticipants;
+    final protectsCreator = existing != null
+        ? (recurringEvent || _recurrenceRule != null)
+        : _recurrenceRule != null;
+    final protectedCreatorId = protectsCreator
+        ? (existing?.ownerId ?? controller.user?.id)
+        : null;
+    String? protectedCreatorName;
+    if (protectedCreatorId != null) {
+      for (final member in controller.members) {
+        if (member.id == protectedCreatorId) {
+          protectedCreatorName = member.name;
+          break;
+        }
+      }
+    }
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
@@ -647,6 +873,10 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       body: Form(
         key: _formKey,
         child: ListView(
+          // The editor is a bounded form rather than a feed. Keep the small
+          // color/participant controls in the semantics tree even when the
+          // repeat section grows on a compact viewport.
+          scrollCacheExtent: ScrollCacheExtent.pixels(1200),
           padding: const EdgeInsets.fromLTRB(20, 6, 20, 40),
           children: <Widget>[
             if (!canEditBody) ...<Widget>[
@@ -765,7 +995,55 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
               onDate: canEditBody ? () => _pickDate(start: false) : null,
               onTime: canEditBody ? () => _pickTime(start: false) : null,
             ),
-            const Divider(height: 30),
+            RecurrenceEditor(
+              key: _recurrenceKey,
+              start: _start,
+              initialRule: _recurrenceRule,
+              enabled: canEditBody,
+              onChanged: (rule) {
+                _recurrenceRule = rule;
+                _markBodyDraftDirty();
+              },
+            ),
+            if (recurringOccurrence) ...<Widget>[
+              const SizedBox(height: 10),
+              Semantics(
+                container: true,
+                label: '반복 일정 상속 안내',
+                child: Text(
+                  '제목·메모·색상·시간은 시리즈에서 상속돼요. 이번 일정만 수정하면 이 일정에만 적용됩니다.',
+                  style: TextStyle(color: scheme.onSurfaceVariant),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Semantics(
+                container: true,
+                label: '반복 일정 참여자 안내',
+                child: Text(
+                  '참여자는 전체 일정에 상속돼요. 전체 일정을 선택할 때만 변경할 수 있어요.',
+                  style: TextStyle(color: scheme.onSurfaceVariant),
+                ),
+              ),
+            ],
+            if (recurringEvent && existing != null && canManageParticipants)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: OutlinedButton.icon(
+                  onPressed: () => _chooseRecurrenceScope(existing),
+                  icon: const Icon(Icons.tune),
+                  label: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      _recurrenceScope == EventEditScope.all
+                          ? '참여자 변경 범위: 전체 일정'
+                          : '참여자 변경 범위 선택',
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(0, 48),
+                  ),
+                ),
+              ),
             Text(
               '색상',
               style: Theme.of(
@@ -812,11 +1090,13 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
                 );
               }).toList(),
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 6),
             _ParticipantPicker(
               members: controller.members,
               selectedMemberIds: _selectedMemberIds,
               enabled: canEditParticipants,
+              protectedMemberId: protectedCreatorId,
+              protectedMemberName: protectedCreatorName,
               onChanged: (memberId, selected) {
                 setState(() {
                   _memberSelectionDirty = true;
@@ -876,22 +1156,41 @@ class _ParticipantPicker extends StatelessWidget {
     required this.members,
     required this.selectedMemberIds,
     required this.enabled,
+    this.protectedMemberId,
+    this.protectedMemberName,
     required this.onChanged,
   });
 
   final List<PlannerMember> members;
   final Set<String> selectedMemberIds;
   final bool enabled;
+  final String? protectedMemberId;
+  final String? protectedMemberName;
   final void Function(String memberId, bool selected) onChanged;
 
   @override
   Widget build(BuildContext context) {
+    PlannerMember? protectedMember;
+    final protectedId = protectedMemberId;
+    if (protectedId != null) {
+      for (final member in members) {
+        if (member.id == protectedId) {
+          protectedMember = member;
+          break;
+        }
+      }
+    }
     final activeMembers = members
-        .where(_isSelectableMember)
+        .where(
+          (member) => _isSelectableMember(member) && member.id != protectedId,
+        )
         .toList(growable: false);
     final activeIds = activeMembers.map((member) => member.id).toSet();
     final previousMemberIds = selectedMemberIds
-        .where((memberId) => !activeIds.contains(memberId))
+        .where(
+          (memberId) =>
+              memberId != protectedId && !activeIds.contains(memberId),
+        )
         .toList(growable: false);
 
     return Column(
@@ -911,7 +1210,9 @@ class _ParticipantPicker extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 8),
-        if (activeMembers.isEmpty && previousMemberIds.isEmpty)
+        if (protectedId == null &&
+            activeMembers.isEmpty &&
+            previousMemberIds.isEmpty)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 12),
             child: Text(
@@ -922,6 +1223,19 @@ class _ParticipantPicker extends StatelessWidget {
             ),
           )
         else ...<Widget>[
+          if (protectedId != null && protectedMember != null)
+            _ParticipantTile(
+              member: protectedMember,
+              selected: selectedMemberIds.contains(protectedId),
+              enabled: enabled,
+              protected: true,
+              onChanged: (_) {},
+            )
+          else if (protectedId != null)
+            _ProtectedMissingMemberTile(
+              memberName: protectedMemberName,
+              selected: selectedMemberIds.contains(protectedId),
+            ),
           ...activeMembers.map(
             (member) => _ParticipantTile(
               member: member,
@@ -951,26 +1265,38 @@ class _ParticipantTile extends StatelessWidget {
     required this.member,
     required this.selected,
     required this.enabled,
+    this.protected = false,
     required this.onChanged,
   });
 
   final PlannerMember member;
   final bool selected;
   final bool enabled;
+  final bool protected;
   final ValueChanged<bool> onChanged;
 
   @override
   Widget build(BuildContext context) {
     final avatarColor = colorFromValue(member.avatarColor);
+    final tileEnabled = enabled && !protected;
+    final semanticsLabel = protected
+        ? selected
+              ? '참여자 ${member.name}, 작성자라서 항상 선택됨'
+              : '참여자 ${member.name}, 작성자 참여 정보가 없어 저장할 수 없음'
+        : '참여자 ${member.name}';
     return Semantics(
       container: true,
-      label: '참여자 ${member.name}',
+      // CheckboxListTile contributes its own merged semantics node.  For the
+      // protected creator, expose the explicit invariant/copy above that
+      // node so assistive technologies announce why the control is locked.
+      excludeSemantics: protected,
+      label: semanticsLabel,
       selected: selected,
-      enabled: enabled,
+      enabled: tileEnabled,
       child: CheckboxListTile(
         contentPadding: EdgeInsets.zero,
         value: selected,
-        onChanged: enabled ? (value) => onChanged(value ?? false) : null,
+        onChanged: tileEnabled ? (value) => onChanged(value ?? false) : null,
         secondary: CircleAvatar(
           backgroundColor: avatarColor,
           child: Text(
@@ -982,6 +1308,45 @@ class _ParticipantTile extends StatelessWidget {
           ),
         ),
         title: Text(member.name),
+        subtitle: protected
+            ? Text(
+                selected ? '작성자는 항상 참여자로 유지돼요.' : '작성자 참여 정보를 확인해야 저장할 수 있어요.',
+              )
+            : null,
+      ),
+    );
+  }
+}
+
+class _ProtectedMissingMemberTile extends StatelessWidget {
+  const _ProtectedMissingMemberTile({
+    required this.memberName,
+    required this.selected,
+  });
+
+  final String? memberName;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final name = memberName ?? '일정 작성자';
+    return Semantics(
+      container: true,
+      excludeSemantics: true,
+      label: selected
+          ? '참여자 $name, 작성자라서 항상 선택됨'
+          : '참여자 $name, 작성자 참여 정보가 없어 저장할 수 없음',
+      selected: selected,
+      enabled: false,
+      child: CheckboxListTile(
+        contentPadding: EdgeInsets.zero,
+        value: selected,
+        onChanged: null,
+        secondary: const Icon(Icons.person_outline),
+        title: Text(name),
+        subtitle: Text(
+          selected ? '작성자는 항상 참여자로 유지돼요.' : '작성자 참여 정보를 확인해야 저장할 수 있어요.',
+        ),
       ),
     );
   }

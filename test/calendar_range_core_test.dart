@@ -101,6 +101,19 @@ SupabaseClient _client(http.BaseClient transport) => SupabaseClient(
   httpClient: transport,
 );
 
+/// The remote adapter intentionally requires a live auth context before the
+/// v2 range RPC.  Transport tests provide that context through the explicit
+/// seam instead of manufacturing a JWT.
+class _AuthenticatedSupabaseScheduleRepository
+    extends SupabaseScheduleRepository {
+  _AuthenticatedSupabaseScheduleRepository(super.client, this._sessionUserId);
+
+  final String? _sessionUserId;
+
+  @override
+  String? get currentSessionUserId => _sessionUserId;
+}
+
 class _LegacyRealtimeRepository extends SupabaseScheduleRepository {
   factory _LegacyRealtimeRepository() {
     final client = _client(_RpcTransport(<String, dynamic>{}));
@@ -315,6 +328,22 @@ void main() {
             eventId: 'event-1',
             occurrenceKey: 'future-v2',
           ).encode(),
+          throwsFormatException,
+        );
+        final fractionalVersion = base64Url
+            .encode(
+              utf8.encode(
+                jsonEncode(<String, Object>{
+                  'v': 2.0,
+                  'starts_at': '2030-01-02T09:00:00Z',
+                  'event_id': 'event-1',
+                  'occurrence_key': 'o00000000000000000001',
+                }),
+              ),
+            )
+            .replaceAll('=', '');
+        expect(
+          () => EventRangeCursor.decode(fractionalVersion),
           throwsFormatException,
         );
 
@@ -600,6 +629,54 @@ void main() {
 
   group('Supabase bounded RPC boundary', () {
     test(
+      'v2 range and point reads fail closed without a current session',
+      () async {
+        final transport = _RpcTransport(<String, dynamic>{
+          'events': const <Object>[],
+          'next_cursor': null,
+          'has_more': false,
+        });
+        final client = _client(transport);
+        final repository = _AuthenticatedSupabaseScheduleRepository(
+          client,
+          null,
+        );
+        addTearDown(client.dispose);
+        final range = calendarDayBounds(
+          DateTime(2030, 1, 2),
+          'UTC',
+        ).toEventRange();
+
+        await expectLater(
+          repository.eventsForRange(
+            userId: 'ignored-local-hint',
+            groupId: 'group-1',
+            range: range,
+          ),
+          throwsA(isA<ScheduleAuthorizationException>()),
+        );
+        await expectLater(
+          repository.eventOccurrenceByKey(
+            userId: 'ignored-local-hint',
+            groupId: 'group-1',
+            eventId: 'event-1',
+            occurrenceKey: 'o00000000000000000000',
+          ),
+          throwsA(isA<ScheduleAuthorizationException>()),
+        );
+        await expectLater(
+          repository.eventById(
+            userId: 'ignored-local-hint',
+            groupId: 'group-1',
+            eventId: 'event-1',
+          ),
+          throwsA(isA<ScheduleAuthorizationException>()),
+        );
+        expect(transport.requests, isEmpty);
+      },
+    );
+
+    test(
       'serializes exact range parameters and strictly parses the envelope',
       () async {
         final payload = <String, dynamic>{
@@ -609,7 +686,10 @@ void main() {
         };
         final transport = _RpcTransport(payload);
         final client = _client(transport);
-        final repository = SupabaseScheduleRepository(client);
+        final repository = _AuthenticatedSupabaseScheduleRepository(
+          client,
+          'ignored-local-hint',
+        );
         addTearDown(client.dispose);
         final range = calendarDayBounds(
           DateTime(2030, 1, 2),
@@ -762,7 +842,10 @@ void main() {
       };
       final transport = _RpcTransport(payload);
       final client = _client(transport);
-      final repository = SupabaseScheduleRepository(client);
+      final repository = _AuthenticatedSupabaseScheduleRepository(
+        client,
+        'ignored-local-hint',
+      );
       addTearDown(client.dispose);
       final range = calendarDayBounds(
         DateTime(2030, 1, 2),

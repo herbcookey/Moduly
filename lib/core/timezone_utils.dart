@@ -56,6 +56,54 @@ tz.Location plannerLocation(String name) {
 /// IANA 시간대에 입력한 벽시계 값을 UTC 시각으로 변환한다.
 DateTime wallTimeToUtc(DateTime wall, String timezone) {
   final location = plannerLocation(timezone);
+  // `timezone` resolves an autumn fold to the earlier (DST) offset.  Planner
+  // wall times use the deterministic standard-time side instead.  Enumerate
+  // nearby offsets and retain every exact round trip, choosing the latest UTC
+  // instant for an ambiguous fold.  For a spring gap there is no exact round
+  // trip; fall back to TZDateTime's documented forward resolution.
+  final naive = DateTime.utc(
+    wall.year,
+    wall.month,
+    wall.day,
+    wall.hour,
+    wall.minute,
+    wall.second,
+    wall.millisecond,
+    wall.microsecond,
+  );
+  final naiveMillis = naive.millisecondsSinceEpoch;
+  final offsets = <int>{};
+  for (var hour = -48; hour <= 48; hour++) {
+    offsets.add(
+      location
+          .lookupTimeZone(naiveMillis + hour * Duration.millisecondsPerHour)
+          .timeZone
+          .offset,
+    );
+  }
+  final exact = <DateTime>[];
+  for (final offset in offsets) {
+    final candidate = DateTime.fromMicrosecondsSinceEpoch(
+      naive.microsecondsSinceEpoch -
+          offset * Duration.microsecondsPerMillisecond,
+      isUtc: true,
+    );
+    final roundTrip = tz.TZDateTime.from(candidate, location);
+    if (roundTrip.year == wall.year &&
+        roundTrip.month == wall.month &&
+        roundTrip.day == wall.day &&
+        roundTrip.hour == wall.hour &&
+        roundTrip.minute == wall.minute &&
+        roundTrip.second == wall.second &&
+        roundTrip.millisecond == wall.millisecond &&
+        roundTrip.microsecond == wall.microsecond) {
+      exact.add(candidate);
+    }
+  }
+  if (exact.isNotEmpty) {
+    exact.sort();
+    return exact.last;
+  }
   return tz.TZDateTime(
     location,
     wall.year,
@@ -63,6 +111,9 @@ DateTime wallTimeToUtc(DateTime wall, String timezone) {
     wall.day,
     wall.hour,
     wall.minute,
+    wall.second,
+    wall.millisecond,
+    wall.microsecond,
   ).toUtc();
 }
 
@@ -88,6 +139,37 @@ DateTime utcToWallTimePrecise(DateTime instant, String timezone) {
     wall.microsecond,
   );
 }
+
+/// Tags a civil wall-clock tuple as UTC without changing any of its calendar
+/// fields.  A plain `DateTime` constructed with the default constructor uses
+/// the device timezone for arithmetic, which makes adding a day to a wall
+/// value depend on where the app is running.  Recurrence arithmetic uses this
+/// tuple representation exclusively; the value is never treated as an
+/// instant until it is passed back to [wallTimeToUtc].
+DateTime civilWallTime(DateTime value) => DateTime.utc(
+  value.year,
+  value.month,
+  value.day,
+  value.hour,
+  value.minute,
+  value.second,
+  value.millisecond,
+  value.microsecond,
+);
+
+/// Converts an instant to a UTC-tagged civil tuple for device-independent
+/// wall-clock arithmetic.
+DateTime utcToCivilWallTimePrecise(DateTime instant, String timezone) =>
+    civilWallTime(utcToWallTimePrecise(instant, timezone));
+
+/// Returns a UTC-tagged civil date.  The UTC tag is intentional: this value is
+/// a date tuple, not midnight in the device timezone.
+DateTime civilDateOnly(DateTime value) =>
+    DateTime.utc(value.year, value.month, value.day);
+
+/// Adds whole civil days without consulting the host/device timezone.
+DateTime civilDateAdd(DateTime date, int days) =>
+    DateTime.utc(date.year, date.month, date.day + days);
 
 DateTime dateOnly(DateTime value) =>
     DateTime(value.year, value.month, value.day);

@@ -39,6 +39,8 @@ void main() {
       'audit_logs',
       'invite_join_attempts',
       'event_members',
+      'event_recurrence_rules',
+      'event_occurrence_overrides',
     ]) {
       expect(
         migrations,

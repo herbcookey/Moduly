@@ -313,6 +313,17 @@ class PlannerController extends ChangeNotifier {
   bool get supportsEventById =>
       _usesBoundedEventRangeReads && _repository is EventByIdReadCapability;
 
+  bool get supportsRecurrence => _repository is RecurrenceCapability;
+
+  bool get supportsEventOccurrenceByKey =>
+      _usesBoundedEventRangeReads &&
+      _repository is EventOccurrenceReadCapability &&
+      // Local subclasses are commonly used as legacy test doubles that only
+      // populate EventById. Keep their historical path unless the concrete
+      // adapter explicitly opts into the occurrence projection.
+      !(_repository is LocalScheduleRepository &&
+          _repository.runtimeType != LocalScheduleRepository);
+
   bool get _usesBoundedEventRangeReads {
     final repository = _repository;
     if (repository is SupabaseScheduleRepository ||
@@ -3496,18 +3507,97 @@ class PlannerController extends ChangeNotifier {
   /// cannot disturb page cursors or the selected-range projection; the editor
   /// owns the returned detail snapshot. A late response after sign-out,
   /// identity change, or group switch is discarded rather than exposed.
-  Future<PlannerEvent?> loadEventById(String eventId) async {
+  Future<PlannerEvent?> loadEventById(
+    String eventId, {
+    String occurrenceKey = 'single',
+  }) async {
     final current = user;
     final group = selectedGroup;
     if (current == null || group == null) return null;
     if (eventId.trim().isEmpty || eventId != eventId.trim()) {
       throw const ScheduleValidationException('일정 식별자를 확인해 주세요.');
     }
+    if (!isValidOccurrenceKey(occurrenceKey)) {
+      throw const ScheduleValidationException('반복 일정 식별자를 확인해 주세요.');
+    }
     final inProjection = events
-        .where((event) => event.id == eventId && !event.isDeleted)
+        .where(
+          (event) =>
+              event.id == eventId &&
+              event.occurrenceKey == occurrenceKey &&
+              // A recurring base is never a detail occurrence, even if a
+              // legacy stream accidentally exposes it with key `single`.
+              (occurrenceKey != 'single' || event.recurrenceRule == null) &&
+              !event.isDeleted,
+        )
         .firstOrNull;
     if (inProjection != null) return inProjection;
     final repository = _repository;
+    if (occurrenceKey != 'single') {
+      if (!supportsEventOccurrenceByKey) return null;
+      final occurrenceCapability = _repository;
+      if (occurrenceCapability is! EventOccurrenceReadCapability) return null;
+      final capability = occurrenceCapability as EventOccurrenceReadCapability;
+      final revision = _plannerRevision;
+      final sessionGeneration = _plannerSessionGeneration;
+      final userId = current.id;
+      final groupId = group.id;
+      final event = await capability.eventOccurrenceByKey(
+        userId: userId,
+        groupId: groupId,
+        eventId: eventId,
+        occurrenceKey: occurrenceKey,
+      );
+      if (_disposed ||
+          _plannerRevision != revision ||
+          _plannerSessionGeneration != sessionGeneration ||
+          user?.id != userId ||
+          selectedGroup?.id != groupId) {
+        return null;
+      }
+      if (event == null || event.isDeleted) return null;
+      if (event.id != eventId ||
+          event.groupId != groupId ||
+          event.occurrenceKey != occurrenceKey) {
+        throw const ScheduleConflictException('일정 응답을 확인할 수 없습니다.');
+      }
+      return event;
+    }
+    // The default detail key is also used by legacy deep links. A recurring
+    // anchor must resolve through the materialized occurrence capability (the
+    // remote point RPC aliases `single` to ordinal zero); falling back to the
+    // legacy parent-row read would expose a non-editable series base and could
+    // let an editor mutate the wrong identity. Legacy test doubles that do not
+    // opt into the capability retain the EventById path below.
+    if (supportsEventOccurrenceByKey) {
+      final occurrenceCapability = repository as EventOccurrenceReadCapability;
+      final revision = _plannerRevision;
+      final sessionGeneration = _plannerSessionGeneration;
+      final userId = current.id;
+      final groupId = group.id;
+      final event = await occurrenceCapability.eventOccurrenceByKey(
+        userId: userId,
+        groupId: groupId,
+        eventId: eventId,
+        occurrenceKey: occurrenceKey,
+      );
+      if (_disposed ||
+          _plannerRevision != revision ||
+          _plannerSessionGeneration != sessionGeneration ||
+          user?.id != userId ||
+          selectedGroup?.id != groupId) {
+        return null;
+      }
+      if (event == null || event.isDeleted) return null;
+      if (event.id != eventId || event.groupId != groupId) {
+        throw const ScheduleConflictException('일정 응답을 확인할 수 없습니다.');
+      }
+      if (event.occurrenceKey != 'single' &&
+          event.occurrenceKey != occurrenceKeyForIndex(0)) {
+        throw const ScheduleConflictException('일정 응답을 확인할 수 없습니다.');
+      }
+      return event;
+    }
     if (!supportsEventById) return null;
     final revision = _plannerRevision;
     final sessionGeneration = _plannerSessionGeneration;
@@ -4039,19 +4129,19 @@ class PlannerController extends ChangeNotifier {
       // conflicting response and must fail closed.
       for (final event in page.events) {
         final previous = events
-            .where((item) => item.id == event.id)
+            .where((item) => item.identityKey == event.identityKey)
             .firstOrNull;
         if (previous != null && previous != event) {
           throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
         }
       }
       final merged = <String, PlannerEvent>{
-        for (final event in events) event.id: event,
+        for (final event in events) event.identityKey: event,
       };
       for (final event in page.events) {
-        final previous = merged[event.id];
+        final previous = merged[event.identityKey];
         if (previous == null || previous.version <= event.version) {
-          merged[event.id] = event;
+          merged[event.identityKey] = event;
         }
       }
       final ordered = merged.values.toList(growable: false)
@@ -4098,7 +4188,20 @@ class PlannerController extends ChangeNotifier {
 
   static int _comparePlannerEvents(PlannerEvent left, PlannerEvent right) {
     final byStart = left.startAt.toUtc().compareTo(right.startAt.toUtc());
-    return byStart != 0 ? byStart : left.id.compareTo(right.id);
+    if (byStart != 0) return byStart;
+    final byId = left.id.compareTo(right.id);
+    if (byId != 0) return byId;
+    return left.occurrenceKey.compareTo(right.occurrenceKey);
+  }
+
+  static bool _isAfterCursor(PlannerEvent event, EventRangeCursor cursor) {
+    final byStart = event.startAt.toUtc().compareTo(cursor.startsAtUtc);
+    if (byStart > 0) return true;
+    if (byStart < 0) return false;
+    final byId = event.id.compareTo(cursor.eventId);
+    if (byId > 0) return true;
+    if (byId < 0 || cursor.occurrenceKey.isEmpty) return false;
+    return event.occurrenceKey.compareTo(cursor.occurrenceKey) > 0;
   }
 
   void _validateRangePage(
@@ -4118,17 +4221,14 @@ class PlannerController extends ChangeNotifier {
       if (event.groupId != groupId ||
           event.isDeleted ||
           !eventOverlapsCalendarRange(event, range) ||
-          !seen.add(event.id) ||
+          !seen.add(event.identityKey) ||
           (participantId != null && !event.memberIds.contains(participantId))) {
         throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
       }
       if (previous != null && _comparePlannerEvents(previous, event) >= 0) {
         throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
       }
-      if (cursor != null &&
-          (event.startAt.toUtc().isBefore(cursor.startsAtUtc) ||
-              (event.startAt.toUtc() == cursor.startsAtUtc &&
-                  event.id.compareTo(cursor.eventId) <= 0))) {
+      if (cursor != null && !_isAfterCursor(event, cursor)) {
         throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
       }
       previous = event;
@@ -4142,7 +4242,11 @@ class PlannerController extends ChangeNotifier {
     if (page.nextCursor != null && page.events.isNotEmpty) {
       final last = page.events.last;
       if (page.nextCursor!.startsAtUtc != last.startAt.toUtc() ||
-          page.nextCursor!.eventId != last.id) {
+          page.nextCursor!.eventId != last.id ||
+          (last.occurrenceKey == 'single'
+              ? !(page.nextCursor!.occurrenceKey.isEmpty ||
+                    page.nextCursor!.occurrenceKey == 'single')
+              : page.nextCursor!.occurrenceKey != last.occurrenceKey)) {
         throw const ScheduleConflictException('일정 페이지 응답을 확인할 수 없습니다.');
       }
     }
@@ -4181,6 +4285,7 @@ class PlannerController extends ChangeNotifier {
   Future<void> saveEvent({
     PlannerEvent? existing,
     required EventDraft draft,
+    EventEditScope scope = EventEditScope.all,
   }) async {
     final current = user;
     final group = selectedGroup;
@@ -4203,6 +4308,39 @@ class PlannerController extends ChangeNotifier {
         memberIds: draft.hasExplicitMemberIds ? requestedMemberIds : null,
       );
       if (existing == null) {
+        if (normalizedDraft.recurrence != null) {
+          final recurrenceRepository = _repository;
+          if (recurrenceRepository is! RecurrenceCapability) {
+            throw const ScheduleCapabilityException('반복 일정을 지원하지 않는 저장소입니다.');
+          }
+          final capability = recurrenceRepository as RecurrenceCapability;
+          final created = await capability.createRecurringEvent(
+            userId,
+            groupId,
+            normalizedDraft,
+          );
+          if (!_isOperationCurrent(
+            operation,
+            userId: userId,
+            groupId: groupId,
+            plannerRevision: revision,
+          )) {
+            return;
+          }
+          final normalizedCreated = _validatedEventMutationResult(
+            created,
+            expectedGroupId: groupId,
+            expectedOwnerId: userId,
+            expectedVersion: created.version,
+            requestedMemberIds: normalizedDraft.hasExplicitMemberIds
+                ? requestedMemberIds
+                : <String>[userId],
+            allowLegacyCreatorDefault: !_requiresExactEventMutationResults,
+          );
+          _upsertEvent(normalizedCreated);
+          await refreshSelectedEventRange(force: true);
+          return;
+        }
         // A capable adapter promises atomic event+participant creation.  A
         // legacy adapter may still create the default creator-only event only
         // when the draft genuinely omitted its participant field.  An
@@ -4246,15 +4384,170 @@ class PlannerController extends ChangeNotifier {
         if (existing.groupId != groupId || existing.isDeleted) {
           throw const ScheduleConflictException('일정을 찾을 수 없습니다.');
         }
+        // Participant-only writes use the assignment capability, not the
+        // author-only recurrence/body RPC. A group owner may administer the
+        // participant set of another member's series while retaining the
+        // existing body-edit authorization boundary.
+        final existingRequestedMemberIds = normalizedDraft.hasExplicitMemberIds
+            ? requestedMemberIds
+            : canonicalEventMemberIds(existing.memberIds);
+        final membersChanged = !_sameMemberIdSet(
+          existing.memberIds,
+          existingRequestedMemberIds,
+        );
+        final memberOnlyChange =
+            scope == EventEditScope.all &&
+            normalizedDraft.hasExplicitMemberIds &&
+            membersChanged &&
+            existing.ownerId != userId &&
+            (existing.recurrenceRule != null ||
+                existing.occurrenceKey != 'single') &&
+            _draftBodyAndRuleMatchesEvent(normalizedDraft, existing);
+        if (memberOnlyChange) {
+          if (!canEditEventParticipants(existing)) {
+            throw const ScheduleConflictException('이 일정의 멤버를 변경할 권한이 없습니다.');
+          }
+          final recurringMemberChange =
+              existing.recurrenceRule != null ||
+              existing.occurrenceKey != 'single';
+          if (recurringMemberChange) {
+            _validateRecurringMemberAssignment(
+              existing,
+              existingRequestedMemberIds,
+            );
+            final recurringMemberRepository = _repository;
+            if (recurringMemberRepository
+                is! RecurringEventMemberAssignmentCapability) {
+              throw const ScheduleCapabilityException(
+                '반복 일정 멤버 지정을 지원하지 않는 저장소입니다.',
+              );
+            }
+            final recurringAssignmentCapability =
+                recurringMemberRepository
+                    as RecurringEventMemberAssignmentCapability;
+            final receipt = await recurringAssignmentCapability
+                .replaceRecurringEventMembers(
+                  event: existing,
+                  memberIds: existingRequestedMemberIds,
+                  expectedVersion: existing.version,
+                  actorId: userId,
+                );
+            if (!_isOperationCurrent(
+              operation,
+              userId: userId,
+              groupId: groupId,
+              plannerRevision: revision,
+            )) {
+              return;
+            }
+            _validateRecurringMemberReceipt(
+              receipt,
+              event: existing,
+              expectedVersion: existing.version,
+            );
+            if (receipt.changed) {
+              await refreshSelectedEventRange(force: true);
+            }
+            return;
+          }
+          final memberRepository = _repository;
+          if (memberRepository is! EventMemberAssignmentCapability) {
+            throw const ScheduleCapabilityException(
+              '일정 멤버 지정을 지원하지 않는 저장소입니다.',
+            );
+          }
+          final assignmentCapability =
+              memberRepository as EventMemberAssignmentCapability;
+          final updated = await assignmentCapability.replaceEventMembers(
+            existing.id,
+            memberIds: existingRequestedMemberIds,
+            expectedVersion: existing.version,
+            actorId: userId,
+          );
+          if (!_isOperationCurrent(
+            operation,
+            userId: userId,
+            groupId: groupId,
+            plannerRevision: revision,
+          )) {
+            return;
+          }
+          final normalizedUpdated = _validatedEventMutationResult(
+            updated,
+            expectedEventId: existing.id,
+            expectedGroupId: groupId,
+            expectedOwnerId: existing.ownerId,
+            expectedVersion: existing.version + 1,
+            requestedMemberIds: existingRequestedMemberIds,
+          );
+          // Assignment RPCs return the logical series anchor. Refresh the
+          // bounded projection for recurring rows so an occurrence does not
+          // acquire a synthetic `single` duplicate in controller state.
+          if (_usesBoundedEventRangeReads &&
+              (existing.recurrenceRule != null ||
+                  existing.occurrenceKey != 'single')) {
+            await refreshSelectedEventRange(force: true);
+          } else {
+            _upsertEvent(normalizedUpdated);
+          }
+          return;
+        }
         if (existing.ownerId != userId) {
           throw const ScheduleConflictException('이 일정은 작성자만 변경할 수 있습니다.');
         }
+        if (existing.recurrenceRule != null ||
+            existing.occurrenceKey != 'single' ||
+            normalizedDraft.recurrence != null) {
+          final recurrenceRepository = _repository;
+          if (recurrenceRepository is! RecurrenceCapability) {
+            throw const ScheduleCapabilityException('반복 일정을 지원하지 않는 저장소입니다.');
+          }
+          final capability = recurrenceRepository as RecurrenceCapability;
+          final receipt = await capability.updateEventOccurrence(
+            event: existing,
+            draft: normalizedDraft,
+            scope: scope,
+            expectedSeriesVersion: existing.version,
+            expectedOccurrenceVersion: existing.occurrenceVersion,
+            actorId: userId,
+          );
+          if (!_isOperationCurrent(
+            operation,
+            userId: userId,
+            groupId: groupId,
+            plannerRevision: revision,
+          )) {
+            return;
+          }
+          if (receipt.groupId != groupId ||
+              receipt.eventId != existing.id ||
+              receipt.occurrenceKey != existing.occurrenceKey ||
+              receipt.scope != scope ||
+              !receipt.committed ||
+              receipt.seriesVersion !=
+                  (receipt.changed ? existing.version + 1 : existing.version) ||
+              receipt.occurrenceVersion !=
+                  (scope == EventEditScope.thisOccurrence
+                      ? (receipt.changed
+                            ? existing.occurrenceVersion + 1
+                            : existing.occurrenceVersion)
+                      : 0)) {
+            throw const ScheduleConflictException('일정 변경 응답을 확인할 수 없습니다.');
+          }
+          // Scope RPCs return a committed receipt rather than a projection.
+          // Refetch authoritatively; never fan out a stale occurrence locally.
+          if (receipt.changed) {
+            await refreshSelectedEventRange(force: true);
+          }
+          return;
+        }
         final existingMemberIds = canonicalEventMemberIds(existing.memberIds);
-        final membersChanged = !_sameMemberIdSet(
+        final legacyMembersChanged = !_sameMemberIdSet(
           existingMemberIds,
-          requestedMemberIds,
+          existingRequestedMemberIds,
         );
-        if (membersChanged && _repository is! EventMemberAssignmentCapability) {
+        if (legacyMembersChanged &&
+            _repository is! EventMemberAssignmentCapability) {
           throw const ScheduleCapabilityException('일정 멤버 지정을 지원하지 않는 저장소입니다.');
         }
         final updated = await _repository.updateEvent(
@@ -4264,7 +4557,7 @@ class PlannerController extends ChangeNotifier {
             startAt: normalizedDraft.startAt.toUtc(),
             endAt: normalizedDraft.endAt.toUtc(),
             allDay: normalizedDraft.allDay,
-            memberIds: requestedMemberIds,
+            memberIds: existingRequestedMemberIds,
             colorValue: normalizedDraft.colorValue,
             timezone: normalizedDraft.timezone,
             allDayStartDate: normalizedDraft.allDayStartDate,
@@ -4289,7 +4582,7 @@ class PlannerController extends ChangeNotifier {
             expectedGroupId: groupId,
             expectedOwnerId: existing.ownerId,
             expectedVersion: existing.version + 1,
-            requestedMemberIds: requestedMemberIds,
+            requestedMemberIds: existingRequestedMemberIds,
           ),
         );
       }
@@ -4345,6 +4638,14 @@ class PlannerController extends ChangeNotifier {
       notifyListeners();
       rethrow;
     }
+    final recurring =
+        event.recurrenceRule != null || event.occurrenceKey != 'single';
+    if (recurring && !normalizedMemberIds.contains(event.ownerId)) {
+      const error = ScheduleValidationException('반복 일정 작성자는 멤버에서 제외할 수 없습니다.');
+      errorMessage = error.message;
+      notifyListeners();
+      throw error;
+    }
     final operation = _beginOperation();
     final revision = _plannerRevision;
     final userId = current.id;
@@ -4357,6 +4658,40 @@ class PlannerController extends ChangeNotifier {
     errorMessage = null;
     notifyListeners();
     try {
+      if (recurring) {
+        final recurringCapability = _repository;
+        if (recurringCapability is! RecurringEventMemberAssignmentCapability) {
+          throw const ScheduleCapabilityException(
+            '반복 일정 멤버 지정을 지원하지 않는 저장소입니다.',
+          );
+        }
+        final recurringAssignmentCapability =
+            recurringCapability as RecurringEventMemberAssignmentCapability;
+        final receipt = await recurringAssignmentCapability
+            .replaceRecurringEventMembers(
+              event: event,
+              memberIds: normalizedMemberIds,
+              expectedVersion: event.version,
+              actorId: userId,
+            );
+        if (!_isOperationCurrent(
+          operation,
+          userId: userId,
+          groupId: groupId,
+          plannerRevision: revision,
+        )) {
+          return;
+        }
+        _validateRecurringMemberReceipt(
+          receipt,
+          event: event,
+          expectedVersion: event.version,
+        );
+        if (receipt.changed) {
+          await refreshSelectedEventRange(force: true);
+        }
+        return;
+      }
       final updated = await capability.replaceEventMembers(
         event.id,
         memberIds: normalizedMemberIds,
@@ -4371,16 +4706,20 @@ class PlannerController extends ChangeNotifier {
       )) {
         return;
       }
-      _upsertEvent(
-        _validatedEventMutationResult(
-          updated,
-          expectedEventId: event.id,
-          expectedGroupId: groupId,
-          expectedOwnerId: event.ownerId,
-          expectedVersion: expectedResultVersion,
-          requestedMemberIds: normalizedMemberIds,
-        ),
+      final normalizedUpdated = _validatedEventMutationResult(
+        updated,
+        expectedEventId: event.id,
+        expectedGroupId: groupId,
+        expectedOwnerId: event.ownerId,
+        expectedVersion: expectedResultVersion,
+        requestedMemberIds: normalizedMemberIds,
       );
+      if (_usesBoundedEventRangeReads &&
+          (event.recurrenceRule != null || event.occurrenceKey != 'single')) {
+        await refreshSelectedEventRange(force: true);
+      } else {
+        _upsertEvent(normalizedUpdated);
+      }
     } catch (error) {
       if (_isOperationCurrent(
         operation,
@@ -4400,6 +4739,67 @@ class PlannerController extends ChangeNotifier {
     final leftSet = left.toSet();
     final rightSet = right.toSet();
     return leftSet.length == rightSet.length && leftSet.containsAll(rightSet);
+  }
+
+  static void _validateRecurringMemberAssignment(
+    PlannerEvent event,
+    Iterable<String> memberIds,
+  ) {
+    final normalized = canonicalEventMemberIds(memberIds);
+    if (event.ownerId.trim().isEmpty || !normalized.contains(event.ownerId)) {
+      throw const ScheduleValidationException('반복 일정 작성자는 멤버에서 제외할 수 없습니다.');
+    }
+  }
+
+  static void _validateRecurringMemberReceipt(
+    RecurrenceMutationReceipt receipt, {
+    required PlannerEvent event,
+    required int expectedVersion,
+  }) {
+    final expectedKey = event.occurrenceKey == 'single'
+        ? occurrenceKeyForIndex(0)
+        : event.occurrenceKey;
+    final expectedSeriesVersion = receipt.changed
+        ? expectedVersion + 1
+        : expectedVersion;
+    if (!receipt.committed ||
+        receipt.groupId != event.groupId ||
+        receipt.eventId != event.id ||
+        receipt.occurrenceKey != expectedKey ||
+        receipt.scope != EventEditScope.all ||
+        receipt.seriesVersion != expectedSeriesVersion ||
+        receipt.occurrenceVersion != 0) {
+      throw const ScheduleConflictException('반복 일정 멤버 변경 응답을 확인할 수 없습니다.');
+    }
+  }
+
+  static bool _draftBodyAndRuleMatchesEvent(
+    EventDraft draft,
+    PlannerEvent event,
+  ) {
+    bool sameDate(DateTime? left, DateTime? right) {
+      if (left == null || right == null) return left == right;
+      return left.year == right.year &&
+          left.month == right.month &&
+          left.day == right.day;
+    }
+
+    final sameAllDayDates = draft.allDay
+        ? event.allDay &&
+              sameDate(draft.allDayStartDate, event.allDayStartDate) &&
+              sameDate(draft.allDayEndDate, event.allDayEndDate)
+        : !event.allDay &&
+              event.allDayStartDate == null &&
+              event.allDayEndDate == null;
+    return draft.title.trim() == event.title &&
+        draft.note == event.note &&
+        draft.startAt.toUtc() == event.startAt.toUtc() &&
+        draft.endAt.toUtc() == event.endAt.toUtc() &&
+        draft.allDay == event.allDay &&
+        sameAllDayDates &&
+        draft.colorValue == event.colorValue &&
+        draft.timezone == event.timezone &&
+        draft.recurrence == event.recurrenceRule;
   }
 
   PlannerEvent _validatedEventMutationResult(
@@ -4438,7 +4838,7 @@ class PlannerController extends ChangeNotifier {
     final normalizedIds = canonicalEventMemberIds(incoming.memberIds);
     final normalizedIncoming = incoming.copyWith(memberIds: normalizedIds);
     final index = events.indexWhere(
-      (event) => event.id == normalizedIncoming.id,
+      (event) => event.identityKey == normalizedIncoming.identityKey,
     );
     if (selectedEventRange != null &&
         (normalizedIncoming.isDeleted ||
@@ -4500,7 +4900,10 @@ class PlannerController extends ChangeNotifier {
     );
   }
 
-  Future<void> deleteEvent(PlannerEvent event) async {
+  Future<void> deleteEvent(
+    PlannerEvent event, {
+    EventEditScope scope = EventEditScope.all,
+  }) async {
     final current = user;
     if (current == null) return;
     final operation = _beginOperation();
@@ -4511,6 +4914,47 @@ class PlannerController extends ChangeNotifier {
     errorMessage = null;
     notifyListeners();
     try {
+      if (event.recurrenceRule != null || event.occurrenceKey != 'single') {
+        final recurrenceRepository = _repository;
+        if (recurrenceRepository is! RecurrenceCapability) {
+          throw const ScheduleCapabilityException('반복 일정을 지원하지 않는 저장소입니다.');
+        }
+        final capability = recurrenceRepository as RecurrenceCapability;
+        final receipt = await capability.deleteEventOccurrence(
+          event: event,
+          scope: scope,
+          expectedSeriesVersion: event.version,
+          expectedOccurrenceVersion: event.occurrenceVersion,
+          actorId: userId,
+        );
+        if (!_isOperationCurrent(
+          operation,
+          userId: userId,
+          groupId: groupId,
+          plannerRevision: revision,
+        )) {
+          return;
+        }
+        if (receipt.groupId != event.groupId ||
+            receipt.eventId != event.id ||
+            receipt.occurrenceKey != event.occurrenceKey ||
+            receipt.scope != scope ||
+            !receipt.committed ||
+            receipt.seriesVersion !=
+                (receipt.changed ? event.version + 1 : event.version) ||
+            receipt.occurrenceVersion !=
+                (scope == EventEditScope.thisOccurrence
+                    ? (receipt.changed
+                          ? event.occurrenceVersion + 1
+                          : event.occurrenceVersion)
+                    : 0)) {
+          throw const ScheduleConflictException('일정 변경 응답을 확인할 수 없습니다.');
+        }
+        if (receipt.changed) {
+          await refreshSelectedEventRange(force: true);
+        }
+        return;
+      }
       await _repository.softDeleteEvent(
         event.id,
         expectedVersion: event.version,
@@ -4526,7 +4970,9 @@ class PlannerController extends ChangeNotifier {
       }
       if (selectedEventRange != null) {
         final next = <PlannerEvent>[
-          ...events.where((candidate) => candidate.id != event.id),
+          ...events.where(
+            (candidate) => candidate.identityKey != event.identityKey,
+          ),
         ];
         events = List<PlannerEvent>.unmodifiable(next);
         notifyListeners();

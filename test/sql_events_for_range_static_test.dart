@@ -66,9 +66,9 @@ void main() {
     expect(migrations, contains('20260907130003_calendar_range.sql'));
     expect(
       timestamps.last,
-      '20260907130004',
+      '20260907130005',
       reason:
-          'the invite-links migration must remain the current final migration',
+          'the recurrence migration must remain the current final migration',
     );
     expect(
       migration,
