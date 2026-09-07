@@ -47,7 +47,18 @@ dependencies:
   # Browser Web Share API bindings used by the share adapter.
   web: 1.1.1
   intl: ^0.20.2
-  timezone: ^0.10.1
+  # flutter_local_notifications 22.3.0 requires the 0.11 timezone API.
+  # Keep all planner wall-time/DST calculations on this package.
+  timezone: 0.11.1
+  # Local-only reminder scheduling. Server push (Firebase/APNs/VAPID) is
+  # intentionally not bundled until external provider configuration exists.
+  flutter_local_notifications: 22.3.0
+  # Used by the reminder identity adapter to derive stable, non-sensitive
+  # platform notification IDs without exposing event content.
+  crypto: 3.0.7
+  # Durable local notification-ID registry; async API avoids a stale cache
+  # when more than one isolate/process observes the account key.
+  shared_preferences: 2.5.5
 
 dev_dependencies:
   flutter_test:

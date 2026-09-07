@@ -3,11 +3,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart' as url_strategy;
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:timezone/data/latest.dart' as tzdata;
+import 'package:timezone/data/latest_all.dart' as tzdata;
 
 import 'app.dart';
 import 'core/config/app_config.dart';
 import 'platform/invite_link_source.dart';
+import 'platform/notification_bindings.dart';
 import 'screens/runtime_configuration_error_screen.dart';
 import 'state/app_state.dart';
 
@@ -62,11 +63,13 @@ Future<void> main() async {
         supabaseInitializationErrorProvider.overrideWithValue(supabaseError),
         releaseConfigurationErrorProvider.overrideWithValue(releaseError),
       ],
-      child: InviteLinkBinding(
-        source: inviteLinkSource,
-        config: config,
-        isRelease: kReleaseMode,
-        child: const RuntimeConfigurationGate(child: ModulyApp()),
+      child: NotificationPlatformScope(
+        child: InviteLinkBinding(
+          source: inviteLinkSource,
+          config: config,
+          isRelease: kReleaseMode,
+          child: const RuntimeConfigurationGate(child: ModulyApp()),
+        ),
       ),
     ),
   );

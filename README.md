@@ -229,6 +229,73 @@ range paging. Repeat the UI checks at 320x568, 2x text, a 300 px keyboard
 inset, hardware keyboard focus, and VoiceOver/TalkBack. These live service and
 real-device checks are external to this checkout and are not claimed as run.
 
+### Local reminders (Feature 3)
+
+This stage ships device-local reminders only. The dependency is pinned to
+`flutter_local_notifications: 22.3.0`; that release requires the pinned
+`timezone: 0.11.1`, which keeps all event wall-time and DST calculations on the
+same IANA database used by the planner. Android reminders use the
+`inexactAllowWhileIdle` schedule mode, so the operating system may deliver a
+reminder a little later under Doze or battery policy. Exact-alarm permissions
+(`SCHEDULE_EXACT_ALARM` and `USE_EXACT_ALARM`) are intentionally not requested.
+
+The local scheduler reads only a bounded `[now, now + 60 days)` event window and
+keeps at most 48 upcoming fire times per device, ordered by fire time. A later
+occurrence is scheduled when the app next reconciles its local snapshot; this is
+not an offline-sync promise. Once a reminder is committed to the operating
+system, it can be displayed without a network connection, subject to the
+platform's permission, reboot, battery, and delivery rules. A timed reminder
+subtracts its lead from the persisted UTC instant. An all-day reminder is
+computed at 09:00 on the event's IANA timezone and subtracts whole civil days,
+never device-timezone midnight.
+
+The Settings screen separates the account switch, this-device permission, and
+server-push capability. Permission prompts happen only after an explicit
+`알림 켜기` action; returning from system settings rechecks the status. Android
+requires `POST_NOTIFICATIONS` on API 33+, while iOS/macOS local reminders use
+the UserNotifications permission. Web, Windows, and Linux report local
+reminders as unsupported in this stage. No notification title, memo, email,
+member name, or token is copied into an operating-system payload; a tap carries
+only an opaque event id and validated occurrence key and then reloads the
+authoritative event after authentication and membership checks.
+The local/demo repository uses human-readable seed IDs, so native scheduling
+and notification taps remain `unconfigured` until a configured Supabase
+deployment supplies UUID-backed event data; demo controls never claim OS
+delivery success.
+
+Server push is deliberately `unconfigured` here. Enabling it later requires a
+real Firebase project and generated identifiers, APNs Push capability plus a
+`.p8` key/Key ID/Team ID, web HTTPS service-worker registration and a public
+VAPID key, and a trusted server worker/cron with provider credentials. Those
+values must stay in provider/CI secret storage and are never added to this
+repository or Flutter client. The future worker should claim jobs with a lease,
+deduplicate by `(user, device, event, occurrence_key, reminder, method)`, and
+retry with bounded backoff. Delivery is therefore at-least-once rather than an
+exactly-once guarantee; an invalid provider token must be revoked privately.
+The `send-reminders` Edge Function has `verify_jwt = false` because it is called
+by a scheduler, so every request must carry the non-empty
+`x-reminder-worker-secret` header matching the deployment-only
+`REMINDER_WORKER_SECRET`; the worker checks this secret before capability or
+claim RPCs. Keep that value in the Edge/CI secret store and never put it in the
+Flutter client, logs, or checked-in configuration.
+
+Credential-free checks for this slice are:
+
+```sh
+flutter pub get
+flutter test --no-pub test/notification_platform_static_test.dart \
+  test/notification_settings_ui_test.dart \
+  test/event_notification_controls_test.dart \
+  test/notification_deep_link_static_test.dart
+flutter analyze --no-pub
+```
+
+The native permission, reboot, Doze/Focus, lock-screen privacy, and DST checks
+require real Android/iOS/macOS devices and are manual release checks. Firebase,
+APNs, VAPID, service-worker, worker/cron, and signed-release configuration are
+external blockers until an operator supplies the corresponding project and
+signing metadata.
+
 ## Flutter development
 
 1. Keep `.env.example` as the checked-in placeholder reference. For Flutter

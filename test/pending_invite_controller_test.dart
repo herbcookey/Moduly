@@ -8,6 +8,7 @@ import 'package:moduly/models/app_models.dart';
 import 'package:moduly/repositories/auth_repository.dart';
 import 'package:moduly/repositories/schedule_repository.dart';
 import 'package:moduly/state/app_state.dart';
+import 'package:moduly/state/notification_state.dart';
 
 const _token = '7K9MW3PXQ2RT';
 
@@ -188,6 +189,58 @@ class _InviteAuth extends AuthRepository {
   void dispose() {
     unawaited(changes.close());
     super.dispose();
+  }
+}
+
+class _InviteNotificationSink implements NotificationInvalidationSink {
+  final List<String> cancelledGroups = <String>[];
+  final List<String> membershipGroups = <String>[];
+
+  @override
+  Future<void> cancelForGroup(String groupId) async {
+    cancelledGroups.add(groupId);
+  }
+
+  @override
+  Future<void> onAuthenticated(String userId) async {}
+
+  @override
+  Future<void> onEventChanged({String? eventId, String? groupId}) async {}
+
+  @override
+  Future<void> onMembershipChanged({String? eventId, String? groupId}) async {
+    if (groupId != null) membershipGroups.add(groupId);
+  }
+
+  @override
+  Future<void> onSignedOut() async {}
+
+  @override
+  Future<void> reconcile({DateTime? nowUtc}) async {}
+}
+
+class _RejoinAfterLeaveRepository extends _InviteLocalRepository {
+  bool removed = false;
+
+  @override
+  Future<List<PlannerGroup>> groupsForUser(String userId) async {
+    if (removed) return const <PlannerGroup>[];
+    return super.groupsForUser(userId);
+  }
+
+  @override
+  Future<void> leaveGroup({
+    required String actorId,
+    required String groupId,
+  }) async {
+    removed = true;
+  }
+
+  @override
+  Future<PlannerGroup> joinGroup(String userId, String inviteCode) async {
+    removed = false;
+    joinCalls++;
+    return (await super.groupsForUser(userId)).single;
   }
 }
 
@@ -691,6 +744,87 @@ void main() {
       expect(repository.joinCalls, 1);
       expect(await controller.acceptPendingInvite(), isNull);
       expect(repository.joinCalls, 1);
+    },
+  );
+
+  test(
+    'accepting an invite removes a leave tombstone before reload and invalidates notifications',
+    () async {
+      final repository = _RejoinAfterLeaveRepository();
+      final notifications = _InviteNotificationSink();
+      final controller = PlannerController(
+        auth: AuthRepository(),
+        repository: repository,
+        notifications: notifications,
+        pendingInviteStore: MemoryPendingInviteStore(),
+      );
+      addTearDown(controller.dispose);
+
+      await controller.signIn('demo@example.com', 'planner');
+      await controller.selectGroup('demo-group');
+      await controller.leaveGroup();
+      expect(repository.removed, isTrue);
+      expect(controller.groups, isEmpty);
+
+      controller.captureInviteToken(_token);
+      await controller.previewPendingInvite();
+      final joined = await controller.acceptPendingInvite();
+      expect(joined?.id, 'demo-group');
+      expect(notifications.membershipGroups, <String>['demo-group']);
+
+      // The repository now exposes the joined group again. A subsequent
+      // authoritative load must not filter it using the old leave tombstone.
+      await controller.loadGroups();
+      expect(controller.groups.map((group) => group.id), <String>[
+        'demo-group',
+      ]);
+    },
+  );
+
+  test(
+    'stale invite acceptance after an account switch cannot resurrect the group or notify',
+    () async {
+      final auth = _InviteAuth();
+      final repository = _InviteLocalRepository()
+        ..joinGate = Completer<PlannerGroup>();
+      final notifications = _InviteNotificationSink();
+      final controller = PlannerController(
+        auth: auth,
+        repository: repository,
+        notifications: notifications,
+        pendingInviteStore: MemoryPendingInviteStore(),
+      );
+      addTearDown(() {
+        controller.dispose();
+        auth.dispose();
+      });
+
+      await controller.signIn('demo@example.com', 'planner');
+      controller.captureInviteToken(_token);
+      await controller.previewPendingInvite();
+      final accepting = controller.acceptPendingInvite();
+      await Future<void>.delayed(Duration.zero);
+      expect(repository.joinCalls, 1);
+
+      final userB = const PlannerUser(
+        id: 'user-b',
+        email: 'user-b@example.com',
+      );
+      auth.emit(AuthRepositoryEvent(type: AuthEventType.signedIn, user: userB));
+      await Future<void>.delayed(Duration.zero);
+      repository.joinGate!.complete(
+        const PlannerGroup(
+          id: 'demo-group',
+          name: '우리 가족',
+          timezone: 'Asia/Seoul',
+        ),
+      );
+      expect(await accepting, isNull);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.user?.id, 'user-b');
+      expect(controller.groups, isEmpty);
+      expect(notifications.membershipGroups, isEmpty);
     },
   );
 }

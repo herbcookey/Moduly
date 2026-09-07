@@ -41,6 +41,8 @@ void main() {
       'event_members',
       'event_recurrence_rules',
       'event_occurrence_overrides',
+      'notification_preferences',
+      'event_reminder_settings',
     ]) {
       expect(
         migrations,

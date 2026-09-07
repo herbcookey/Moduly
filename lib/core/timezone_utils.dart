@@ -1,5 +1,5 @@
 import 'package:flutter/foundation.dart';
-import 'package:timezone/data/latest.dart' as tzdata;
+import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
 import '../models/app_models.dart';
@@ -22,6 +22,11 @@ void _ensureTimezoneDatabase() {
 /// falling back to UTC.
 bool isValidIanaTimezone(String name) {
   if (name.isEmpty || name.trim() != name) return false;
+  // timezone 0.11's bundled database names the zero-offset location
+  // `Etc/UTC` and no longer guarantees the historical `UTC` alias. The app's
+  // persisted/default wire contract uses `UTC`, so keep that canonical alias
+  // explicit while still validating every other name against the IANA table.
+  if (name == 'UTC') return true;
   _ensureTimezoneDatabase();
   try {
     final location = tz.getLocation(name);
@@ -46,6 +51,7 @@ String validateIanaTimezone(String name) {
 /// 사용하며, 데이터베이스가 클라이언트에 전달하기 전에 값을 검증한다.
 tz.Location plannerLocation(String name) {
   _ensureTimezoneDatabase();
+  if (name == 'UTC') return tz.UTC;
   try {
     return tz.getLocation(name);
   } catch (_) {
@@ -78,7 +84,8 @@ DateTime wallTimeToUtc(DateTime wall, String timezone) {
       location
           .lookupTimeZone(naiveMillis + hour * Duration.millisecondsPerHour)
           .timeZone
-          .offset,
+          .offset
+          .inMilliseconds,
     );
   }
   final exact = <DateTime>[];

@@ -15,6 +15,7 @@ import '../core/timezone_utils.dart';
 import '../models/app_models.dart';
 import '../repositories/auth_repository.dart';
 import '../repositories/schedule_repository.dart';
+import 'notification_state.dart';
 
 final appConfigProvider = Provider<AppConfig>(
   (ref) => AppConfig.fromEnvironment(),
@@ -104,6 +105,11 @@ final plannerControllerProvider = ChangeNotifierProvider<PlannerController>((
   final controller = PlannerController(
     auth: ref.watch(authRepositoryProvider),
     repository: ref.watch(scheduleRepositoryProvider),
+    // The notification controller is an invalidation sink, not planner
+    // input. Watching it would recreate PlannerController on every
+    // permission/reconcile notify and feed an auth/bootstrap loop back into
+    // the notification provider. Read the stable instance once instead.
+    notifications: ref.read(notificationControllerProvider),
   );
   return controller;
 });
@@ -112,12 +118,14 @@ class PlannerController extends ChangeNotifier {
   PlannerController({
     required AuthRepository auth,
     required ScheduleRepository repository,
+    NotificationInvalidationSink? notifications,
     Duration oauthTimeout = const Duration(minutes: 2),
     Duration? socialAuthTimeout,
     PendingInviteStore? pendingInviteStore,
     Duration pendingInviteTtl = const Duration(minutes: 30),
   }) : _auth = auth,
        _repository = repository,
+       _notifications = notifications,
        _oauthTimeout = socialAuthTimeout ?? oauthTimeout,
        _pendingInviteStore =
            pendingInviteStore ?? createDefaultPendingInviteStore(),
@@ -143,6 +151,7 @@ class PlannerController extends ChangeNotifier {
 
   final AuthRepository _auth;
   final ScheduleRepository _repository;
+  final NotificationInvalidationSink? _notifications;
   final Duration _oauthTimeout;
   final PendingInviteStore _pendingInviteStore;
   final Duration _pendingInviteTtl;
@@ -455,6 +464,7 @@ class PlannerController extends ChangeNotifier {
         user = existing;
         authFlowState = AuthFlowState.signedIn;
         _bindPendingInviteToUser(existing.id);
+        unawaited(_notifications?.onAuthenticated(existing.id));
         await loadGroups();
       } else {
         authFlowState = AuthFlowState.signedOut;
@@ -756,9 +766,15 @@ class PlannerController extends ChangeNotifier {
         return null;
       }
       _clearPendingInvite();
+      // Accepting a newly committed membership is the explicit resurrection
+      // boundary for a group previously tombstoned by leave/archive.  Keep
+      // this behind the exact pending-invite/session guard above so a stale
+      // accept completion cannot revive another account's group projection.
+      _terminalGroupTombstones.remove(joined.id);
       if (!groups.any((candidate) => candidate.id == joined.id)) {
         groups = <PlannerGroup>[...groups, joined];
       }
+      unawaited(_notifications?.onMembershipChanged(groupId: joined.id));
       try {
         await selectGroup(joined.id);
       } catch (error) {
@@ -1724,6 +1740,7 @@ class PlannerController extends ChangeNotifier {
     authFlowState = AuthFlowState.signedIn;
     pendingConfirmationEmail = null;
     errorMessage = null;
+    unawaited(_notifications?.onAuthenticated(authenticated.id));
     await loadGroups();
   }
 
@@ -2060,6 +2077,10 @@ class PlannerController extends ChangeNotifier {
     // session when their old network Future finally settles.
     _plannerSessionGeneration++;
     _plannerRevision++;
+    // Notification state has its own serialized privacy boundary. Queue the
+    // sign-out cancellation before clearing the planner identity so a stale
+    // account cannot retain local reminders during account switches.
+    unawaited(_notifications?.onSignedOut());
     if (invalidateOperation) {
       _operationToken++;
       _operationGeneration++;
@@ -2264,6 +2285,7 @@ class PlannerController extends ChangeNotifier {
     if (incoming == null || incoming.isArchived) {
       // Do not await before clearing state: a remote archive/null event must
       // immediately hide the group's private data and invalidate callbacks.
+      unawaited(_notifications?.cancelForGroup(groupId));
       final clear = _invalidateGroupScopedData(removeGroupId: groupId);
       await clear;
       return;
@@ -3113,6 +3135,11 @@ class PlannerController extends ChangeNotifier {
           _plannerSessionGeneration != sessionGeneration) {
         return;
       }
+      // Only the session that committed the terminal mutation may purge its
+      // account's native reminders.  If A -> B completed while this RPC was
+      // in flight, B's namespace must not be cancelled; B's own auth fence
+      // performs any required old-account cleanup.
+      unawaited(_notifications?.cancelForGroup(groupId));
       // Invalidate synchronously before any reload/cancellation await. A
       // failing network reload must not resurrect the left group.  This is
       // intentionally performed even when another selection/auth operation
@@ -3274,6 +3301,9 @@ class PlannerController extends ChangeNotifier {
       if (archivedVersion <= version) {
         throw const ScheduleConflictException('그룹 보관 버전을 확인할 수 없습니다.');
       }
+      // Match leaveGroup's session fence: an old account's terminal RPC may
+      // still settle after A -> B, but it must never purge B's native set.
+      unawaited(_notifications?.cancelForGroup(groupId));
       // Remove the archived group before awaiting stream cancellation or a
       // network reload. This terminal invalidation survives reload failures
       // and is applied even if a concurrent group switch made this callback
@@ -3659,6 +3689,7 @@ class PlannerController extends ChangeNotifier {
         return;
       }
       _setMembersSnapshot(refreshedMembers);
+      unawaited(_notifications?.onMembershipChanged(groupId: groupId));
     } catch (error) {
       if (_isOperationCurrent(
         operation,
@@ -4299,6 +4330,8 @@ class PlannerController extends ChangeNotifier {
     final revision = _plannerRevision;
     final userId = current.id;
     final groupId = group.id;
+    String? notificationEventId = existing?.id;
+    var notificationMutationCommitted = false;
     _startSaving(operation);
     errorMessage = null;
     notifyListeners();
@@ -4338,6 +4371,8 @@ class PlannerController extends ChangeNotifier {
             allowLegacyCreatorDefault: !_requiresExactEventMutationResults,
           );
           _upsertEvent(normalizedCreated);
+          notificationEventId = created.id;
+          notificationMutationCommitted = true;
           await refreshSelectedEventRange(force: true);
           return;
         }
@@ -4380,6 +4415,8 @@ class PlannerController extends ChangeNotifier {
           allowLegacyCreatorDefault: !_requiresExactEventMutationResults,
         );
         _upsertEvent(normalizedCreated);
+        notificationEventId = created.id;
+        notificationMutationCommitted = true;
       } else {
         if (existing.groupId != groupId || existing.isDeleted) {
           throw const ScheduleConflictException('일정을 찾을 수 없습니다.');
@@ -4446,6 +4483,7 @@ class PlannerController extends ChangeNotifier {
               expectedVersion: existing.version,
             );
             if (receipt.changed) {
+              notificationMutationCommitted = true;
               await refreshSelectedEventRange(force: true);
             }
             return;
@@ -4490,6 +4528,7 @@ class PlannerController extends ChangeNotifier {
           } else {
             _upsertEvent(normalizedUpdated);
           }
+          notificationMutationCommitted = true;
           return;
         }
         if (existing.ownerId != userId) {
@@ -4537,6 +4576,7 @@ class PlannerController extends ChangeNotifier {
           // Scope RPCs return a committed receipt rather than a projection.
           // Refetch authoritatively; never fan out a stale occurrence locally.
           if (receipt.changed) {
+            notificationMutationCommitted = true;
             await refreshSelectedEventRange(force: true);
           }
           return;
@@ -4585,6 +4625,7 @@ class PlannerController extends ChangeNotifier {
             requestedMemberIds: existingRequestedMemberIds,
           ),
         );
+        notificationMutationCommitted = true;
       }
     } catch (error) {
       if (_isOperationCurrent(
@@ -4597,6 +4638,14 @@ class PlannerController extends ChangeNotifier {
       }
       rethrow;
     } finally {
+      if (notificationMutationCommitted) {
+        unawaited(
+          _notifications?.onEventChanged(
+            eventId: notificationEventId,
+            groupId: groupId,
+          ),
+        );
+      }
       _finishSaving(operation);
     }
   }
@@ -4689,6 +4738,12 @@ class PlannerController extends ChangeNotifier {
         );
         if (receipt.changed) {
           await refreshSelectedEventRange(force: true);
+          unawaited(
+            _notifications?.onMembershipChanged(
+              eventId: event.id,
+              groupId: groupId,
+            ),
+          );
         }
         return;
       }
@@ -4720,6 +4775,12 @@ class PlannerController extends ChangeNotifier {
       } else {
         _upsertEvent(normalizedUpdated);
       }
+      unawaited(
+        _notifications?.onMembershipChanged(
+          eventId: event.id,
+          groupId: groupId,
+        ),
+      );
     } catch (error) {
       if (_isOperationCurrent(
         operation,
@@ -4910,6 +4971,7 @@ class PlannerController extends ChangeNotifier {
     final revision = _plannerRevision;
     final userId = current.id;
     final groupId = selectedGroup?.id;
+    var notificationDeletionCommitted = false;
     _startSaving(operation);
     errorMessage = null;
     notifyListeners();
@@ -4951,6 +5013,7 @@ class PlannerController extends ChangeNotifier {
           throw const ScheduleConflictException('일정 변경 응답을 확인할 수 없습니다.');
         }
         if (receipt.changed) {
+          notificationDeletionCommitted = true;
           await refreshSelectedEventRange(force: true);
         }
         return;
@@ -4960,6 +5023,7 @@ class PlannerController extends ChangeNotifier {
         expectedVersion: event.version,
         actorId: userId,
       );
+      notificationDeletionCommitted = true;
       if (!_isOperationCurrent(
         operation,
         userId: userId,
@@ -4988,6 +5052,14 @@ class PlannerController extends ChangeNotifier {
       }
       rethrow;
     } finally {
+      if (notificationDeletionCommitted) {
+        unawaited(
+          _notifications?.onEventChanged(
+            eventId: event.id,
+            groupId: event.groupId,
+          ),
+        );
+      }
       _finishSaving(operation);
     }
   }

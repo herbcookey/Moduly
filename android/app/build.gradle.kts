@@ -44,6 +44,10 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // flutter_local_notifications uses java.time APIs for scheduled
+        // notifications. Keep the plugin's required library desugaring
+        // enabled without requesting exact-alarm capabilities.
+        isCoreLibraryDesugaringEnabled = true
     }
 
     defaultConfig {
@@ -78,6 +82,10 @@ android {
         }
     }
 
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
 
 // AGP는 릴리스 서명 설정이 불완전하면 서명되지 않은 산출물을 만들거나

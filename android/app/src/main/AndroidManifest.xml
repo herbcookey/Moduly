@@ -1,6 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- 운영 환경에서 Supabase Auth와 일정 API는 원격 서비스다. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Android 13+ runtime permission for local reminder notifications. The
+         Flutter adapter requests this only after the user taps 알림 켜기. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Required so the local scheduler can restore its bounded reminder
+         horizon after a device reboot. Exact-alarm permissions are deliberately
+         not requested; reminders use inexactAllowWhileIdle. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <application
         android:label="Moduly"
         android:name="${applicationName}"
@@ -56,6 +63,21 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- flutter_local_notifications scheduled-delivery receivers. They
+             are non-exported and only handle alarms created by this app. -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"
+            android:exported="false" />
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
     </application>
     <!-- 텍스트를 처리할 수 있는 Activity를 조회하는 데 필요하다. 자세한 내용은
          https://developer.android.com/training/package-visibility 및

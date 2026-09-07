@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:timezone/data/latest.dart' as tzdata;
+import 'package:timezone/data/latest_all.dart' as tzdata;
 
 import 'package:moduly/core/timezone_utils.dart';
 
@@ -23,4 +23,25 @@ void main() {
     expect(utcToWallTime(start, 'America/Los_Angeles'), DateTime(2026, 3, 8));
     expect(utcToWallTime(end, 'America/Los_Angeles'), DateTime(2026, 3, 9));
   });
+
+  test(
+    'fixed and canonical UTC aliases remain valid with the full IANA data',
+    () {
+      expect(isValidIanaTimezone('EST'), isTrue);
+      expect(
+        wallTimeToUtc(DateTime(2026, 1, 1, 9), 'EST'),
+        DateTime.utc(2026, 1, 1, 14),
+      );
+      expect(isValidIanaTimezone('UTC'), isTrue);
+      expect(isValidIanaTimezone('Etc/UTC'), isTrue);
+      expect(
+        wallTimeToUtc(DateTime(2026, 1, 1, 9), 'UTC'),
+        DateTime.utc(2026, 1, 1, 9),
+      );
+      expect(
+        wallTimeToUtc(DateTime(2026, 1, 1, 9), 'Etc/UTC'),
+        DateTime.utc(2026, 1, 1, 9),
+      );
+    },
+  );
 }

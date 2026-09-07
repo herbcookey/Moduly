@@ -6,6 +6,10 @@ import '../core/demo_identity.dart';
 import '../repositories/account_deletion_repository.dart';
 import 'account_deletion_screen.dart';
 import '../state/app_state.dart';
+import '../platform/notification_local_scheduler.dart';
+import '../models/notification_models.dart';
+import '../state/notification_state.dart';
+import 'notification_settings_screen.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -116,6 +120,24 @@ class SettingsScreen extends ConsumerWidget {
                   ),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          Text(
+            '알림',
+            style: Theme.of(context).textTheme.labelLarge?.copyWith(
+              color: scheme.primary,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.notifications_outlined),
+              title: const Text('알림 설정'),
+              subtitle: const Text('계정 알림과 기기 권한을 관리해요.'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => context.push('/settings/notifications'),
             ),
           ),
           const SizedBox(height: 20),
@@ -289,6 +311,41 @@ class SettingsScreen extends ConsumerWidget {
         );
       }
     }
+  }
+}
+
+/// Route adapter kept next to settings so the app shell does not need to
+/// expose notification internals to the rest of the navigation tree.
+class NotificationSettingsRoute extends ConsumerWidget {
+  const NotificationSettingsRoute({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = ref.watch(notificationControllerProvider);
+    final scheduler = ref.read(localNotificationSchedulerProvider);
+    return NotificationSettingsScreen(
+      accountEnabled: controller.settings.enabled,
+      pushEnabled: controller.settings.pushEnabled,
+      permissionState: controller.permission,
+      localCapability: controller.capability,
+      pushCapability: controller.pushCapability,
+      onAccountChanged: controller.isLoading
+          ? null
+          : (value) => controller.setAccountEnabled(value),
+      // The server provider is intentionally unconfigured in this stage.
+      // Keep the callback absent even if a persisted push flag is true.
+      onPushChanged:
+          controller.pushCapability == NotificationCapabilityState.available
+          ? (value) => controller.saveSettings(
+              controller.settings.copyWith(pushEnabled: value),
+            )
+          : null,
+      onRequestPermission: () => controller.requestPermission(),
+      onOpenSystemSettings: scheduler is FlutterLocalNotificationScheduler
+          ? scheduler.openAppNotificationSettings
+          : null,
+      onRetry: () => controller.refreshPermission(),
+    );
   }
 }
 

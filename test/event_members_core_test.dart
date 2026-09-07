@@ -663,6 +663,11 @@ void main() {
         'demo-group',
         _draft(memberIds: const <String>['member-jin']),
       );
+      // Keep this projection test deterministic when the wall clock rolls
+      // past the fixture date (the fixture intentionally uses a fixed UTC
+      // day rather than DateTime.now()). Assign the public field directly so
+      // a bounded local adapter does not start an unrelated range fetch.
+      controller.selectedDay = _eventStart;
       controller.events = <PlannerEvent>[event];
 
       expect(controller.canEditEventParticipants(event), isTrue);

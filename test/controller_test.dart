@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:timezone/data/latest.dart' as tzdata;
 
@@ -5,6 +7,7 @@ import 'package:moduly/models/app_models.dart';
 import 'package:moduly/repositories/auth_repository.dart';
 import 'package:moduly/repositories/schedule_repository.dart';
 import 'package:moduly/state/app_state.dart';
+import 'package:moduly/state/notification_state.dart';
 
 class _NoAuth extends AuthRepository {
   _NoAuth() : super();
@@ -144,6 +147,97 @@ class _NoSchedule implements ScheduleRepository {
   );
 }
 
+class _MutationSchedule extends _NoSchedule {
+  Future<void>? leaveGate;
+  Future<void>? archiveGate;
+  bool leaveCalled = false;
+  bool archiveCalled = false;
+
+  @override
+  Future<void> leaveGroup({
+    required String actorId,
+    required String groupId,
+  }) async {
+    leaveCalled = true;
+    final gate = leaveGate;
+    if (gate != null) {
+      leaveGate = null;
+      await gate;
+    }
+  }
+
+  @override
+  Future<int> archiveGroupIfVersion({
+    required String actorId,
+    required String groupId,
+    required int expectedVersion,
+  }) async {
+    archiveCalled = true;
+    final gate = archiveGate;
+    if (gate != null) {
+      archiveGate = null;
+      await gate;
+    }
+    return expectedVersion + 1;
+  }
+}
+
+class _RecordingNotifications implements NotificationInvalidationSink {
+  final List<String> cancelledGroups = <String>[];
+
+  @override
+  Future<void> cancelForGroup(String groupId) async {
+    cancelledGroups.add(groupId);
+  }
+
+  @override
+  Future<void> onAuthenticated(String userId) async {}
+
+  @override
+  Future<void> onEventChanged({String? eventId, String? groupId}) async {}
+
+  @override
+  Future<void> onMembershipChanged({String? eventId, String? groupId}) async {}
+
+  @override
+  Future<void> onSignedOut() async {}
+
+  @override
+  Future<void> reconcile({DateTime? nowUtc}) async {}
+}
+
+class _EventAuth extends AuthRepository {
+  _EventAuth() : super();
+
+  final StreamController<AuthRepositoryEvent> _events =
+      StreamController<AuthRepositoryEvent>.broadcast();
+  PlannerUser? value;
+
+  @override
+  PlannerUser? get currentUser => value;
+
+  @override
+  Stream<AuthRepositoryEvent> get onAuthStateChange => _events.stream;
+
+  void emit(AuthRepositoryEvent event) => _events.add(event);
+
+  @override
+  void dispose() {
+    unawaited(_events.close());
+    super.dispose();
+  }
+}
+
+Future<void> _settlePlannerCallbacks() async {
+  await Future<void>.delayed(Duration.zero);
+  await Future<void>.delayed(Duration.zero);
+}
+
+PlannerUser _plannerUser(String id) =>
+    PlannerUser(id: id, email: '$id@example.com');
+
+PlannerGroup _plannerGroup(String id) => PlannerGroup(id: id, name: id);
+
 void main() {
   setUpAll(tzdata.initializeTimeZones);
 
@@ -221,6 +315,114 @@ void main() {
       );
       controller.selectedDay = DateTime(2026, 3, 9);
       expect(controller.visibleEvents, isEmpty);
+    },
+  );
+
+  test(
+    'stale leave completion does not purge a newly authenticated account',
+    () async {
+      final auth = _EventAuth();
+      final schedule = _MutationSchedule();
+      final notifications = _RecordingNotifications();
+      final leaveGate = Completer<void>();
+      schedule.leaveGate = leaveGate.future;
+      final controller = PlannerController(
+        auth: auth,
+        repository: schedule,
+        notifications: notifications,
+      );
+      addTearDown(() {
+        controller.dispose();
+        auth.dispose();
+      });
+      await _settlePlannerCallbacks();
+
+      controller.user = _plannerUser('user-a');
+      controller.selectedGroup = _plannerGroup('group-a');
+      final leave = controller.leaveGroup();
+      await _settlePlannerCallbacks();
+      expect(schedule.leaveCalled, isTrue);
+
+      final userB = _plannerUser('user-b');
+      auth.value = userB;
+      auth.emit(AuthRepositoryEvent(type: AuthEventType.signedIn, user: userB));
+      await _settlePlannerCallbacks();
+      leaveGate.complete();
+      await leave;
+      await _settlePlannerCallbacks();
+
+      expect(controller.user?.id, 'user-b');
+      expect(notifications.cancelledGroups, isEmpty);
+    },
+  );
+
+  test(
+    'stale archive completion does not purge a newly authenticated account',
+    () async {
+      final auth = _EventAuth();
+      final schedule = _MutationSchedule();
+      final notifications = _RecordingNotifications();
+      final archiveGate = Completer<void>();
+      schedule.archiveGate = archiveGate.future;
+      final controller = PlannerController(
+        auth: auth,
+        repository: schedule,
+        notifications: notifications,
+      );
+      addTearDown(() {
+        controller.dispose();
+        auth.dispose();
+      });
+      await _settlePlannerCallbacks();
+
+      controller.user = _plannerUser('user-a');
+      controller.selectedGroup = _plannerGroup('group-a');
+      final archive = controller.archiveGroup();
+      await _settlePlannerCallbacks();
+      expect(schedule.archiveCalled, isTrue);
+
+      final userB = _plannerUser('user-b');
+      auth.value = userB;
+      auth.emit(AuthRepositoryEvent(type: AuthEventType.signedIn, user: userB));
+      await _settlePlannerCallbacks();
+      archiveGate.complete();
+      await archive;
+      await _settlePlannerCallbacks();
+
+      expect(controller.user?.id, 'user-b');
+      expect(notifications.cancelledGroups, isEmpty);
+    },
+  );
+
+  test(
+    'same-account group switch still cancels the completed leave group',
+    () async {
+      final auth = _EventAuth();
+      final schedule = _MutationSchedule();
+      final notifications = _RecordingNotifications();
+      final leaveGate = Completer<void>();
+      schedule.leaveGate = leaveGate.future;
+      final controller = PlannerController(
+        auth: auth,
+        repository: schedule,
+        notifications: notifications,
+      );
+      addTearDown(() {
+        controller.dispose();
+        auth.dispose();
+      });
+      await _settlePlannerCallbacks();
+
+      controller.user = _plannerUser('user-a');
+      controller.selectedGroup = _plannerGroup('group-a');
+      final leave = controller.leaveGroup();
+      await _settlePlannerCallbacks();
+      controller.selectedGroup = _plannerGroup('group-b');
+      leaveGate.complete();
+      await leave;
+      await _settlePlannerCallbacks();
+
+      expect(notifications.cancelledGroups, <String>['group-a']);
     },
   );
 }

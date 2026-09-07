@@ -1,0 +1,2670 @@
+-- Feature 3: opt-in reminders and a private, server-owned delivery queue.
+--
+-- This migration is intentionally additive.  Existing event/member/recurrence
+-- rows are not rewritten and no reminder rows are synthesized for old data.
+-- Client writes go through the authenticated RPCs below.  Device bearer values,
+-- queue leases, and reconciliation requests live in a schema that is not part
+-- of the PostgREST API schema list.  The Edge worker uses the service-role-only
+-- wrappers at the end of this migration; provider credentials remain Edge
+-- environment secrets and are never represented in SQL or Flutter.
+
+begin;
+
+create schema if not exists private;
+
+-- `private` is deliberately not in supabase/config.toml [api].schemas.  Keep an
+-- explicit ACL boundary even if a future API configuration accidentally adds
+-- the schema.  The migration role remains the owner and SECURITY DEFINER
+-- functions below can still read the tables.
+revoke all on schema private from public, anon, authenticated;
+do $$
+begin
+  if exists (select 1 from pg_catalog.pg_roles where rolname = 'service_role') then
+    execute 'revoke all on schema private from service_role';
+  end if;
+end;
+$$;
+
+-- Declare the row types before defining functions that use them.  The full
+-- idempotent DDL (comments, indexes, policies, and private ACLs) appears below
+-- after these declarations; keeping the declarations here makes reapplying a
+-- partially-created migration safe without relying on check_function_bodies.
+create table if not exists public.notification_preferences (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  local_enabled boolean not null default false,
+  push_enabled boolean not null default false,
+  version integer not null default 1 check (version > 0),
+  created_at timestamptz not null default pg_catalog.now(),
+  updated_at timestamptz not null default pg_catalog.now()
+);
+create table if not exists public.event_reminder_settings (
+  id uuid primary key default extensions.gen_random_uuid(),
+  event_id uuid not null references public.events(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  channel text not null check (channel in ('local', 'push')),
+  enabled boolean not null default false,
+  lead_seconds integer not null default 900 check (lead_seconds between 0 and 604800),
+  all_day_days_before smallint not null default 0 check (all_day_days_before between 0 and 366),
+  version integer not null default 1 check (version > 0),
+  created_at timestamptz not null default pg_catalog.now(),
+  updated_at timestamptz not null default pg_catalog.now(),
+  unique (user_id, event_id, channel)
+);
+create table if not exists private.push_device_tokens (
+  id uuid primary key default extensions.gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  provider text not null check (provider in ('apns', 'fcm')),
+  platform text not null check (platform in ('ios', 'android')),
+  environment text not null check (environment in ('sandbox', 'production')),
+  token_hash text not null check (token_hash ~ '^[0-9a-f]{64}$'),
+  token text not null check (pg_catalog.octet_length(token) between 1 and 4096),
+  installation_hash text check (installation_hash is null or installation_hash ~ '^[0-9a-f]{64}$'),
+  is_active boolean not null default true,
+  last_seen_at timestamptz not null default pg_catalog.clock_timestamp(),
+  revoked_at timestamptz,
+  created_at timestamptz not null default pg_catalog.clock_timestamp(),
+  updated_at timestamptz not null default pg_catalog.clock_timestamp(),
+  unique (provider, token_hash),
+  check ((is_active and revoked_at is null) or (not is_active and revoked_at is not null))
+);
+create table if not exists private.push_provider_capability (
+  singleton boolean primary key default true check (singleton),
+  provider text not null check (provider in ('none', 'apns', 'fcm')),
+  enabled boolean not null default false,
+  updated_at timestamptz not null default pg_catalog.clock_timestamp()
+);
+create table if not exists private.event_reminder_jobs (
+  id uuid primary key default extensions.gen_random_uuid(),
+  setting_id uuid not null references public.event_reminder_settings(id) on delete cascade,
+  event_id uuid not null references public.events(id) on delete cascade,
+  group_id uuid not null references public.groups(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  occurrence_key text not null check (occurrence_key = 'single' or occurrence_key ~ '^o[0-9]{20}$'),
+  fire_at timestamptz not null check (pg_catalog.isfinite(fire_at)),
+  event_version integer not null check (event_version > 0),
+  occurrence_version integer not null check (occurrence_version >= 0),
+  setting_version integer not null check (setting_version > 0),
+  status text not null default 'pending' check (status in ('pending','processing','retry','sent','cancelled','dead_letter')),
+  attempts integer not null default 0 check (attempts between 0 and 8),
+  -- Set while a trigger/update arrives after a worker has claimed the current
+  -- generation. Completion observes this bit under the row lock and requeues
+  -- the newer generation instead of incorrectly marking the old lease done.
+  dirty boolean not null default false,
+  next_attempt_at timestamptz not null check (pg_catalog.isfinite(next_attempt_at)),
+  lease_owner uuid,
+  lease_until timestamptz,
+  sent_at timestamptz,
+  cancelled_at timestamptz,
+  dead_letter_at timestamptz,
+  cancel_reason text check (cancel_reason is null or cancel_reason in (
+    'event_changed','event_deleted','group_archived','membership_removed',
+    'setting_disabled','rescheduled','provider_unconfigured','device_revoked'
+  )),
+  last_error_code text check (
+    last_error_code is null or last_error_code ~ '^[a-z0-9_.:-]{1,64}$'
+  ),
+  created_at timestamptz not null default pg_catalog.clock_timestamp(),
+  updated_at timestamptz not null default pg_catalog.clock_timestamp(),
+  check ((status = 'processing' and lease_owner is not null and lease_until is not null) or (status <> 'processing' and lease_owner is null and lease_until is null)),
+  check ((status = 'sent') = (sent_at is not null)),
+  check ((status = 'cancelled') = (cancelled_at is not null)),
+  check ((status = 'dead_letter') = (dead_letter_at is not null)),
+  check (status not in ('sent','cancelled','dead_letter') or
+    (case when sent_at is not null then 1 else 0 end)
+      + (case when cancelled_at is not null then 1 else 0 end)
+      + (case when dead_letter_at is not null then 1 else 0 end) = 1)
+);
+create table if not exists private.event_reminder_reconcile_queue (
+  event_id uuid primary key references public.events(id) on delete cascade,
+  group_id uuid not null references public.groups(id) on delete cascade,
+  reason text not null check (reason in ('event_changed','setting_changed','participant_changed','device_registered','provider_enabled')),
+  status text not null default 'pending' check (status in ('pending','processing','done')),
+  attempts integer not null default 0 check (attempts between 0 and 8),
+  next_attempt_at timestamptz not null default pg_catalog.clock_timestamp(),
+  lease_owner uuid,
+  lease_until timestamptz,
+  requested_at timestamptz not null default pg_catalog.clock_timestamp(),
+  completed_at timestamptz,
+  last_error_code text check (
+    last_error_code is null or last_error_code ~ '^[a-z0-9_.:-]{1,64}$'
+  ),
+  check ((status = 'processing' and lease_owner is not null and lease_until is not null) or (status <> 'processing' and lease_owner is null and lease_until is null)),
+  check ((status = 'done') = (completed_at is not null))
+);
+
+-- Reapplication must also upgrade a queue table created by a partially applied
+-- or older copy of this migration. The default/backfill keeps existing rows
+-- eligible without changing their status, lease, or attempt history.
+alter table private.event_reminder_reconcile_queue
+  add column if not exists dirty boolean;
+update private.event_reminder_reconcile_queue
+set dirty = false
+where dirty is null;
+alter table private.event_reminder_reconcile_queue
+  alter column dirty set default false,
+  alter column dirty set not null;
+
+create or replace function public.get_notification_preferences()
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := (select auth.uid());
+  v_preferences public.notification_preferences;
+  v_push_capability text;
+begin
+  if v_actor is null
+     or coalesce((select auth.jwt() ->> 'is_anonymous'), 'false') = 'true' then
+    raise exception using errcode = '28000', message = 'authentication is required';
+  end if;
+  select p.* into v_preferences
+  from public.notification_preferences p
+  where p.user_id = v_actor;
+  select case when c.enabled and c.provider <> 'none'
+              then 'push_configured' else 'push_unconfigured' end
+    into v_push_capability
+  from private.push_provider_capability c
+  where c.singleton;
+  if v_push_capability is null then
+    v_push_capability := 'push_unconfigured';
+  end if;
+  return pg_catalog.jsonb_build_object(
+    'committed', true,
+    'changed', false,
+    'version', coalesce(v_preferences.version, 0),
+    'local_enabled', coalesce(v_preferences.local_enabled, false),
+    'push_enabled', coalesce(v_preferences.push_enabled, false),
+    'capability_local', case when coalesce(v_preferences.local_enabled, false)
+      then 'client_local_scheduler' else 'disabled' end,
+    'capability_push', case when coalesce(v_preferences.push_enabled, false)
+      then v_push_capability else 'disabled' end
+  );
+end;
+$$;
+
+create or replace function public.set_notification_preferences(
+  p_local_enabled boolean,
+  p_push_enabled boolean,
+  p_expected_version integer
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := (select auth.uid());
+  v_preferences public.notification_preferences;
+  v_changed boolean := false;
+  v_version integer;
+  v_push_capability text;
+  v_cancelled integer := 0;
+begin
+  if v_actor is null
+     or coalesce((select auth.jwt() ->> 'is_anonymous'), 'false') = 'true' then
+    raise exception using errcode = '28000', message = 'authentication is required';
+  end if;
+  if p_local_enabled is null or p_push_enabled is null
+     or p_expected_version is null or p_expected_version < 0 then
+    raise exception using errcode = '22023', message = 'notification preference values are invalid';
+  end if;
+
+  -- Account deletion acquires the same KEY SHARE lock before deleting the Auth
+  -- row.  It also keeps the caller row alive for the entire upsert.
+  perform 1 from auth.users u where u.id = v_actor for key share;
+  if not found then
+    raise exception using errcode = '42501', message = 'account is unavailable';
+  end if;
+
+  select p.* into v_preferences
+  from public.notification_preferences p
+  where p.user_id = v_actor
+  for update;
+  if not found then
+    if p_expected_version <> 0 then
+      raise exception using errcode = '40001', message = 'notification preferences changed';
+    end if;
+    if p_push_enabled then
+      select case when c.enabled and c.provider <> 'none'
+                  then 'push_configured' else 'push_unconfigured' end
+        into v_push_capability
+      from private.push_provider_capability c
+      where c.singleton;
+      if coalesce(v_push_capability, 'push_unconfigured') <> 'push_configured' then
+        raise exception using errcode = '55000', message = 'push is not configured';
+      end if;
+    end if;
+    insert into public.notification_preferences (
+      user_id, local_enabled, push_enabled, version
+    ) values (v_actor, p_local_enabled, p_push_enabled, 1)
+    returning * into v_preferences;
+    v_changed := true;
+  else
+    if v_preferences.version <> p_expected_version then
+      raise exception using errcode = '40001', message = 'notification preferences changed';
+    end if;
+    if p_push_enabled and not v_preferences.push_enabled then
+      select case when c.enabled and c.provider <> 'none'
+                  then 'push_configured' else 'push_unconfigured' end
+        into v_push_capability
+      from private.push_provider_capability c
+      where c.singleton;
+      if coalesce(v_push_capability, 'push_unconfigured') <> 'push_configured' then
+        raise exception using errcode = '55000', message = 'push is not configured';
+      end if;
+    end if;
+    if v_preferences.local_enabled is distinct from p_local_enabled
+       or v_preferences.push_enabled is distinct from p_push_enabled then
+      update public.notification_preferences p
+      set local_enabled = p_local_enabled,
+          push_enabled = p_push_enabled,
+          version = p.version + 1,
+          updated_at = pg_catalog.clock_timestamp()
+      where p.user_id = v_actor
+      returning * into v_preferences;
+      v_changed := true;
+    end if;
+  end if;
+
+  if v_changed and not v_preferences.push_enabled then
+    v_cancelled := private.cancel_user_event_reminder_jobs(v_actor, 'setting_disabled');
+  end if;
+  select case when c.enabled and c.provider <> 'none'
+              then 'push_configured' else 'push_unconfigured' end
+    into v_push_capability
+  from private.push_provider_capability c where c.singleton;
+  if v_push_capability is null then v_push_capability := 'push_unconfigured'; end if;
+  return pg_catalog.jsonb_build_object(
+    'committed', true,
+    'changed', v_changed,
+    'version', v_preferences.version,
+    'local_enabled', v_preferences.local_enabled,
+    'push_enabled', v_preferences.push_enabled,
+    'cancelled_jobs', v_cancelled,
+    'capability_local', case when v_preferences.local_enabled
+      then 'client_local_scheduler' else 'disabled' end,
+    'capability_push', case when v_preferences.push_enabled
+      then v_push_capability else 'disabled' end
+  );
+end;
+$$;
+
+create or replace function public.get_event_reminder(p_event_id uuid)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := (select auth.uid());
+  v_event public.events;
+  v_push_capability text;
+  v_settings jsonb;
+begin
+  if v_actor is null
+     or coalesce((select auth.jwt() ->> 'is_anonymous'), 'false') = 'true' then
+    raise exception using errcode = '28000', message = 'authentication is required';
+  end if;
+  select e.* into v_event
+  from public.events e
+  where e.id = p_event_id;
+  if not found or v_event.deleted_at is not null then
+    raise exception using errcode = '42501', message = 'event is unavailable';
+  end if;
+  if not exists (
+    select 1
+    from public.groups g
+    join public.memberships m on m.group_id = g.id and m.user_id = v_actor
+      and m.is_active and m.removed_at is null
+    join public.event_members em on em.event_id = p_event_id and em.user_id = v_actor
+    where g.id = v_event.group_id and g.deleted_at is null
+  ) then
+    raise exception using errcode = '42501', message = 'event is unavailable';
+  end if;
+  select coalesce(
+    pg_catalog.jsonb_agg(
+      pg_catalog.jsonb_build_object(
+        'id', s.id,
+        'channel', s.channel,
+        'enabled', s.enabled,
+        'lead_seconds', s.lead_seconds,
+        'all_day_days_before', s.all_day_days_before,
+        'all_day_local_time', '09:00:00',
+        'version', s.version,
+        'created_at', s.created_at,
+        'updated_at', s.updated_at
+      ) order by s.channel
+    ),
+    '[]'::jsonb
+  ) into v_settings
+  from public.event_reminder_settings s
+  where s.event_id = p_event_id and s.user_id = v_actor;
+  select case when c.enabled and c.provider <> 'none'
+              then 'push_configured' else 'push_unconfigured' end
+    into v_push_capability
+  from private.push_provider_capability c where c.singleton;
+  if v_push_capability is null then v_push_capability := 'push_unconfigured'; end if;
+  return pg_catalog.jsonb_build_object(
+    'committed', true,
+    'changed', false,
+    'event_id', p_event_id,
+    'event_version', v_event.version,
+    'settings', v_settings,
+    'capabilities', pg_catalog.jsonb_build_object(
+      'local', case when coalesce((select p.local_enabled from public.notification_preferences p where p.user_id = v_actor), false)
+        then 'client_local_scheduler' else 'disabled' end,
+      'push', case when coalesce((select p.push_enabled from public.notification_preferences p where p.user_id = v_actor), false)
+        then v_push_capability else 'disabled' end
+    )
+  );
+end;
+$$;
+
+-- Older UI code referred to this read as list_event_reminders.  Keep the
+-- additive alias so a mixed-version client can migrate without a table grant.
+create or replace function public.list_event_reminders(p_event_id uuid)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  return public.get_event_reminder(p_event_id);
+end;
+$$;
+
+create or replace function public.set_event_reminder(
+  p_event_id uuid,
+  p_channel text,
+  p_enabled boolean,
+  p_lead_seconds integer,
+  p_all_day_days_before smallint,
+  p_expected_event_version integer,
+  p_expected_setting_version integer
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := (select auth.uid());
+  v_event public.events;
+  v_group public.groups;
+  v_setting public.event_reminder_settings;
+  v_preferences public.notification_preferences;
+  v_push_capability text;
+  v_changed boolean := false;
+  v_queued integer := 0;
+  v_cancelled integer := 0;
+  v_version integer;
+  v_capability text;
+begin
+  if v_actor is null
+     or coalesce((select auth.jwt() ->> 'is_anonymous'), 'false') = 'true' then
+    raise exception using errcode = '28000', message = 'authentication is required';
+  end if;
+  if p_event_id is null or p_channel is null
+     or p_channel not in ('local', 'push') or p_enabled is null
+     or p_lead_seconds is null or p_lead_seconds not between 0 and 604800
+     or p_all_day_days_before is null
+     or p_all_day_days_before not between 0 and 366
+     or p_expected_event_version is null or p_expected_event_version < 1
+     or p_expected_setting_version is null or p_expected_setting_version < 0 then
+    raise exception using errcode = '22023', message = 'event reminder values are invalid';
+  end if;
+
+  perform 1 from auth.users u where u.id = v_actor for key share;
+  if not found then
+    raise exception using errcode = '42501', message = 'event is unavailable';
+  end if;
+  select e.* into v_event from public.events e where e.id = p_event_id;
+  if not found then
+    raise exception using errcode = '42501', message = 'event is unavailable';
+  end if;
+  select g.* into v_group
+  from public.groups g where g.id = v_event.group_id for update;
+  if not found or v_group.deleted_at is not null then
+    raise exception using errcode = '42501', message = 'event is unavailable';
+  end if;
+  select e.* into v_event from public.events e where e.id = p_event_id for update;
+  if not found or v_event.deleted_at is not null
+     or v_event.version <> p_expected_event_version then
+    raise exception using errcode = '40001', message = 'event was changed or deleted';
+  end if;
+  if not exists (
+    select 1
+    from public.memberships m
+    join public.event_members em on em.event_id = p_event_id and em.user_id = v_actor
+    where m.group_id = v_event.group_id and m.user_id = v_actor
+      and m.is_active and m.removed_at is null
+  ) then
+    raise exception using errcode = '42501', message = 'event is unavailable';
+  end if;
+  select p.* into v_preferences
+  from public.notification_preferences p where p.user_id = v_actor;
+  select s.* into v_setting
+  from public.event_reminder_settings s
+  where s.event_id = p_event_id and s.user_id = v_actor and s.channel = p_channel
+  for update;
+  if not found then
+    if p_expected_setting_version <> 0 then
+      raise exception using errcode = '40001', message = 'event reminder was changed';
+    end if;
+    insert into public.event_reminder_settings (
+      event_id, user_id, channel, enabled, lead_seconds, all_day_days_before, version
+    ) values (
+      p_event_id, v_actor, p_channel, p_enabled, p_lead_seconds,
+      p_all_day_days_before, 1
+    ) returning * into v_setting;
+    v_changed := true;
+  else
+    if v_setting.version <> p_expected_setting_version then
+      raise exception using errcode = '40001', message = 'event reminder was changed';
+    end if;
+    if v_setting.enabled is distinct from p_enabled
+       or v_setting.lead_seconds is distinct from p_lead_seconds
+       or v_setting.all_day_days_before is distinct from p_all_day_days_before then
+      update public.event_reminder_settings s
+      set enabled = p_enabled,
+          lead_seconds = p_lead_seconds,
+          all_day_days_before = p_all_day_days_before,
+          version = s.version + 1,
+          updated_at = pg_catalog.clock_timestamp()
+      where s.id = v_setting.id
+      returning * into v_setting;
+      v_changed := true;
+    end if;
+  end if;
+
+  if v_changed and (not v_setting.enabled or p_channel = 'push') then
+    -- Jobs are push-only.  A changed setting receives a new setting_version,
+    -- so stale rows are cancelled without touching a sent/dead-letter receipt.
+    v_cancelled := private.cancel_event_reminder_jobs(
+      p_event_id, case when v_setting.enabled then 'rescheduled' else 'setting_disabled' end,
+      null, v_actor
+    );
+  end if;
+  if v_changed then
+    perform private.enqueue_event_reminder_reconcile(p_event_id, 'setting_changed');
+  end if;
+  select case when c.enabled and c.provider <> 'none'
+              then 'push_configured' else 'push_unconfigured' end
+    into v_push_capability
+  from private.push_provider_capability c where c.singleton;
+  if v_push_capability is null then v_push_capability := 'push_unconfigured'; end if;
+  v_capability := case
+    when p_channel = 'local' then case
+      when coalesce(v_preferences.local_enabled, false) and p_enabled
+        then 'client_local_scheduler' else 'disabled' end
+    else case
+      when not p_enabled then 'disabled'
+      when not coalesce(v_preferences.push_enabled, false) then 'disabled'
+      else v_push_capability end
+  end;
+  return pg_catalog.jsonb_build_object(
+    'committed', true,
+    'changed', v_changed,
+    'event_id', p_event_id,
+    'channel', p_channel,
+    'enabled', v_setting.enabled,
+    'lead_seconds', v_setting.lead_seconds,
+    'all_day_days_before', v_setting.all_day_days_before,
+    'all_day_local_time', '09:00:00',
+    'setting_version', v_setting.version,
+    'event_version', v_event.version,
+    'queued_jobs', v_queued,
+    'cancelled_jobs', v_cancelled,
+    'skipped_past', 0,
+    'capability', v_capability
+  );
+end;
+$$;
+
+create or replace function private.enqueue_event_reminder_reconcile(
+  p_event_id uuid,
+  p_reason text
+)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_group_id uuid;
+begin
+  if p_event_id is null or p_reason is null
+     or p_reason not in (
+       'event_changed', 'setting_changed', 'participant_changed',
+       'device_registered', 'provider_enabled'
+     ) then
+    raise exception using errcode = '22023', message = 'invalid reconcile request';
+  end if;
+  select e.group_id into v_group_id
+  from public.events e
+  where e.id = p_event_id;
+  if v_group_id is null then
+    return;
+  end if;
+  insert into private.event_reminder_reconcile_queue (
+    event_id, group_id, reason, status, attempts, next_attempt_at,
+    lease_owner, lease_until, completed_at, last_error_code, requested_at
+  ) values (
+    p_event_id, v_group_id, p_reason, 'pending', 0,
+    pg_catalog.clock_timestamp(), null, null, null, null,
+    pg_catalog.clock_timestamp()
+  )
+  on conflict (event_id) do update set
+    group_id = excluded.group_id,
+    reason = excluded.reason,
+    status = case
+      when private.event_reminder_reconcile_queue.status = 'processing'
+        then private.event_reminder_reconcile_queue.status
+      else 'pending'
+    end,
+    dirty = case
+      when private.event_reminder_reconcile_queue.status = 'processing'
+        then true
+      else false
+    end,
+    next_attempt_at = case
+      when private.event_reminder_reconcile_queue.status = 'processing'
+        then private.event_reminder_reconcile_queue.next_attempt_at
+      else excluded.next_attempt_at
+    end,
+    lease_owner = case
+      when private.event_reminder_reconcile_queue.status = 'processing'
+        then private.event_reminder_reconcile_queue.lease_owner
+      else null
+    end,
+    lease_until = case
+      when private.event_reminder_reconcile_queue.status = 'processing'
+        then private.event_reminder_reconcile_queue.lease_until
+      else null
+    end,
+    completed_at = null,
+    last_error_code = null,
+    requested_at = excluded.requested_at;
+end;
+$$;
+
+create or replace function private.cancel_event_reminder_jobs(
+  p_event_id uuid,
+  p_reason text,
+  p_occurrence_key text default null,
+  p_user_id uuid default null
+)
+returns integer
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_count integer;
+begin
+  if p_reason is null or p_reason not in (
+    'event_changed', 'event_deleted', 'group_archived', 'membership_removed',
+    'setting_disabled', 'rescheduled', 'provider_unconfigured', 'device_revoked'
+  ) then
+    raise exception using errcode = '22023', message = 'invalid cancellation reason';
+  end if;
+  if p_occurrence_key is not null
+     and p_occurrence_key <> 'single'
+     and p_occurrence_key !~ '^o[0-9]{20}$' then
+    raise exception using errcode = '22023', message = 'occurrence key is invalid';
+  end if;
+  with locked as (
+    select j.id
+    from private.event_reminder_jobs j
+    where (p_event_id is null or j.event_id = p_event_id)
+      and (p_user_id is null or j.user_id = p_user_id)
+      and (p_occurrence_key is null or j.occurrence_key = p_occurrence_key)
+      and j.status in ('pending', 'processing', 'retry')
+    order by j.id
+    for update
+  )
+  update private.event_reminder_jobs j
+  set status = 'cancelled',
+      cancelled_at = pg_catalog.clock_timestamp(),
+      cancel_reason = p_reason,
+      lease_owner = null,
+      lease_until = null,
+      updated_at = pg_catalog.clock_timestamp()
+  from locked
+  where j.id = locked.id;
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+create or replace function private.cancel_group_event_reminder_jobs(
+  p_group_id uuid,
+  p_reason text
+)
+returns integer
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_count integer;
+begin
+  if p_group_id is null or p_reason not in ('group_archived', 'membership_removed') then
+    raise exception using errcode = '22023', message = 'invalid group cancellation';
+  end if;
+  with locked as (
+    select j.id
+    from private.event_reminder_jobs j
+    where j.group_id = p_group_id
+      and j.status in ('pending', 'processing', 'retry')
+    order by j.id
+    for update
+  )
+  update private.event_reminder_jobs j
+  set status = 'cancelled', cancelled_at = pg_catalog.clock_timestamp(),
+      cancel_reason = p_reason, lease_owner = null, lease_until = null,
+      updated_at = pg_catalog.clock_timestamp()
+  from locked where j.id = locked.id;
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+create or replace function private.cancel_user_event_reminder_jobs(
+  p_user_id uuid,
+  p_reason text
+)
+returns integer
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+begin
+  return private.cancel_event_reminder_jobs(null, p_reason, null, p_user_id);
+end;
+$$;
+
+-- Membership lifecycle changes are group-scoped.  A user can belong to many
+-- groups, so leaving one group must not cancel reminders for unrelated groups.
+-- This helper keeps the trigger bounded to the affected group/user pair while
+-- preserving the same terminal-state and deterministic lock semantics as the
+-- event-wide cancellation path.
+create or replace function private.cancel_group_user_event_reminder_jobs(
+  p_group_id uuid,
+  p_user_id uuid,
+  p_reason text
+)
+returns integer
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_count integer;
+begin
+  if p_group_id is null or p_user_id is null
+     or p_reason not in ('membership_removed', 'group_archived') then
+    raise exception using errcode = '22023', message = 'invalid group user cancellation';
+  end if;
+  with locked as (
+    select j.id
+    from private.event_reminder_jobs j
+    where j.group_id = p_group_id
+      and j.user_id = p_user_id
+      and j.status in ('pending', 'processing', 'retry')
+    order by j.id
+    for update
+  )
+  update private.event_reminder_jobs j
+  set status = 'cancelled',
+      cancelled_at = pg_catalog.clock_timestamp(),
+      cancel_reason = p_reason,
+      lease_owner = null,
+      lease_until = null,
+      updated_at = pg_catalog.clock_timestamp()
+  from locked
+  where j.id = locked.id;
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+create or replace function private.enqueue_user_event_reminder_reconcile(
+  p_user_id uuid,
+  p_reason text
+)
+returns integer
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_count integer;
+begin
+  if p_user_id is null or p_reason not in ('device_registered', 'provider_enabled') then
+    raise exception using errcode = '22023', message = 'invalid user reconcile request';
+  end if;
+  insert into private.event_reminder_reconcile_queue (event_id, group_id, reason)
+  select e.id, e.group_id, p_reason
+  from public.events e
+  join public.event_reminder_settings s on s.event_id = e.id
+    and s.user_id = p_user_id and s.channel = 'push' and s.enabled
+  join public.event_members em on em.event_id = e.id and em.user_id = p_user_id
+  join public.memberships m on m.group_id = e.group_id and m.user_id = p_user_id
+    and m.is_active and m.removed_at is null
+  join public.groups g on g.id = e.group_id and g.deleted_at is null
+  where e.deleted_at is null
+  on conflict (event_id) do update set
+    reason = excluded.reason,
+    status = case when private.event_reminder_reconcile_queue.status = 'processing'
+      then private.event_reminder_reconcile_queue.status else 'pending' end,
+    next_attempt_at = case when private.event_reminder_reconcile_queue.status = 'processing'
+      then private.event_reminder_reconcile_queue.next_attempt_at
+      else pg_catalog.clock_timestamp() end,
+    completed_at = null,
+    requested_at = pg_catalog.clock_timestamp();
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+-- Account-wide switches are separate from event rows.  Missing rows mean
+-- opt-in is off, which preserves the old application behaviour and avoids
+-- creating a row for every existing account during backfill.
+create table if not exists public.notification_preferences (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  local_enabled boolean not null default false,
+  push_enabled boolean not null default false,
+  version integer not null default 1 check (version > 0),
+  created_at timestamptz not null default pg_catalog.now(),
+  updated_at timestamptz not null default pg_catalog.now()
+);
+
+comment on table public.notification_preferences is
+  'Account-wide opt-in switches. Absence is equivalent to both switches being false.';
+
+create table if not exists public.event_reminder_settings (
+  id uuid primary key default extensions.gen_random_uuid(),
+  event_id uuid not null references public.events(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  channel text not null check (channel in ('local', 'push')),
+  enabled boolean not null default false,
+  -- Timed events use elapsed UTC seconds.  All-day events use
+  -- all_day_days_before calendar dates and the fixed event-local 09:00 wall
+  -- time documented by the Feature 3 contract.
+  lead_seconds integer not null default 900
+    check (lead_seconds between 0 and 604800),
+  all_day_days_before smallint not null default 0
+    check (all_day_days_before between 0 and 366),
+  version integer not null default 1 check (version > 0),
+  created_at timestamptz not null default pg_catalog.now(),
+  updated_at timestamptz not null default pg_catalog.now(),
+  unique (user_id, event_id, channel)
+);
+
+-- Reminder intent is valid only for a current event participant.  Older
+-- partial/early installs could have retained a setting after membership
+-- cleanup, so prune those orphan rows (and any rows for terminal soft-deleted
+-- events) before adding the enforcing FK.  Deleting a setting cascades its
+-- private delivery jobs; valid participant rows are untouched.  The named
+-- constraint and validation make reapplication safe even if an interrupted
+-- deployment already added it as NOT VALID.
+delete from public.event_reminder_settings s
+where not exists (
+  select 1
+  from public.event_members em
+  where em.event_id = s.event_id
+    and em.user_id = s.user_id
+)
+or exists (
+  select 1
+  from public.events e
+  where e.id = s.event_id
+    and e.deleted_at is not null
+);
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_catalog.pg_constraint c
+    where c.conrelid = 'public.event_reminder_settings'::pg_catalog.regclass
+      and c.conname = 'event_reminder_settings_event_member_fk'
+  ) then
+    alter table public.event_reminder_settings
+      add constraint event_reminder_settings_event_member_fk
+      foreign key (event_id, user_id)
+      references public.event_members(event_id, user_id)
+      on delete cascade;
+  end if;
+end;
+$$;
+
+-- A previous partial copy may have installed the FK as NOT VALID.  Validate
+-- after the orphan cleanup so every subsequent participant delete has the
+-- same cascade semantics as a fresh install.
+alter table public.event_reminder_settings
+  validate constraint event_reminder_settings_event_member_fk;
+
+comment on table public.event_reminder_settings is
+  'Series-wide per-user reminder intent. Occurrence identity belongs only to delivery jobs.';
+comment on column public.event_reminder_settings.lead_seconds is
+  'Elapsed UTC lead for timed occurrences; ignored for all-day occurrences.';
+comment on column public.event_reminder_settings.all_day_days_before is
+  'Civil calendar-day lead for all-day occurrences at 09:00 in the effective IANA timezone. UI presets are 0/1/7; the server accepts 0..366 for explicit long-range policies.';
+
+create index if not exists event_reminder_settings_user_event_idx
+  on public.event_reminder_settings (user_id, event_id, channel);
+create index if not exists event_reminder_settings_enabled_idx
+  on public.event_reminder_settings (event_id, user_id, channel)
+  where enabled;
+
+alter table public.notification_preferences enable row level security;
+alter table public.event_reminder_settings enable row level security;
+
+drop policy if exists notification_preferences_select on public.notification_preferences;
+create policy notification_preferences_select
+on public.notification_preferences
+for select to authenticated
+using ((select auth.uid()) = user_id);
+drop policy if exists notification_preferences_write_deny on public.notification_preferences;
+create policy notification_preferences_write_deny
+on public.notification_preferences
+for all to authenticated
+using (false)
+with check (false);
+
+drop policy if exists event_reminder_settings_select on public.event_reminder_settings;
+create policy event_reminder_settings_select
+on public.event_reminder_settings
+for select to authenticated
+using (
+  (select auth.uid()) = user_id
+  and exists (
+    select 1
+    from public.events e
+    join public.groups g on g.id = e.group_id
+    join public.event_members em on em.event_id = e.id
+      and em.user_id = event_reminder_settings.user_id
+    join public.memberships m on m.group_id = e.group_id
+      and m.user_id = event_reminder_settings.user_id
+      and m.is_active
+      and m.removed_at is null
+    where e.id = event_reminder_settings.event_id
+      and e.deleted_at is null
+      and g.deleted_at is null
+  )
+);
+drop policy if exists event_reminder_settings_write_deny on public.event_reminder_settings;
+create policy event_reminder_settings_write_deny
+on public.event_reminder_settings
+for all to authenticated
+using (false)
+with check (false);
+
+revoke all on table public.notification_preferences from public, anon, authenticated;
+revoke all on table public.event_reminder_settings from public, anon, authenticated;
+
+-- Private device values are only read by the server-side payload loader.  A
+-- token hash prevents accidental duplicate registration; the raw bearer is
+-- never copied to a public column or returned by a client RPC.
+create table if not exists private.push_device_tokens (
+  id uuid primary key default extensions.gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  provider text not null check (provider in ('apns', 'fcm')),
+  platform text not null check (platform in ('ios', 'android')),
+  environment text not null check (environment in ('sandbox', 'production')),
+  token_hash text not null check (token_hash ~ '^[0-9a-f]{64}$'),
+  token text not null check (pg_catalog.octet_length(token) between 1 and 4096),
+  installation_hash text check (
+    installation_hash is null or installation_hash ~ '^[0-9a-f]{64}$'
+  ),
+  is_active boolean not null default true,
+  last_seen_at timestamptz not null default pg_catalog.clock_timestamp(),
+  revoked_at timestamptz,
+  created_at timestamptz not null default pg_catalog.clock_timestamp(),
+  updated_at timestamptz not null default pg_catalog.clock_timestamp(),
+  unique (provider, token_hash),
+  check ((is_active and revoked_at is null) or (not is_active and revoked_at is not null))
+);
+
+comment on table private.push_device_tokens is
+  'Server-private push bearer storage. Raw token is never exposed through PostgREST, RLS, realtime, or client receipts.';
+
+create index if not exists push_device_tokens_user_active_idx
+  on private.push_device_tokens (user_id, provider, last_seen_at desc)
+  where is_active;
+
+create table if not exists private.push_provider_capability (
+  singleton boolean primary key default true check (singleton),
+  provider text not null check (provider in ('none', 'apns', 'fcm')),
+  enabled boolean not null default false,
+  updated_at timestamptz not null default pg_catalog.clock_timestamp()
+);
+insert into private.push_provider_capability(singleton, provider, enabled)
+values (true, 'none', false)
+on conflict (singleton) do nothing;
+
+comment on table private.push_provider_capability is
+  'Capability switch only; provider credentials are Edge secrets and are never stored here.';
+
+create table if not exists private.event_reminder_jobs (
+  id uuid primary key default extensions.gen_random_uuid(),
+  setting_id uuid not null references public.event_reminder_settings(id) on delete cascade,
+  event_id uuid not null references public.events(id) on delete cascade,
+  group_id uuid not null references public.groups(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  occurrence_key text not null check (
+    occurrence_key = 'single' or occurrence_key ~ '^o[0-9]{20}$'
+  ),
+  fire_at timestamptz not null check (pg_catalog.isfinite(fire_at)),
+  event_version integer not null check (event_version > 0),
+  occurrence_version integer not null check (occurrence_version >= 0),
+  setting_version integer not null check (setting_version > 0),
+  status text not null default 'pending' check (
+    status in ('pending', 'processing', 'retry', 'sent', 'cancelled', 'dead_letter')
+  ),
+  attempts integer not null default 0 check (attempts between 0 and 8),
+  next_attempt_at timestamptz not null check (pg_catalog.isfinite(next_attempt_at)),
+  lease_owner uuid,
+  lease_until timestamptz,
+  sent_at timestamptz,
+  cancelled_at timestamptz,
+  dead_letter_at timestamptz,
+  cancel_reason text check (cancel_reason is null or cancel_reason in (
+    'event_changed', 'event_deleted', 'group_archived', 'membership_removed',
+    'setting_disabled', 'rescheduled', 'provider_unconfigured', 'device_revoked'
+  )),
+  last_error_code text check (
+    last_error_code is null or last_error_code ~ '^[a-z0-9_.:-]{1,64}$'
+  ),
+  created_at timestamptz not null default pg_catalog.clock_timestamp(),
+  updated_at timestamptz not null default pg_catalog.clock_timestamp(),
+  -- A revision is the event/occurrence/setting triple.  Keeping it in the
+  -- unique key means retries and worker crashes cannot create a second row for
+  -- one logical delivery, while a changed event gets a fresh revision.
+  check (
+    (status = 'processing' and lease_owner is not null and lease_until is not null)
+    or (status <> 'processing' and lease_owner is null and lease_until is null)
+  ),
+  check ((status = 'sent') = (sent_at is not null)),
+  check ((status = 'cancelled') = (cancelled_at is not null)),
+  check ((status = 'dead_letter') = (dead_letter_at is not null)),
+  check (status not in ('sent', 'cancelled', 'dead_letter')
+         or (case when sent_at is not null then 1 else 0 end)
+            + (case when cancelled_at is not null then 1 else 0 end)
+            + (case when dead_letter_at is not null then 1 else 0 end) = 1)
+);
+
+-- Pending/processing/retry work and a successfully sent revision participate in
+-- deduplication. Terminal cancellation/dead-letter receipts remain immutable
+-- history, while a later membership/device/provider reactivation may create a
+-- fresh pending revision for the same occurrence without resurrecting them.
+create unique index if not exists event_reminder_jobs_active_revision_idx
+  on private.event_reminder_jobs (
+    setting_id, event_id, user_id, occurrence_key,
+    event_version, occurrence_version, setting_version
+  ) where status in ('pending', 'processing', 'retry', 'sent');
+
+comment on table private.event_reminder_jobs is
+  'Private at-least-once delivery queue. occurrence_key is the only per-occurrence identity and id is the provider idempotency key.';
+
+create index if not exists event_reminder_jobs_due_idx
+  on private.event_reminder_jobs (next_attempt_at, fire_at, id)
+  where status in ('pending', 'retry');
+create index if not exists event_reminder_jobs_lease_idx
+  on private.event_reminder_jobs (lease_until, id)
+  where status = 'processing';
+create index if not exists event_reminder_jobs_event_idx
+  on private.event_reminder_jobs (event_id, status, occurrence_key);
+create index if not exists event_reminder_jobs_group_user_idx
+  on private.event_reminder_jobs (group_id, user_id, status);
+
+-- Trigger-driven work is only a bounded queue insert.  Recurrence expansion
+-- happens in the worker, never while an event/member write holds the parent
+-- locks.
+create table if not exists private.event_reminder_reconcile_queue (
+  event_id uuid primary key references public.events(id) on delete cascade,
+  group_id uuid not null references public.groups(id) on delete cascade,
+  reason text not null check (reason in (
+    'event_changed', 'setting_changed', 'participant_changed', 'device_registered',
+    'provider_enabled'
+  )),
+  status text not null default 'pending' check (status in ('pending', 'processing', 'done')),
+  attempts integer not null default 0 check (attempts between 0 and 8),
+  next_attempt_at timestamptz not null default pg_catalog.clock_timestamp(),
+  lease_owner uuid,
+  lease_until timestamptz,
+  requested_at timestamptz not null default pg_catalog.clock_timestamp(),
+  completed_at timestamptz,
+  last_error_code text check (
+    last_error_code is null or last_error_code ~ '^[a-z0-9_.:-]{1,64}$'
+  ),
+  check (
+    (status = 'processing' and lease_owner is not null and lease_until is not null)
+    or (status <> 'processing' and lease_owner is null and lease_until is null)
+  ),
+  check ((status = 'done') = (completed_at is not null))
+);
+
+create index if not exists event_reminder_reconcile_due_idx
+  on private.event_reminder_reconcile_queue (next_attempt_at, event_id)
+  where status in ('pending', 'processing');
+
+alter table private.push_device_tokens enable row level security;
+alter table private.push_provider_capability enable row level security;
+alter table private.event_reminder_jobs enable row level security;
+alter table private.event_reminder_reconcile_queue enable row level security;
+-- No private policy is intentionally permissive.  API roles have no schema or
+-- table privileges; owner-only SECURITY DEFINER functions are the sole path.
+revoke all on table private.push_device_tokens from public, anon, authenticated;
+revoke all on table private.push_provider_capability from public, anon, authenticated;
+revoke all on table private.event_reminder_jobs from public, anon, authenticated;
+revoke all on table private.event_reminder_reconcile_queue from public, anon, authenticated;
+do $$
+begin
+  if exists (select 1 from pg_catalog.pg_roles where rolname = 'service_role') then
+    execute 'revoke all on table private.push_device_tokens from service_role';
+    execute 'revoke all on table private.push_provider_capability from service_role';
+    execute 'revoke all on table private.event_reminder_jobs from service_role';
+    execute 'revoke all on table private.event_reminder_reconcile_queue from service_role';
+  end if;
+end;
+$$;
+
+-- Resolve a civil timestamp in exactly the same way as
+-- lib/core/timezone_utils.dart: enumerate nearby offsets, retain exact
+-- round-trips, and choose the latest UTC instant for a fold.  PostgreSQL's
+-- built-in conversion is used only for a gap, where no exact round-trip exists
+-- and its documented forward resolution is the desired policy.
+create or replace function private.wall_time_to_instant(
+  p_local timestamp without time zone,
+  p_timezone text
+)
+returns timestamptz
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_naive timestamptz;
+  v_probe timestamptz;
+  v_candidate timestamptz;
+  v_best timestamptz;
+  v_offset bigint;
+  v_offsets bigint[] := '{}'::bigint[];
+  v_hour integer;
+begin
+  if p_local is null or p_timezone is null
+     or not exists (
+       select 1 from pg_catalog.pg_timezone_names t where t.name = p_timezone
+     ) then
+    raise exception using errcode = '22023', message = 'invalid timezone or local time';
+  end if;
+  v_naive := p_local at time zone 'UTC';
+  for v_hour in -48..48 loop
+    v_probe := v_naive + v_hour * interval '1 hour';
+    v_offset := extract(epoch from (
+      ((v_probe at time zone p_timezone) at time zone 'UTC') - v_probe
+    ))::bigint;
+    if not (v_offset = any(v_offsets)) then
+      v_offsets := pg_catalog.array_append(v_offsets, v_offset);
+    end if;
+  end loop;
+  for v_offset in select value from pg_catalog.unnest(v_offsets) as u(value) loop
+    v_candidate := v_naive - v_offset * interval '1 second';
+    if (v_candidate at time zone p_timezone) = p_local
+       and (v_best is null or v_candidate > v_best) then
+      v_best := v_candidate;
+    end if;
+  end loop;
+  if v_best is not null then
+    return v_best;
+  end if;
+  return p_local at time zone p_timezone;
+end;
+$$;
+
+comment on function private.wall_time_to_instant(timestamp without time zone, text) is
+  'Civil conversion for reminders: spring gaps move forward and autumn folds choose the latest UTC instant.';
+
+create or replace function private.reminder_fire_at(
+  p_starts_at timestamptz,
+  p_is_all_day boolean,
+  p_all_day_start date,
+  p_timezone text,
+  p_lead_seconds integer,
+  p_all_day_days_before smallint
+)
+returns timestamptz
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  if p_starts_at is null or p_timezone is null
+     or not pg_catalog.isfinite(p_starts_at)
+     or p_lead_seconds is null or p_lead_seconds not between 0 and 604800
+     or p_all_day_days_before is null or p_all_day_days_before not between 0 and 366 then
+    raise exception using errcode = '22023', message = 'invalid reminder timing';
+  end if;
+  if p_is_all_day then
+    if p_all_day_start is null then
+      raise exception using errcode = '22023', message = 'all-day reminder requires a start date';
+    end if;
+    return private.wall_time_to_instant(
+      ((p_all_day_start - p_all_day_days_before)::timestamp
+        + time '09:00:00'), p_timezone
+    );
+  end if;
+  return p_starts_at - p_lead_seconds * interval '1 second';
+end;
+$$;
+
+-- The helper is private but deliberately row-shaped so both the public local
+-- candidate RPC and the private push preparation path use one source of truth
+-- for active participant checks, recurrence materialization, and fire_at.
+create or replace function private.prepare_reminder_candidates(
+  p_user_id uuid,
+  p_fire_at_start timestamptz,
+  p_fire_at_end timestamptz,
+  p_channel text,
+  p_after_fire_at timestamptz default null,
+  p_after_event_id uuid default null,
+  p_after_occurrence_key text default null,
+  p_limit integer default 200,
+  p_only_event_id uuid default null
+)
+returns table (
+  event_id uuid,
+  group_id uuid,
+  occurrence_key text,
+  occurrence_index bigint,
+  fire_at timestamptz,
+  starts_at timestamptz,
+  ends_at timestamptz,
+  timezone text,
+  is_all_day boolean,
+  all_day_start date,
+  all_day_end date,
+  title text,
+  setting_id uuid,
+  setting_version integer,
+  event_version integer,
+  occurrence_version integer
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  with active_events as (
+    select distinct e.id, e.group_id, s.id as setting_id,
+      s.version as setting_version, s.lead_seconds, s.all_day_days_before,
+      e.timezone as anchor_timezone
+    from public.event_reminder_settings s
+    join public.events e on e.id = s.event_id and e.deleted_at is null
+    join public.groups g on g.id = e.group_id and g.deleted_at is null
+    join public.event_members em on em.event_id = e.id and em.user_id = p_user_id
+    join public.memberships m on m.group_id = e.group_id and m.user_id = p_user_id
+      and m.is_active and m.removed_at is null
+    left join public.notification_preferences np on np.user_id = p_user_id
+    where s.user_id = p_user_id
+      and s.channel = p_channel
+      and s.enabled
+      and (case when p_channel = 'local' then coalesce(np.local_enabled, false)
+               else coalesce(np.push_enabled, false) end)
+      and (p_only_event_id is null or e.id = p_only_event_id)
+  ),
+  expanded as (
+    select a.*, o.occurrence_key, o.occurrence_index,
+      o.starts_at, o.ends_at, o.timezone, o.is_all_day,
+      o.all_day_start, o.all_day_end, o.title,
+      o.version as event_version, o.occurrence_version,
+      private.reminder_fire_at(
+        o.starts_at, o.is_all_day, o.all_day_start, o.timezone,
+        a.lead_seconds, a.all_day_days_before
+      ) as fire_at
+    from active_events a
+    cross join lateral public._event_occurrences_for_range(
+      a.id,
+      p_fire_at_start - greatest(
+        interval '604800 seconds',
+        a.all_day_days_before * interval '1 day'
+      ),
+      p_fire_at_end + greatest(
+        interval '604800 seconds',
+        a.all_day_days_before * interval '1 day'
+      ),
+      a.anchor_timezone
+    ) o
+  ),
+  filtered as (
+    select x.* from expanded x
+    where x.fire_at >= p_fire_at_start
+      and x.fire_at < p_fire_at_end
+      and (
+        p_after_fire_at is null
+        or x.fire_at > p_after_fire_at
+        or (x.fire_at = p_after_fire_at and x.id > p_after_event_id)
+        or (x.fire_at = p_after_fire_at and x.id = p_after_event_id
+            and x.occurrence_key > p_after_occurrence_key)
+      )
+  )
+  select id, group_id, occurrence_key, coalesce(occurrence_index, 0)::bigint, fire_at,
+    starts_at, ends_at, timezone, is_all_day, all_day_start, all_day_end,
+    title, setting_id, setting_version, event_version, occurrence_version
+  from filtered
+  order by fire_at, id, occurrence_key
+  limit (p_limit + 1);
+$$;
+
+create or replace function public.reminder_candidates_for_user(
+  p_fire_at_start timestamptz,
+  p_fire_at_end timestamptz,
+  p_limit integer default 100,
+  p_cursor text default null
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := (select auth.uid());
+  v_cursor jsonb;
+  v_cursor_wire json;
+  v_cursor_text text;
+  v_after_fire_at timestamptz;
+  v_after_event_id uuid;
+  v_after_occurrence_key text;
+  v_rows jsonb := '[]'::jsonb;
+  v_row record;
+  v_seen integer := 0;
+  v_has_more boolean := false;
+  v_last record;
+  v_local_enabled boolean;
+begin
+  if v_actor is null
+     or coalesce((select auth.jwt() ->> 'is_anonymous'), 'false') = 'true' then
+    raise exception using errcode = '28000', message = 'authentication is required';
+  end if;
+  if p_fire_at_start is null or p_fire_at_end is null
+     or not pg_catalog.isfinite(p_fire_at_start)
+     or not pg_catalog.isfinite(p_fire_at_end)
+     or p_fire_at_end <= p_fire_at_start
+     or p_fire_at_end - p_fire_at_start > interval '60 days' then
+    raise exception using errcode = '22023', message = 'fire_at range must be finite and at most 60 days';
+  end if;
+  if p_limit is null or p_limit < 1 or p_limit > 200 then
+    raise exception using errcode = '22023', message = 'limit must be between 1 and 200';
+  end if;
+  select coalesce(p.local_enabled, false) into v_local_enabled
+  from public.notification_preferences p where p.user_id = v_actor;
+
+  if p_cursor is not null then
+    if pg_catalog.length(p_cursor) > 4096
+       or pg_catalog.btrim(p_cursor) = ''
+       or p_cursor !~ '^[A-Za-z0-9_-]+$' then
+      raise exception using errcode = '22023', message = 'cursor is malformed';
+    end if;
+    begin
+      v_cursor_text := pg_catalog.convert_from(
+        pg_catalog.decode(
+          pg_catalog.translate(p_cursor, '-_', '+/') ||
+            pg_catalog.repeat('=', (4 - (pg_catalog.length(p_cursor) % 4)) % 4),
+          'base64'
+        ), 'UTF8'
+      );
+      v_cursor_wire := v_cursor_text::json;
+      v_cursor := v_cursor_text::jsonb;
+    exception when others then
+      raise exception using errcode = '22023', message = 'cursor is malformed';
+    end;
+    if pg_catalog.jsonb_typeof(v_cursor) <> 'object'
+       or v_cursor - 'v' - 'fire_at' - 'event_id' - 'occurrence_key' - 'channel' <> '{}'::jsonb
+       or v_cursor->>'v' is null or v_cursor->>'fire_at' is null
+       or v_cursor->>'event_id' is null or v_cursor->>'occurrence_key' is null
+       or v_cursor->>'channel' is null then
+      raise exception using errcode = '22023', message = 'cursor has an invalid shape';
+    end if;
+    if pg_catalog.json_typeof(v_cursor_wire -> 'v') <> 'number'
+       or (v_cursor_wire -> 'v')::text !~ '^[0-9]+$'
+       or v_cursor->>'v' <> '1'
+       or pg_catalog.json_typeof(v_cursor_wire -> 'fire_at') <> 'string'
+       or pg_catalog.json_typeof(v_cursor_wire -> 'event_id') <> 'string'
+       or pg_catalog.json_typeof(v_cursor_wire -> 'occurrence_key') <> 'string'
+       or pg_catalog.json_typeof(v_cursor_wire -> 'channel') <> 'string'
+       or v_cursor->>'channel' <> 'local'
+       or (v_cursor->>'occurrence_key') !~ '^(single|o[0-9]{20})$' then
+      raise exception using errcode = '22023', message = 'cursor has an invalid version or key';
+    end if;
+    begin
+      v_after_fire_at := (v_cursor->>'fire_at')::timestamptz;
+      v_after_event_id := (v_cursor->>'event_id')::uuid;
+      if not pg_catalog.isfinite(v_after_fire_at) then
+        raise exception using errcode = '22023', message = 'cursor timestamp is not finite';
+      end if;
+    exception when others then
+      raise exception using errcode = '22023', message = 'cursor tuple is invalid';
+    end;
+    v_after_occurrence_key := v_cursor->>'occurrence_key';
+  end if;
+
+  for v_row in
+    select * from private.prepare_reminder_candidates(
+      v_actor, p_fire_at_start, p_fire_at_end, 'local',
+      v_after_fire_at, v_after_event_id, v_after_occurrence_key, p_limit,
+      null
+    )
+  loop
+    if v_seen >= p_limit then
+      v_has_more := true;
+      exit;
+    end if;
+    v_rows := v_rows || pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object(
+      'event_id', v_row.event_id,
+      'group_id', v_row.group_id,
+      'occurrence_key', v_row.occurrence_key,
+      'occurrence_index', v_row.occurrence_index,
+      'fire_at', v_row.fire_at,
+      'starts_at', v_row.starts_at,
+      'ends_at', v_row.ends_at,
+      'timezone', v_row.timezone,
+      'is_all_day', v_row.is_all_day,
+      'all_day_start', v_row.all_day_start,
+      'all_day_end', v_row.all_day_end,
+      'title', v_row.title,
+      'setting_id', v_row.setting_id,
+      'setting_version', v_row.setting_version,
+      'event_version', v_row.event_version,
+      'occurrence_version', v_row.occurrence_version,
+      'channel', 'local',
+      'capability', 'client_local_scheduler',
+      'all_day_local_time', '09:00:00'
+    ));
+    v_seen := v_seen + 1;
+    v_last := v_row;
+  end loop;
+  if v_has_more then
+    v_cursor := pg_catalog.jsonb_build_object(
+      'v', 1,
+      'fire_at', v_last.fire_at,
+      'event_id', v_last.event_id,
+      'occurrence_key', v_last.occurrence_key,
+      'channel', 'local'
+    );
+    v_cursor_text := pg_catalog.rtrim(
+      pg_catalog.translate(
+        pg_catalog.replace(
+          pg_catalog.encode(pg_catalog.convert_to(v_cursor::text, 'UTF8'), 'base64'),
+          E'\n', ''
+        ), '+/', '-_'
+      ), '='
+    );
+  else
+    v_cursor_text := null;
+  end if;
+  return pg_catalog.jsonb_build_object(
+    'candidates', v_rows,
+    'next_cursor', v_cursor_text,
+    'has_more', v_has_more,
+    'capability', case when v_local_enabled
+      then 'client_local_scheduler' else 'disabled' end
+  );
+end;
+$$;
+
+create or replace function public.register_push_device(
+  p_provider text,
+  p_platform text,
+  p_environment text,
+  p_token text,
+  p_installation_id text default null
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := (select auth.uid());
+  v_token_hash text;
+  v_installation_hash text;
+  v_device private.push_device_tokens;
+  v_changed boolean := false;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_conflict uuid;
+begin
+  if v_actor is null
+     or coalesce((select auth.jwt() ->> 'is_anonymous'), 'false') = 'true' then
+    raise exception using errcode = '28000', message = 'authentication is required';
+  end if;
+  if p_provider is null or p_provider not in ('apns', 'fcm')
+     or p_platform is null or p_platform not in ('ios', 'android')
+     or p_environment is null or p_environment not in ('sandbox', 'production')
+     or p_token is null or pg_catalog.octet_length(p_token) not between 1 and 4096
+     or (p_provider = 'apns' and p_platform <> 'ios')
+     or (p_provider = 'fcm' and p_platform <> 'android')
+     or (p_installation_id is not null and pg_catalog.octet_length(p_installation_id) > 256) then
+    raise exception using errcode = '22023', message = 'device values are invalid';
+  end if;
+  perform 1 from auth.users u where u.id = v_actor for key share;
+  if not found then
+    raise exception using errcode = '42501', message = 'account is unavailable';
+  end if;
+  v_token_hash := encode(
+    extensions.digest(pg_catalog.convert_to(p_token, 'utf8'), 'sha256'), 'hex'
+  );
+  if p_installation_id is not null then
+    v_installation_hash := encode(
+      extensions.digest(pg_catalog.convert_to(p_installation_id, 'utf8'), 'sha256'), 'hex'
+    );
+  end if;
+  -- Serialize the cross-account token uniqueness check.  The actor lock above
+  -- remains first (matching account deletion); this advisory lock prevents two
+  -- concurrent users from racing into the provider/token unique constraint and
+  -- leaking an implementation error instead of the deliberate authorization
+  -- response.
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(v_token_hash, 0)
+  );
+  select d.id into v_conflict
+  from private.push_device_tokens d
+  where d.provider = p_provider and d.token_hash = v_token_hash
+    and d.user_id <> v_actor
+  for update;
+  if v_conflict is not null then
+    raise exception using errcode = '42501', message = 'device is already registered';
+  end if;
+  select d.* into v_device
+  from private.push_device_tokens d
+  where d.user_id = v_actor and d.provider = p_provider
+    and d.token_hash = v_token_hash
+  for update;
+  if not found then
+    insert into private.push_device_tokens (
+      user_id, provider, platform, environment, token_hash, token,
+      installation_hash, is_active, last_seen_at, revoked_at,
+      created_at, updated_at
+    ) values (
+      v_actor, p_provider, p_platform, p_environment, v_token_hash, p_token,
+      v_installation_hash, true, v_now, null, v_now, v_now
+    ) returning * into v_device;
+    v_changed := true;
+  else
+    if v_device.platform is distinct from p_platform
+       or v_device.environment is distinct from p_environment
+       or v_device.installation_hash is distinct from v_installation_hash
+       or not v_device.is_active then
+      update private.push_device_tokens d
+      set platform = p_platform,
+          environment = p_environment,
+          installation_hash = v_installation_hash,
+          is_active = true,
+          revoked_at = null,
+          last_seen_at = v_now,
+          updated_at = v_now
+      where d.id = v_device.id
+      returning * into v_device;
+      v_changed := true;
+    else
+      update private.push_device_tokens d
+      set last_seen_at = v_now, updated_at = v_now
+      where d.id = v_device.id
+      returning * into v_device;
+    end if;
+  end if;
+  -- Registration only queues a bounded reconcile request.  It never expands
+  -- a recurrence while the authenticated RPC is holding account locks.
+  perform private.enqueue_user_event_reminder_reconcile(v_actor, 'device_registered');
+  return pg_catalog.jsonb_build_object(
+    'committed', true,
+    'changed', v_changed,
+    'device_id', v_device.id,
+    'provider', v_device.provider,
+    'platform', v_device.platform,
+    'environment', v_device.environment,
+    'capability', 'push_unconfigured'
+  );
+end;
+$$;
+
+create or replace function public.revoke_push_device(p_device_id uuid)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := (select auth.uid());
+  v_device private.push_device_tokens;
+  v_changed boolean := false;
+  v_cancelled integer := 0;
+begin
+  if v_actor is null
+     or coalesce((select auth.jwt() ->> 'is_anonymous'), 'false') = 'true' then
+    raise exception using errcode = '28000', message = 'authentication is required';
+  end if;
+  if p_device_id is null then
+    raise exception using errcode = '22023', message = 'device id is invalid';
+  end if;
+  perform 1 from auth.users u where u.id = v_actor for key share;
+  select d.* into v_device
+  from private.push_device_tokens d
+  where d.id = p_device_id and d.user_id = v_actor
+  for update;
+  if not found then
+    raise exception using errcode = '42501', message = 'device is unavailable';
+  end if;
+  if v_device.is_active then
+    update private.push_device_tokens d
+    set is_active = false,
+        revoked_at = pg_catalog.clock_timestamp(),
+        updated_at = pg_catalog.clock_timestamp()
+    where d.id = v_device.id
+    returning * into v_device;
+    v_changed := true;
+  end if;
+  -- A job is useful only while at least one active device can receive it. If
+  -- this revocation removed the user's last active device, cancel all
+  -- nonterminal push work with an explicit receipt. Keep jobs untouched when
+  -- another device remains active so delivery can continue there.
+  if not exists (
+    select 1
+    from private.push_device_tokens d
+    where d.user_id = v_actor and d.is_active
+  ) then
+    v_cancelled := private.cancel_user_event_reminder_jobs(
+      v_actor, 'device_revoked'
+    );
+  end if;
+  -- When another device remains active, existing jobs stay pending so delivery
+  -- can continue there.  If this was the last device, the branch above has
+  -- already cancelled the nonterminal rows; a later registration can create a
+  -- fresh revision without resurrecting a cancelled receipt.
+  return pg_catalog.jsonb_build_object(
+    'committed', true,
+    'changed', v_changed,
+    'device_id', p_device_id,
+    'cancelled_jobs', v_cancelled,
+    'capability', 'disabled'
+  );
+end;
+$$;
+
+create or replace function private.reconcile_event_reminders(
+  p_event_id uuid,
+  p_now timestamptz default pg_catalog.clock_timestamp(),
+  p_horizon_days integer default 366
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_event public.events;
+  v_configured boolean := false;
+  v_user_id uuid;
+  v_row record;
+  v_inserted integer := 0;
+  v_cancelled integer := 0;
+  v_skipped integer := 0;
+  v_horizon_end timestamptz;
+  v_capability text;
+begin
+  if p_event_id is null or p_now is null or not pg_catalog.isfinite(p_now)
+     or p_horizon_days is null or p_horizon_days < 1 or p_horizon_days > 366 then
+    raise exception using errcode = '22023', message = 'invalid reconcile window';
+  end if;
+  v_horizon_end := p_now + p_horizon_days * interval '1 day';
+  select e.* into v_event from public.events e where e.id = p_event_id;
+  if not found then
+    return pg_catalog.jsonb_build_object(
+      'committed', true, 'event_id', p_event_id, 'queued_jobs', 0,
+      'cancelled_jobs', 0, 'skipped_past', 0, 'capability', 'event_deleted'
+    );
+  end if;
+  if v_event.deleted_at is not null
+     or not exists (
+       select 1 from public.groups g where g.id = v_event.group_id and g.deleted_at is null
+     ) then
+    v_cancelled := private.cancel_event_reminder_jobs(p_event_id, 'event_deleted');
+    return pg_catalog.jsonb_build_object(
+      'committed', true, 'event_id', p_event_id, 'queued_jobs', 0,
+      'cancelled_jobs', v_cancelled, 'skipped_past', 0, 'capability', 'disabled'
+    );
+  end if;
+  select c.enabled and c.provider <> 'none' into v_configured
+  from private.push_provider_capability c where c.singleton;
+  if not coalesce(v_configured, false) then
+    v_cancelled := private.cancel_event_reminder_jobs(
+      p_event_id, 'provider_unconfigured'
+    );
+    return pg_catalog.jsonb_build_object(
+      'committed', true, 'event_id', p_event_id, 'queued_jobs', 0,
+      'cancelled_jobs', v_cancelled, 'skipped_past', 0, 'capability', 'push_unconfigured'
+    );
+  end if;
+
+  drop table if exists pg_temp.reminder_desired_jobs;
+  create temporary table pg_temp.reminder_desired_jobs (
+    setting_id uuid not null,
+    event_id uuid not null,
+    group_id uuid not null,
+    user_id uuid not null,
+    occurrence_key text not null,
+    fire_at timestamptz not null,
+    event_version integer not null,
+    occurrence_version integer not null,
+    setting_version integer not null,
+    primary key (setting_id, event_id, user_id, occurrence_key,
+                 event_version, occurrence_version, setting_version)
+  ) on commit drop;
+
+  for v_user_id in
+    select distinct s.user_id
+    from public.event_reminder_settings s
+    join public.event_members em on em.event_id = p_event_id and em.user_id = s.user_id
+    join public.memberships m on m.group_id = v_event.group_id and m.user_id = s.user_id
+      and m.is_active and m.removed_at is null
+    where s.event_id = p_event_id and s.channel = 'push' and s.enabled
+  loop
+    insert into pg_temp.reminder_desired_jobs (
+      setting_id, event_id, group_id, user_id, occurrence_key, fire_at,
+      event_version, occurrence_version, setting_version
+    )
+    select c.setting_id, c.event_id, c.group_id, v_user_id, c.occurrence_key,
+      c.fire_at, c.event_version, c.occurrence_version, c.setting_version
+    from private.prepare_reminder_candidates(
+      v_user_id, p_now, v_horizon_end, 'push', null, null, null, 2000, p_event_id
+    ) c
+    where c.fire_at > p_now;
+  end loop;
+
+  insert into private.event_reminder_jobs (
+    setting_id, event_id, group_id, user_id, occurrence_key, fire_at,
+    event_version, occurrence_version, setting_version, status, attempts,
+    next_attempt_at
+  )
+  select d.setting_id, d.event_id, d.group_id, d.user_id, d.occurrence_key,
+    d.fire_at, d.event_version, d.occurrence_version, d.setting_version,
+    'pending', 0, d.fire_at
+  from pg_temp.reminder_desired_jobs d
+  on conflict do nothing;
+  get diagnostics v_inserted = row_count;
+
+  with locked as (
+    select j.id
+    from private.event_reminder_jobs j
+    where j.event_id = p_event_id
+      and j.status in ('pending', 'processing', 'retry')
+      and not exists (
+        select 1 from pg_temp.reminder_desired_jobs d
+        where d.setting_id = j.setting_id and d.event_id = j.event_id
+          and d.user_id = j.user_id and d.occurrence_key = j.occurrence_key
+          and d.event_version = j.event_version
+          and d.occurrence_version = j.occurrence_version
+          and d.setting_version = j.setting_version
+      )
+    order by j.id
+    for update
+  )
+  update private.event_reminder_jobs j
+  set status = 'cancelled', cancelled_at = pg_catalog.clock_timestamp(),
+      cancel_reason = 'rescheduled', lease_owner = null, lease_until = null,
+      updated_at = pg_catalog.clock_timestamp()
+  from locked where j.id = locked.id;
+  get diagnostics v_cancelled = row_count;
+  select case when c.enabled and c.provider <> 'none'
+              then 'push_configured' else 'push_unconfigured' end
+    into v_capability from private.push_provider_capability c where c.singleton;
+  return pg_catalog.jsonb_build_object(
+    'committed', true, 'event_id', p_event_id,
+    'queued_jobs', v_inserted, 'cancelled_jobs', v_cancelled,
+    'skipped_past', v_skipped, 'capability', coalesce(v_capability, 'push_unconfigured')
+  );
+end;
+$$;
+
+create or replace function private.reconcile_all_event_reminders(
+  p_now timestamptz default pg_catalog.clock_timestamp(),
+  p_limit integer default 100
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_event_id uuid;
+  v_done integer := 0;
+  v_queued integer := 0;
+begin
+  if p_now is null or not pg_catalog.isfinite(p_now)
+     or p_limit is null or p_limit < 1 or p_limit > 500 then
+    raise exception using errcode = '22023', message = 'invalid reconcile batch';
+  end if;
+  for v_event_id in
+    select e.id
+    from public.events e
+    join public.event_reminder_settings s on s.event_id = e.id
+      and s.channel = 'push' and s.enabled
+    join public.groups g on g.id = e.group_id and g.deleted_at is null
+    where e.deleted_at is null
+    order by e.id
+    limit p_limit
+  loop
+    perform private.reconcile_event_reminders(v_event_id, p_now, 366);
+    v_done := v_done + 1;
+  end loop;
+  return pg_catalog.jsonb_build_object(
+    'committed', true, 'events_reconciled', v_done,
+    'queued_jobs', v_queued, 'capability', 'push_configured'
+  );
+end;
+$$;
+
+create or replace function private.claim_event_reminder_reconcile_requests(
+  p_worker_id uuid,
+  p_limit integer default 50,
+  p_now timestamptz default pg_catalog.clock_timestamp(),
+  p_lease_seconds integer default 300
+)
+returns table (
+  event_id uuid,
+  group_id uuid,
+  reason text,
+  attempts integer,
+  lease_until timestamptz
+)
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+begin
+  if p_worker_id is null or p_now is null or not pg_catalog.isfinite(p_now)
+     or p_limit is null or p_limit < 1 or p_limit > 100
+     or p_lease_seconds is null or p_lease_seconds < 1 or p_lease_seconds > 3600 then
+    raise exception using errcode = '22023', message = 'invalid reconcile lease';
+  end if;
+  -- A worker can crash after its eighth claim. Such a row is no longer
+  -- eligible for reclaim (`attempts < 8` below), so terminalize an expired
+  -- processing lease before selecting due work or it would remain stuck in
+  -- `processing` forever. A row dirtied by a newer trigger is instead reset
+  -- for that newer generation. Keep this bounded/non-blocking for concurrent
+  -- workers by taking only rows that are currently available to lock.
+  with exhausted as (
+    select q.event_id, q.dirty
+    from private.event_reminder_reconcile_queue q
+    where q.status = 'processing'
+      and q.attempts >= 8
+      and q.lease_until <= p_now
+      for update skip locked
+  )
+  update private.event_reminder_reconcile_queue q
+  set status = case when exhausted.dirty then 'pending' else 'done' end,
+      attempts = case when exhausted.dirty then 0 else q.attempts end,
+      next_attempt_at = case when exhausted.dirty then p_now else q.next_attempt_at end,
+      completed_at = case when exhausted.dirty then null else p_now end,
+      lease_owner = null, lease_until = null,
+      dirty = false,
+      last_error_code = case when exhausted.dirty then null else 'retry_exhausted' end
+  from exhausted
+  where q.event_id = exhausted.event_id;
+  return query
+  with due as (
+    select q.event_id
+    from private.event_reminder_reconcile_queue q
+    where (
+      q.status = 'pending' and q.next_attempt_at <= p_now
+    ) or (
+      q.status = 'processing' and q.lease_until <= p_now
+    )
+    order by q.next_attempt_at, q.event_id
+    for update skip locked
+    limit p_limit
+  ), claimed as (
+    update private.event_reminder_reconcile_queue q
+    set status = 'processing', lease_owner = p_worker_id,
+        lease_until = p_now + p_lease_seconds * interval '1 second',
+        attempts = q.attempts + 1,
+        dirty = false,
+        completed_at = null,
+        last_error_code = null
+    from due
+    where q.event_id = due.event_id
+      and q.attempts < 8
+    returning q.event_id, q.group_id, q.reason, q.attempts, q.lease_until
+  )
+  select c.event_id, c.group_id, c.reason, c.attempts, c.lease_until
+  from claimed c
+  order by c.event_id;
+  -- Rows that exhausted their bounded queue attempts are terminal and are not
+  -- returned to the Edge worker.
+  update private.event_reminder_reconcile_queue q
+  set status = 'done', completed_at = p_now, lease_owner = null, lease_until = null,
+      dirty = false,
+      last_error_code = 'retry_exhausted'
+  where q.status = 'pending' and q.attempts >= 8
+    and q.next_attempt_at <= p_now;
+end;
+$$;
+
+create or replace function private.complete_event_reminder_reconcile_request(
+  p_event_id uuid,
+  p_worker_id uuid,
+  p_outcome text,
+  p_error_code text default null
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_queue private.event_reminder_reconcile_queue;
+  v_status text;
+begin
+  if p_event_id is null or p_worker_id is null
+     or p_outcome is null or p_outcome not in ('done', 'retryable', 'permanent')
+     or (p_error_code is not null and p_error_code !~ '^[a-z0-9_.:-]{1,64}$') then
+    raise exception using errcode = '22023', message = 'invalid reconcile completion';
+  end if;
+  select q.* into v_queue
+  from private.event_reminder_reconcile_queue q
+  where q.event_id = p_event_id
+  for update;
+  if not found or v_queue.status <> 'processing'
+     or v_queue.lease_owner <> p_worker_id
+     or v_queue.lease_until < pg_catalog.clock_timestamp() then
+    raise exception using errcode = '40001', message = 'reconcile lease is stale';
+  end if;
+  -- A trigger may have coalesced a newer event/setting generation while this
+  -- lease was being prepared.  The row lock above gives us a linearization
+  -- point: never terminalize the old generation when `dirty` is set.  Start
+  -- the newer generation with a fresh bounded-attempt budget and let the next
+  -- worker claim it after this completion commits.
+  if v_queue.dirty then
+    v_status := 'pending';
+    update private.event_reminder_reconcile_queue q
+    set status = 'pending', attempts = 0, next_attempt_at = pg_catalog.clock_timestamp(),
+        completed_at = null, lease_owner = null, lease_until = null,
+        dirty = false, last_error_code = null
+    where q.event_id = p_event_id;
+  elsif p_outcome = 'done' then
+    v_status := 'done';
+    update private.event_reminder_reconcile_queue q
+    set status = 'done', completed_at = pg_catalog.clock_timestamp(),
+        lease_owner = null, lease_until = null, dirty = false,
+        last_error_code = null
+    where q.event_id = p_event_id;
+  elsif p_outcome = 'permanent' or v_queue.attempts >= 8 then
+    v_status := 'done';
+    update private.event_reminder_reconcile_queue q
+    set status = 'done', completed_at = pg_catalog.clock_timestamp(),
+        lease_owner = null, lease_until = null,
+        dirty = false,
+        last_error_code = coalesce(p_error_code, 'permanent')
+    where q.event_id = p_event_id;
+  else
+    v_status := 'pending';
+    update private.event_reminder_reconcile_queue q
+    set status = 'pending', lease_owner = null, lease_until = null,
+        next_attempt_at = pg_catalog.clock_timestamp()
+          + least(3600, 30 * (2 ^ greatest(v_queue.attempts - 1, 0))) * interval '1 second',
+        dirty = false,
+        last_error_code = coalesce(p_error_code, 'retryable')
+    where q.event_id = p_event_id;
+  end if;
+  return pg_catalog.jsonb_build_object(
+    'committed', true, 'event_id', p_event_id, 'status', v_status,
+    'attempts', v_queue.attempts, 'error_code', p_error_code
+  );
+end;
+$$;
+
+create or replace function private.claim_event_reminder_jobs(
+  p_worker_id uuid,
+  p_limit integer default 100,
+  p_now timestamptz default pg_catalog.clock_timestamp(),
+  p_lease_seconds integer default 300
+)
+returns table (
+  id uuid,
+  setting_id uuid,
+  event_id uuid,
+  group_id uuid,
+  user_id uuid,
+  occurrence_key text,
+  fire_at timestamptz,
+  event_version integer,
+  occurrence_version integer,
+  setting_version integer,
+  attempts integer,
+  lease_until timestamptz
+)
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_configured boolean;
+begin
+  if p_worker_id is null or p_now is null or not pg_catalog.isfinite(p_now)
+     or p_limit is null or p_limit < 1 or p_limit > 200
+     or p_lease_seconds is null or p_lease_seconds < 1 or p_lease_seconds > 3600 then
+    raise exception using errcode = '22023', message = 'invalid worker lease';
+  end if;
+  select c.enabled and c.provider <> 'none' into v_configured
+  from private.push_provider_capability c where c.singleton;
+  if not coalesce(v_configured, false) then
+    raise exception using errcode = '55000', message = 'push_unconfigured';
+  end if;
+  -- See the reconcile queue claim above: an expired eighth-attempt lease is
+  -- excluded by the reclaim predicate, so make it terminal before selecting
+  -- due jobs.  This also intentionally runs before the fire_at check; a
+  -- crashed worker must not strand a future-dated occurrence in processing.
+  with exhausted as (
+    select j.id
+    from private.event_reminder_jobs j
+    where j.status = 'processing'
+      and j.attempts >= 8
+      and j.lease_until <= p_now
+    for update skip locked
+  )
+  update private.event_reminder_jobs j
+  set status = 'dead_letter', dead_letter_at = p_now,
+      last_error_code = 'retry_exhausted', lease_owner = null,
+      lease_until = null, updated_at = p_now
+  from exhausted
+  where j.id = exhausted.id;
+  return query
+  with due as (
+    select j.id
+    from private.event_reminder_jobs j
+    join public.events e on e.id = j.event_id and e.deleted_at is null
+    join public.groups g on g.id = j.group_id and g.deleted_at is null
+    join public.event_members em on em.event_id = j.event_id and em.user_id = j.user_id
+    join public.memberships m on m.group_id = j.group_id and m.user_id = j.user_id
+      and m.is_active and m.removed_at is null
+    join public.notification_preferences np on np.user_id = j.user_id and np.push_enabled
+    join public.event_reminder_settings s on s.id = j.setting_id
+      and s.user_id = j.user_id
+      and s.event_id = j.event_id
+      and s.enabled and s.channel = 'push' and s.version = j.setting_version
+    where (
+      (j.status in ('pending', 'retry') and j.next_attempt_at <= p_now and j.fire_at <= p_now)
+      or (j.status = 'processing' and j.lease_until <= p_now and j.fire_at <= p_now)
+    )
+    order by j.next_attempt_at, j.fire_at, j.id
+    for update of j skip locked
+    limit p_limit
+  ), claimed as (
+    update private.event_reminder_jobs j
+    set status = 'processing', lease_owner = p_worker_id,
+        lease_until = p_now + p_lease_seconds * interval '1 second',
+        attempts = j.attempts + 1,
+        updated_at = pg_catalog.clock_timestamp()
+    from due
+    where j.id = due.id and j.attempts < 8
+    returning j.*
+  )
+  select c.id, c.setting_id, c.event_id, c.group_id, c.user_id,
+    c.occurrence_key, c.fire_at, c.event_version, c.occurrence_version,
+    c.setting_version, c.attempts, c.lease_until
+  from claimed c
+  order by c.fire_at, c.id;
+  update private.event_reminder_jobs j
+  set status = 'dead_letter', dead_letter_at = p_now,
+      last_error_code = 'retry_exhausted', updated_at = p_now
+  where j.status in ('pending', 'retry')
+    and j.attempts >= 8 and j.next_attempt_at <= p_now;
+end;
+$$;
+
+create or replace function private.complete_event_reminder_job(
+  p_job_id uuid,
+  p_worker_id uuid,
+  p_outcome text,
+  p_error_code text default null
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_job private.event_reminder_jobs;
+  v_status text;
+  v_next_attempt timestamptz;
+begin
+  if p_job_id is null or p_worker_id is null
+     or p_outcome is null or p_outcome not in ('sent', 'retryable', 'permanent')
+     or (p_error_code is not null and p_error_code !~ '^[a-z0-9_.:-]{1,64}$') then
+    raise exception using errcode = '22023', message = 'invalid job completion';
+  end if;
+  select j.* into v_job from private.event_reminder_jobs j
+  where j.id = p_job_id for update;
+  if not found or v_job.status <> 'processing'
+     or v_job.lease_owner <> p_worker_id
+     or v_job.lease_until < pg_catalog.clock_timestamp() then
+    raise exception using errcode = '40001', message = 'job lease is stale';
+  end if;
+  if p_outcome = 'sent' then
+    v_status := 'sent';
+    update private.event_reminder_jobs j
+    set status = 'sent', sent_at = pg_catalog.clock_timestamp(),
+        lease_owner = null, lease_until = null, updated_at = pg_catalog.clock_timestamp()
+    where j.id = p_job_id;
+  elsif p_outcome = 'permanent' or v_job.attempts >= 8 then
+    v_status := 'dead_letter';
+    update private.event_reminder_jobs j
+    set status = 'dead_letter', dead_letter_at = pg_catalog.clock_timestamp(),
+        last_error_code = coalesce(p_error_code, 'permanent'),
+        lease_owner = null, lease_until = null, updated_at = pg_catalog.clock_timestamp()
+    where j.id = p_job_id;
+  else
+    v_next_attempt := pg_catalog.clock_timestamp()
+      + least(3600, 30 * (2 ^ greatest(v_job.attempts - 1, 0))) * interval '1 second';
+    v_status := 'retry';
+    update private.event_reminder_jobs j
+    set status = 'retry', next_attempt_at = v_next_attempt,
+        last_error_code = coalesce(p_error_code, 'retryable'),
+        lease_owner = null, lease_until = null, updated_at = pg_catalog.clock_timestamp()
+    where j.id = p_job_id;
+  end if;
+  return pg_catalog.jsonb_build_object(
+    'committed', true, 'job_id', p_job_id, 'status', v_status,
+    'attempts', v_job.attempts, 'next_attempt_at', v_next_attempt,
+    'error_code', p_error_code
+  );
+end;
+$$;
+
+create or replace function private.load_event_reminder_payload(
+  p_job_id uuid,
+  p_worker_id uuid
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_job private.event_reminder_jobs;
+  v_event public.events;
+  v_occurrence record;
+  v_index bigint;
+  v_tokens jsonb;
+begin
+  if p_job_id is null or p_worker_id is null then
+    raise exception using errcode = '22023', message = 'job payload values are invalid';
+  end if;
+  select j.* into v_job from private.event_reminder_jobs j
+  where j.id = p_job_id for share;
+  if not found or v_job.status <> 'processing' or v_job.lease_owner <> p_worker_id
+     or v_job.lease_until < pg_catalog.clock_timestamp() then
+    raise exception using errcode = '40001', message = 'job lease is stale';
+  end if;
+  select e.* into v_event from public.events e where e.id = v_job.event_id;
+  if not found or v_event.deleted_at is not null or v_event.version <> v_job.event_version
+     or v_event.group_id <> v_job.group_id then
+    return pg_catalog.jsonb_build_object(
+      'valid', false, 'job_id', p_job_id, 'reason', 'stale'
+    );
+  end if;
+  if not exists (
+    select 1 from public.groups g where g.id = v_event.group_id and g.deleted_at is null
+  ) or not exists (
+    select 1 from public.event_members em
+    join public.memberships m on m.group_id = v_event.group_id and m.user_id = v_job.user_id
+      and m.is_active and m.removed_at is null
+    where em.event_id = v_event.id and em.user_id = v_job.user_id
+  ) or not exists (
+    select 1 from public.notification_preferences np
+    where np.user_id = v_job.user_id and np.push_enabled
+  ) or not exists (
+    select 1 from public.event_reminder_settings s
+    where s.id = v_job.setting_id and s.user_id = v_job.user_id
+      and s.event_id = v_job.event_id and s.channel = 'push'
+      and s.enabled and s.version = v_job.setting_version
+  ) then
+    return pg_catalog.jsonb_build_object(
+      'valid', false, 'job_id', p_job_id, 'reason', 'stale'
+    );
+  end if;
+  if v_job.occurrence_key = 'single' then
+    v_index := -1;
+  else
+    begin
+      v_index := pg_catalog.substr(v_job.occurrence_key, 2)::bigint;
+      if public.recurrence_occurrence_key(v_index) <> v_job.occurrence_key then
+        raise exception using errcode = '22023', message = 'occurrence key is invalid';
+      end if;
+    exception when others then
+      return pg_catalog.jsonb_build_object(
+        'valid', false, 'job_id', p_job_id, 'reason', 'stale'
+      );
+    end;
+  end if;
+  select * into v_occurrence
+  from public._event_occurrence_at_index(v_event.id, v_index);
+  if not found or v_occurrence.occurrence_key <> v_job.occurrence_key
+     or v_occurrence.occurrence_version <> v_job.occurrence_version then
+    return pg_catalog.jsonb_build_object(
+      'valid', false, 'job_id', p_job_id, 'reason', 'stale'
+    );
+  end if;
+  select coalesce(
+    pg_catalog.jsonb_agg(
+      pg_catalog.jsonb_build_object(
+        'id', d.id, 'provider', d.provider, 'platform', d.platform,
+        'environment', d.environment, 'token', d.token
+      ) order by d.id
+    ), '[]'::jsonb
+  ) into v_tokens
+  from private.push_device_tokens d
+  where d.user_id = v_job.user_id and d.is_active;
+  if pg_catalog.jsonb_array_length(v_tokens) = 0 then
+    return pg_catalog.jsonb_build_object(
+      'valid', false, 'job_id', p_job_id, 'reason', 'no_device'
+    );
+  end if;
+  return pg_catalog.jsonb_build_object(
+    'valid', true,
+    'job_id', p_job_id,
+    'event_id', v_event.id,
+    'group_id', v_event.group_id,
+    'user_id', v_job.user_id,
+    'occurrence_key', v_job.occurrence_key,
+    'fire_at', v_job.fire_at,
+    'title', v_occurrence.title,
+    'description', v_occurrence.description,
+    'starts_at', v_occurrence.starts_at,
+    'ends_at', v_occurrence.ends_at,
+    'timezone', v_occurrence.timezone,
+    'is_all_day', v_occurrence.is_all_day,
+    'tokens', v_tokens
+  );
+end;
+$$;
+
+-- Lifecycle hooks deliberately do bounded cancellation/queue writes only.  They
+-- never expand recurrence rows while an event, group, or membership lock is
+-- held; the worker performs that work through the private reconcile functions.
+create or replace function private.reminder_events_after_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if new.deleted_at is not null then
+    -- Event deletion is terminal (the event integrity trigger rejects
+    -- restoration).  Remove the series-wide intent itself; the composite
+    -- participant FK and setting_id FK cascade all private jobs, including
+    -- rows that were already terminal receipts.  Keep the bounded cancellation
+    -- first so nonterminal rows are explicitly invalidated before the cascade.
+    perform private.cancel_event_reminder_jobs(new.id, 'event_deleted');
+    delete from public.event_reminder_settings
+    where event_id = new.id;
+  else
+    if tg_op = 'UPDATE' and old.version is distinct from new.version then
+      perform private.cancel_event_reminder_jobs(new.id, 'rescheduled');
+    end if;
+    perform private.enqueue_event_reminder_reconcile(new.id, 'event_changed');
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function private.reminder_settings_after_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  perform private.enqueue_event_reminder_reconcile(new.event_id, 'setting_changed');
+  return new;
+end;
+$$;
+
+create or replace function private.reminder_groups_after_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_event_id uuid;
+begin
+  if old.deleted_at is null and new.deleted_at is not null then
+    perform private.cancel_group_event_reminder_jobs(new.id, 'group_archived');
+  elsif old.deleted_at is not null and new.deleted_at is null then
+    for v_event_id in
+      select e.id
+      from public.events e
+      where e.group_id = new.id and e.deleted_at is null
+      order by e.id
+    loop
+      perform private.enqueue_event_reminder_reconcile(v_event_id, 'event_changed');
+    end loop;
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function private.reminder_memberships_after_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if tg_op = 'DELETE' then
+    perform private.cancel_group_user_event_reminder_jobs(
+      old.group_id, old.user_id, 'membership_removed'
+    );
+    return old;
+  elsif old.is_active and old.removed_at is null
+        and (not new.is_active or new.removed_at is not null) then
+    perform private.cancel_group_user_event_reminder_jobs(
+      new.group_id, new.user_id, 'membership_removed'
+    );
+  elsif (not old.is_active or old.removed_at is not null)
+        and new.is_active and new.removed_at is null then
+    perform private.enqueue_user_event_reminder_reconcile(new.user_id, 'participant_changed');
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function private.reminder_preferences_after_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if new.push_enabled then
+    perform private.enqueue_user_event_reminder_reconcile(new.user_id, 'provider_enabled');
+  else
+    perform private.cancel_user_event_reminder_jobs(new.user_id, 'setting_disabled');
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists reminders_events_after_change on public.events;
+create trigger reminders_events_after_change
+after insert or update on public.events
+for each row execute function private.reminder_events_after_change();
+
+drop trigger if exists reminders_settings_after_change on public.event_reminder_settings;
+create trigger reminders_settings_after_change
+after insert or update on public.event_reminder_settings
+for each row execute function private.reminder_settings_after_change();
+
+drop trigger if exists reminders_groups_after_change on public.groups;
+create trigger reminders_groups_after_change
+after update on public.groups
+for each row execute function private.reminder_groups_after_change();
+
+drop trigger if exists reminders_memberships_after_change on public.memberships;
+create trigger reminders_memberships_after_change
+after update or delete on public.memberships
+for each row execute function private.reminder_memberships_after_change();
+
+drop trigger if exists reminders_preferences_after_change on public.notification_preferences;
+create trigger reminders_preferences_after_change
+after insert or update on public.notification_preferences
+for each row execute function private.reminder_preferences_after_change();
+
+-- The Data API never receives a private-schema grant.  Edge Functions call only
+-- these narrow service-role wrappers.  The wrapper functions intentionally
+-- return JSON envelopes so a worker can treat each call as one short database
+-- transaction and perform provider I/O after the transaction has committed.
+create or replace function public.worker_push_capability()
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_provider text := 'none';
+  v_enabled boolean := false;
+begin
+  select c.provider, c.enabled into v_provider, v_enabled
+  from private.push_provider_capability c where c.singleton;
+  return pg_catalog.jsonb_build_object(
+    'committed', true,
+    'provider', coalesce(v_provider, 'none'),
+    'enabled', coalesce(v_enabled, false),
+    'capability', case when coalesce(v_enabled, false) and coalesce(v_provider, 'none') <> 'none'
+      then 'push_configured' else 'push_unconfigured' end
+  );
+end;
+$$;
+
+create or replace function public.worker_claim_reconcile_requests(
+  p_worker_id uuid,
+  p_limit integer default 50,
+  p_now timestamptz default pg_catalog.clock_timestamp(),
+  p_lease_seconds integer default 300
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_requests jsonb;
+begin
+  select coalesce(
+    pg_catalog.jsonb_agg(
+      pg_catalog.jsonb_build_object(
+        'event_id', q.event_id, 'group_id', q.group_id,
+        'reason', q.reason, 'attempts', q.attempts,
+        'lease_until', q.lease_until
+      ) order by q.event_id
+    ), '[]'::jsonb
+  ) into v_requests
+  from private.claim_event_reminder_reconcile_requests(
+    p_worker_id, p_limit, p_now, p_lease_seconds
+  ) q;
+  return pg_catalog.jsonb_build_object(
+    'committed', true, 'requests', v_requests,
+    'count', pg_catalog.jsonb_array_length(v_requests)
+  );
+end;
+$$;
+
+create or replace function public.worker_prepare_event_reminder_jobs(
+  p_event_id uuid,
+  p_now timestamptz default pg_catalog.clock_timestamp(),
+  p_horizon_days integer default 366
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+begin
+  return private.reconcile_event_reminders(p_event_id, p_now, p_horizon_days);
+end;
+$$;
+
+create or replace function public.worker_complete_reconcile_request(
+  p_event_id uuid,
+  p_worker_id uuid,
+  p_outcome text,
+  p_error_code text default null
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+begin
+  return private.complete_event_reminder_reconcile_request(
+    p_event_id, p_worker_id, p_outcome, p_error_code
+  );
+end;
+$$;
+
+create or replace function public.worker_claim_event_reminder_jobs(
+  p_worker_id uuid,
+  p_limit integer default 100,
+  p_now timestamptz default pg_catalog.clock_timestamp(),
+  p_lease_seconds integer default 300
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_jobs jsonb;
+begin
+  select coalesce(
+    pg_catalog.jsonb_agg(
+      pg_catalog.jsonb_build_object(
+        'id', j.id, 'setting_id', j.setting_id, 'event_id', j.event_id,
+        'group_id', j.group_id, 'user_id', j.user_id,
+        'occurrence_key', j.occurrence_key, 'fire_at', j.fire_at,
+        'event_version', j.event_version,
+        'occurrence_version', j.occurrence_version,
+        'setting_version', j.setting_version, 'attempts', j.attempts,
+        'lease_until', j.lease_until
+      ) order by j.fire_at, j.id
+    ), '[]'::jsonb
+  ) into v_jobs
+  from private.claim_event_reminder_jobs(
+    p_worker_id, p_limit, p_now, p_lease_seconds
+  ) j;
+  return pg_catalog.jsonb_build_object(
+    'committed', true, 'jobs', v_jobs,
+    'count', pg_catalog.jsonb_array_length(v_jobs), 'capability', 'push_configured'
+  );
+end;
+$$;
+
+create or replace function public.worker_load_event_reminder_payload(
+  p_job_id uuid,
+  p_worker_id uuid
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  return private.load_event_reminder_payload(p_job_id, p_worker_id);
+end;
+$$;
+
+create or replace function public.worker_complete_event_reminder_job(
+  p_job_id uuid,
+  p_worker_id uuid,
+  p_outcome text,
+  p_error_code text default null
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+begin
+  return private.complete_event_reminder_job(
+    p_job_id, p_worker_id, p_outcome, p_error_code
+  );
+end;
+$$;
+
+-- Deployment can set a capability independently of provider credentials.  The
+-- worker still checks its Edge secrets before claiming, so this switch cannot
+-- accidentally make an unconfigured deployment send or log bearer values.
+create or replace function public.worker_set_push_capability(
+  p_provider text,
+  p_enabled boolean
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_enabled boolean := coalesce(p_enabled, false);
+  v_count integer := 0;
+  v_cancelled integer := 0;
+begin
+  if p_provider is null or p_provider not in ('none', 'apns', 'fcm') then
+    raise exception using errcode = '22023', message = 'invalid push provider';
+  end if;
+  if p_provider = 'none' then
+    v_enabled := false;
+  end if;
+  insert into private.push_provider_capability(singleton, provider, enabled, updated_at)
+  values (true, p_provider, v_enabled, pg_catalog.clock_timestamp())
+  on conflict (singleton) do update set
+    provider = excluded.provider, enabled = excluded.enabled,
+    updated_at = pg_catalog.clock_timestamp();
+  if v_enabled then
+    v_count := private.enqueue_user_event_reminder_reconcile(
+      null, 'provider_enabled'
+    );
+  else
+    v_cancelled := private.cancel_event_reminder_jobs(
+      null, 'provider_unconfigured', null, null
+    );
+  end if;
+  return pg_catalog.jsonb_build_object(
+    'committed', true, 'provider', p_provider, 'enabled', v_enabled,
+    'queued_reconcile', v_count, 'cancelled_jobs', v_cancelled,
+    'capability', case when v_enabled then 'push_configured' else 'push_unconfigured' end
+  );
+end;
+$$;
+
+-- `enqueue_user_event_reminder_reconcile` is user-scoped.  A null user is the
+-- intentional operator path for capability changes; expand it here without
+-- touching recurrence rows so the function remains bounded to queue rows.
+create or replace function private.enqueue_user_event_reminder_reconcile(
+  p_user_id uuid,
+  p_reason text
+)
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_count integer := 0;
+  v_event_id uuid;
+begin
+  if p_reason is null or p_reason not in ('device_registered', 'provider_enabled', 'participant_changed') then
+    raise exception using errcode = '22023', message = 'invalid user reconcile reason';
+  end if;
+  for v_event_id in
+    select distinct e.id
+    from public.events e
+    join public.groups g on g.id = e.group_id and g.deleted_at is null
+    join public.event_members em on em.event_id = e.id
+    join public.memberships m on m.group_id = e.group_id and m.user_id = em.user_id
+      and m.is_active and m.removed_at is null
+    join public.event_reminder_settings s on s.event_id = e.id
+      and s.user_id = em.user_id and s.channel = 'push' and s.enabled
+    where e.deleted_at is null
+      and (p_user_id is null or em.user_id = p_user_id)
+    order by e.id
+  loop
+    perform private.enqueue_event_reminder_reconcile(v_event_id, p_reason);
+    v_count := v_count + 1;
+  end loop;
+  return v_count;
+end;
+$$;
+
+-- Public client RPCs are the only authenticated entry points.  Revoke the
+-- default PUBLIC execute privilege before granting the exact authenticated
+-- set; worker wrappers are service_role-only when that role exists.
+revoke all on function public.get_notification_preferences() from public, anon, authenticated;
+revoke all on function public.set_notification_preferences(boolean, boolean, integer) from public, anon, authenticated;
+revoke all on function public.get_event_reminder(uuid) from public, anon, authenticated;
+revoke all on function public.list_event_reminders(uuid) from public, anon, authenticated;
+revoke all on function public.set_event_reminder(uuid, text, boolean, integer, smallint, integer, integer) from public, anon, authenticated;
+revoke all on function public.reminder_candidates_for_user(timestamptz, timestamptz, integer, text) from public, anon, authenticated;
+revoke all on function public.register_push_device(text, text, text, text, text) from public, anon, authenticated;
+revoke all on function public.revoke_push_device(uuid) from public, anon, authenticated;
+grant execute on function public.get_notification_preferences() to authenticated;
+grant execute on function public.set_notification_preferences(boolean, boolean, integer) to authenticated;
+grant execute on function public.get_event_reminder(uuid) to authenticated;
+grant execute on function public.list_event_reminders(uuid) to authenticated;
+grant execute on function public.set_event_reminder(uuid, text, boolean, integer, smallint, integer, integer) to authenticated;
+grant execute on function public.reminder_candidates_for_user(timestamptz, timestamptz, integer, text) to authenticated;
+grant execute on function public.register_push_device(text, text, text, text, text) to authenticated;
+grant execute on function public.revoke_push_device(uuid) to authenticated;
+
+revoke all on function public.worker_push_capability() from public, anon, authenticated;
+revoke all on function public.worker_claim_reconcile_requests(uuid, integer, timestamptz, integer) from public, anon, authenticated;
+revoke all on function public.worker_prepare_event_reminder_jobs(uuid, timestamptz, integer) from public, anon, authenticated;
+revoke all on function public.worker_complete_reconcile_request(uuid, uuid, text, text) from public, anon, authenticated;
+revoke all on function public.worker_claim_event_reminder_jobs(uuid, integer, timestamptz, integer) from public, anon, authenticated;
+revoke all on function public.worker_load_event_reminder_payload(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.worker_complete_event_reminder_job(uuid, uuid, text, text) from public, anon, authenticated;
+revoke all on function public.worker_set_push_capability(text, boolean) from public, anon, authenticated;
+
+revoke all on function private.enqueue_event_reminder_reconcile(uuid, text) from public, anon, authenticated;
+revoke all on function private.cancel_event_reminder_jobs(uuid, text, text, uuid) from public, anon, authenticated;
+revoke all on function private.cancel_group_event_reminder_jobs(uuid, text) from public, anon, authenticated;
+revoke all on function private.cancel_user_event_reminder_jobs(uuid, text) from public, anon, authenticated;
+revoke all on function private.cancel_group_user_event_reminder_jobs(uuid, uuid, text) from public, anon, authenticated;
+revoke all on function private.enqueue_user_event_reminder_reconcile(uuid, text) from public, anon, authenticated;
+revoke all on function private.wall_time_to_instant(timestamp, text) from public, anon, authenticated;
+revoke all on function private.reminder_fire_at(timestamptz, boolean, date, text, integer, smallint) from public, anon, authenticated;
+revoke all on function private.prepare_reminder_candidates(uuid, timestamptz, timestamptz, text, timestamptz, uuid, text, integer, uuid) from public, anon, authenticated;
+revoke all on function private.reconcile_event_reminders(uuid, timestamptz, integer) from public, anon, authenticated;
+revoke all on function private.reconcile_all_event_reminders(timestamptz, integer) from public, anon, authenticated;
+revoke all on function private.claim_event_reminder_reconcile_requests(uuid, integer, timestamptz, integer) from public, anon, authenticated;
+revoke all on function private.complete_event_reminder_reconcile_request(uuid, uuid, text, text) from public, anon, authenticated;
+revoke all on function private.claim_event_reminder_jobs(uuid, integer, timestamptz, integer) from public, anon, authenticated;
+revoke all on function private.complete_event_reminder_job(uuid, uuid, text, text) from public, anon, authenticated;
+revoke all on function private.load_event_reminder_payload(uuid, uuid) from public, anon, authenticated;
+revoke all on function private.reminder_events_after_change() from public, anon, authenticated;
+revoke all on function private.reminder_settings_after_change() from public, anon, authenticated;
+revoke all on function private.reminder_groups_after_change() from public, anon, authenticated;
+revoke all on function private.reminder_memberships_after_change() from public, anon, authenticated;
+revoke all on function private.reminder_preferences_after_change() from public, anon, authenticated;
+
+do $$
+begin
+  if exists (select 1 from pg_catalog.pg_roles where rolname = 'service_role') then
+    execute 'grant execute on function public.worker_push_capability() to service_role';
+    execute 'grant execute on function public.worker_claim_reconcile_requests(uuid, integer, timestamptz, integer) to service_role';
+    execute 'grant execute on function public.worker_prepare_event_reminder_jobs(uuid, timestamptz, integer) to service_role';
+    execute 'grant execute on function public.worker_complete_reconcile_request(uuid, uuid, text, text) to service_role';
+    execute 'grant execute on function public.worker_claim_event_reminder_jobs(uuid, integer, timestamptz, integer) to service_role';
+    execute 'grant execute on function public.worker_load_event_reminder_payload(uuid, uuid) to service_role';
+    execute 'grant execute on function public.worker_complete_event_reminder_job(uuid, uuid, text, text) to service_role';
+    execute 'grant execute on function public.worker_set_push_capability(text, boolean) to service_role';
+  end if;
+end;
+$$;
+
+commit;

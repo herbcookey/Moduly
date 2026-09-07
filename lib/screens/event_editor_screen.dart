@@ -8,6 +8,9 @@ import 'package:go_router/go_router.dart';
 import '../app.dart';
 import '../core/timezone_utils.dart';
 import '../models/app_models.dart';
+import '../models/notification_models.dart';
+import '../state/notification_state.dart';
+import '../widgets/event_notification_controls.dart';
 import 'widgets/recurrence_controls.dart';
 import '../state/app_state.dart';
 
@@ -50,6 +53,24 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   bool _eventLookupSettled = false;
   bool _eventLookupRetryable = false;
   String? _eventLookupError;
+  bool _notificationEnabled = false;
+  NotificationChannel _notificationChannel = NotificationChannel.local;
+  int _timedLeadSeconds = 900;
+  int _allDayDaysBefore = 0;
+  bool _notificationApplyToWholeSeries = true;
+  bool _notificationDraftDirty = false;
+  String? _notificationDraftIdentity;
+  int? _notificationDraftVersion;
+  // Remote event reminder preferences are loaded lazily because the remote
+  // account projection intentionally does not expose every event's settings.
+  // Keep one attempt per authenticated session/logical event and never start
+  // the request from build itself; a post-frame callback avoids mutating the
+  // controller while Flutter is walking the widget tree.
+  String? _notificationPreferenceLoadKey;
+  String? _notificationPreferenceLoadedKey;
+  String? _notificationPreferenceFailedKey;
+  bool _notificationPreferenceLoadInFlight = false;
+  int _notificationPreferenceLoadGeneration = 0;
   // Incremented whenever the route identity changes or a new detail request
   // starts.  A completed lookup must match this generation as well as the
   // event/occurrence identity before it may seed the editor.
@@ -280,6 +301,185 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     }
   }
 
+  EventNotificationPreference? _notificationPreferenceFor(
+    NotificationController notifications,
+    PlannerEvent event,
+  ) {
+    // A cached row can outlive membership changes made by another actor. Do
+    // not surface (or save against) that stale row while the active account
+    // is no longer a member of the authoritative event projection.
+    final activeUserId = notifications.userId;
+    if (activeUserId == null ||
+        activeUserId.isEmpty ||
+        activeUserId != activeUserId.trim() ||
+        !event.memberIds.contains(activeUserId)) {
+      return null;
+    }
+    final candidates = notifications.eventPreferences
+        .where(
+          (value) =>
+              value.eventId == event.seriesId || value.eventId == event.id,
+        )
+        .toList(growable: false);
+    if (candidates.isEmpty) return null;
+    final local = candidates.where(
+      (value) => value.channel == NotificationChannel.local,
+    );
+    final push = candidates.where(
+      (value) => value.channel == NotificationChannel.push,
+    );
+    EventNotificationPreference? newest(
+      Iterable<EventNotificationPreference> values,
+    ) {
+      final sorted = values.toList()
+        ..sort((left, right) {
+          final version = right.version.compareTo(left.version);
+          return version != 0 ? version : left.id.compareTo(right.id);
+        });
+      return sorted.firstOrNull;
+    }
+
+    return newest(local) ?? newest(push);
+  }
+
+  void _syncNotificationDraft(
+    PlannerEvent event,
+    NotificationController notifications,
+  ) {
+    if (_notificationDraftDirty) return;
+    final identity = event.seriesId;
+    final preference = _notificationPreferenceFor(notifications, event);
+    final version = preference?.version ?? 0;
+    if (_notificationDraftIdentity == identity &&
+        _notificationDraftVersion == version) {
+      return;
+    }
+    _notificationDraftIdentity = identity;
+    _notificationDraftVersion = version;
+    _notificationEnabled = preference?.enabled ?? false;
+    _notificationChannel = preference?.channel ?? NotificationChannel.local;
+    _timedLeadSeconds = preference?.timedLeadSeconds ?? 900;
+    _allDayDaysBefore = preference?.allDayDaysBefore ?? 0;
+    _notificationApplyToWholeSeries = true;
+  }
+
+  void _resetNotificationDraft() {
+    _notificationEnabled = false;
+    _notificationChannel = NotificationChannel.local;
+    _timedLeadSeconds = 900;
+    _allDayDaysBefore = 0;
+    _notificationApplyToWholeSeries = true;
+    _notificationDraftDirty = false;
+    _notificationDraftIdentity = null;
+    _notificationDraftVersion = null;
+    _notificationPreferenceLoadGeneration++;
+    _notificationPreferenceLoadKey = null;
+    _notificationPreferenceLoadedKey = null;
+    _notificationPreferenceFailedKey = null;
+    _notificationPreferenceLoadInFlight = false;
+  }
+
+  /// Starts a single authenticated read for the logical event's series-wide
+  /// reminder settings. The controller updates its event preference snapshot
+  /// and notifies listeners when the read completes; the normal build pass
+  /// then syncs the clean draft. Dirty controls are intentionally left alone,
+  /// while the loaded row remains available to the save path for its version.
+  void _maybeLoadNotificationPreferences(
+    PlannerEvent event,
+    NotificationController notifications,
+    PlannerController planner,
+  ) {
+    final eventId = event.seriesId.trim();
+    final activeUserId = notifications.userId;
+    final plannerUserId = planner.user?.id;
+    if (eventId.isEmpty ||
+        activeUserId == null ||
+        activeUserId.isEmpty ||
+        activeUserId != activeUserId.trim() ||
+        activeUserId != plannerUserId ||
+        !event.memberIds.contains(activeUserId)) {
+      return;
+    }
+    final key = '$activeUserId:$eventId';
+    if (_notificationPreferenceLoadedKey == key ||
+        _notificationPreferenceFailedKey == key ||
+        (_notificationPreferenceLoadInFlight &&
+            _notificationPreferenceLoadKey == key)) {
+      return;
+    }
+    _notificationPreferenceLoadKey = key;
+    _notificationPreferenceLoadInFlight = true;
+    final generation = ++_notificationPreferenceLoadGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          generation != _notificationPreferenceLoadGeneration ||
+          _notificationPreferenceLoadKey != key) {
+        return;
+      }
+      final latestPlanner = ref.read(plannerControllerProvider);
+      final latestNotifications = ref.read(notificationControllerProvider);
+      final latestEvent = _existing(latestPlanner);
+      if (latestPlanner.user?.id != activeUserId ||
+          latestNotifications.userId != activeUserId ||
+          latestEvent == null ||
+          latestEvent.seriesId != eventId ||
+          !latestEvent.memberIds.contains(activeUserId)) {
+        _notificationPreferenceLoadInFlight = false;
+        return;
+      }
+      unawaited(
+        latestNotifications
+            .loadEventPreferences(eventId)
+            .then((_) {
+              if (!mounted ||
+                  generation != _notificationPreferenceLoadGeneration ||
+                  _notificationPreferenceLoadKey != key) {
+                return;
+              }
+              _notificationPreferenceLoadInFlight = false;
+              _notificationPreferenceLoadedKey = key;
+              _notificationPreferenceFailedKey = null;
+              // loadEventPreferences notifies on success. This setState also
+              // covers adapters that return an unchanged empty snapshot.
+              if (mounted) setState(() {});
+            })
+            .catchError((Object _) {
+              if (!mounted ||
+                  generation != _notificationPreferenceLoadGeneration ||
+                  _notificationPreferenceLoadKey != key) {
+                return;
+              }
+              _notificationPreferenceLoadInFlight = false;
+              // Treat a failed read as an attempted one so a rebuild cannot spin
+              // an unbounded request loop. Core keeps the generic error message;
+              // no local draft or cached preference is cleared here.
+              _notificationPreferenceFailedKey = key;
+              if (mounted) setState(() {});
+            }),
+      );
+    });
+  }
+
+  void _retryNotificationPreferences(
+    PlannerEvent event,
+    NotificationController notifications,
+    PlannerController planner,
+  ) {
+    if (!mounted) return;
+    final userId = notifications.userId;
+    final eventId = event.seriesId.trim();
+    if (userId == null || userId.isEmpty || eventId.isEmpty) return;
+    final key = '$userId:$eventId';
+    if (_notificationPreferenceFailedKey != key) return;
+    setState(() {
+      _notificationPreferenceFailedKey = null;
+      _notificationPreferenceLoadedKey = null;
+      _notificationPreferenceLoadKey = null;
+      _notificationPreferenceLoadInFlight = false;
+    });
+    _maybeLoadNotificationPreferences(event, notifications, planner);
+  }
+
   void _seedExistingEvent(PlannerEvent event) {
     _applyEventToBody(event);
     _selectedMemberIds
@@ -342,6 +542,7 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     _eventLookupSettled = false;
     _eventLookupRetryable = false;
     _eventLookupError = null;
+    _resetNotificationDraft();
 
     final existing = _existing(controller);
     if (existing != null) {
@@ -477,6 +678,7 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
 
   Future<void> _save() async {
     final controller = ref.read(plannerControllerProvider);
+    final notifications = ref.read(notificationControllerProvider);
     final currentUserId = controller.user?.id;
     final existing = _existing(controller);
     if (widget.eventId != null && existing == null) return;
@@ -484,6 +686,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     final canManageParticipants = existing == null
         ? currentUserId != null && controller.selectedGroup != null
         : controller.canEditEventParticipants(existing);
+    final canEditReminder =
+        currentUserId != null &&
+        (existing == null || existing.memberIds.contains(currentUserId));
     final recurringEvent = existing?.recurrenceRule != null;
     final recurringOccurrence =
         recurringEvent && existing?.occurrenceKey != 'single';
@@ -509,10 +714,32 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       );
       return;
     }
-    if (!canEditBody && !canEditParticipants) {
+    if (!canEditBody && !canEditParticipants && !canEditReminder) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('이 일정은 작성자만 수정할 수 있어요.')));
+      return;
+    }
+    if (existing != null &&
+        !canEditBody &&
+        !canEditParticipants &&
+        canEditReminder) {
+      try {
+        await _saveNotificationPreference(
+          notifications,
+          event: existing,
+          eventVersion: existing.version,
+          requireLoadedPreference: true,
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('알림 설정을 저장했어요.')));
+          context.go('/home');
+        }
+      } catch (_) {
+        if (mounted) setState(() {});
+      }
       return;
     }
     if (canEditBody && !(_formKey.currentState?.validate() ?? false)) return;
@@ -526,6 +753,7 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       _recurrenceRule = recurrence;
     }
     if (existing != null && !canEditBody && canEditParticipants) {
+      var participantCommitted = false;
       try {
         final participantDraft = existing.copyWith(
           version: _participantDraftBaseVersion ?? existing.version,
@@ -534,6 +762,44 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
           participantDraft,
           _selectedMemberIds.toList(growable: false),
         );
+        participantCommitted = true;
+        // Replacing participants increments the event optimistic-lock version
+        // (unless it is an idempotent no-op). Resolve the controller's
+        // authoritative projection after the await; sending the pre-write
+        // [existing.version] to the reminder RPC would deterministically
+        // trigger a stale-version conflict or, with a permissive adapter,
+        // attach a reminder to an obsolete event revision.
+        final refreshed = _findUpdatedEvent(controller, existing);
+        if (refreshed != null &&
+            currentUserId != null &&
+            !refreshed.memberIds.contains(currentUserId)) {
+          // Membership commits can remove the actor while this screen still
+          // holds a dirty reminder draft.  The database trigger owns remote
+          // cancellation; never follow the membership write with a reminder
+          // RPC that would now fail authorization.
+          await _clearNotificationAfterMembershipRemoval(
+            notifications,
+            refreshed,
+          );
+          _showMembershipNotificationDisabled();
+          return;
+        }
+        if (_notificationDraftDirty) {
+          final expectedVersion =
+              _sameMemberIdSet(existing.memberIds, _selectedMemberIds)
+              ? existing.version
+              : existing.version + 1;
+          if (refreshed == null || refreshed.version != expectedVersion) {
+            _showPartialNotificationWarning();
+            return;
+          }
+          await _saveNotificationPreference(
+            notifications,
+            event: refreshed,
+            eventVersion: refreshed.version,
+            requireLoadedPreference: true,
+          );
+        }
         if (mounted) {
           ScaffoldMessenger.of(
             context,
@@ -541,7 +807,12 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
           context.go('/home');
         }
       } catch (_) {
-        if (mounted) setState(() {});
+        if (mounted) {
+          if (participantCommitted && _notificationDraftDirty) {
+            _showPartialNotificationWarning();
+          }
+          setState(() {});
+        }
       }
       return;
     }
@@ -630,16 +901,57 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       );
       return;
     }
+    var reminderDisabledByMembership = false;
     try {
       await controller.saveEvent(
         existing: existingDraft,
         draft: draft,
         scope: scope,
       );
+      final savedEvent = existing == null
+          ? _findCreatedEvent(controller, draft)
+          : _findUpdatedEvent(controller, existing);
+      if (savedEvent != null) {
+        if (currentUserId != null &&
+            !savedEvent.memberIds.contains(currentUserId)) {
+          await _clearNotificationAfterMembershipRemoval(
+            notifications,
+            savedEvent,
+          );
+          reminderDisabledByMembership = true;
+        } else {
+          try {
+            await _saveNotificationPreference(
+              notifications,
+              event: savedEvent,
+              eventVersion: savedEvent.version,
+              requireLoadedPreference: existing != null,
+            );
+          } catch (_) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('일정은 저장했지만 알림 설정을 저장하지 못했어요.')),
+              );
+            }
+          }
+        }
+      } else if (_notificationDraftDirty) {
+        // The event write committed, but the refreshed projection is not
+        // authoritative enough to carry an event-version-bound reminder RPC.
+        // Keep the notification draft unsaved and explain the partial result
+        // without exposing transport details.
+        _showPartialNotificationWarning();
+      }
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('일정을 저장했어요.')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              reminderDisabledByMembership
+                  ? '참여에서 제외되어 알림도 해제됐어요.'
+                  : '일정을 저장했어요.',
+            ),
+          ),
+        );
         context.go('/home');
       }
     } catch (_) {
@@ -669,6 +981,139 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
         const SnackBar(content: Text('참여자 변경은 전체 일정에서만 적용돼요. 변경을 되돌렸어요.')),
       );
     }
+  }
+
+  Future<void> _saveNotificationPreference(
+    NotificationController notifications, {
+    required PlannerEvent event,
+    required int eventVersion,
+    bool requireLoadedPreference = false,
+  }) async {
+    if (!_notificationDraftDirty) return;
+    if (event.recurrenceRule != null && !_notificationApplyToWholeSeries) {
+      throw const FormatException('반복 일정 알림은 전체 일정에만 적용돼요.');
+    }
+    final userId =
+        notifications.userId ?? ref.read(plannerControllerProvider).user?.id;
+    if (userId == null || userId.isEmpty) {
+      throw const FormatException('로그인 세션을 확인해 주세요.');
+    }
+    if (requireLoadedPreference &&
+        _notificationPreferenceLoadedKey != '$userId:${event.seriesId}') {
+      throw const FormatException('최신 알림 설정을 불러온 뒤 다시 시도해 주세요.');
+    }
+    final previous = _notificationPreferenceFor(notifications, event);
+    final selected = EventNotificationPreference(
+      id: previous?.channel == _notificationChannel
+          ? previous!.id
+          : '${event.seriesId}:${_notificationChannel.wireName}',
+      userId: userId,
+      eventId: event.seriesId,
+      channel: _notificationChannel,
+      enabled: _notificationEnabled,
+      timedLeadSeconds: _timedLeadSeconds,
+      allDayDaysBefore: _allDayDaysBefore,
+      version: previous?.channel == _notificationChannel
+          ? previous!.version
+          : 0,
+      eventVersion: eventVersion,
+    );
+    if (previous != null && previous.channel != _notificationChannel) {
+      await notifications.saveEventPreference(
+        previous.copyWith(enabled: false, eventVersion: eventVersion),
+        expectedVersion: previous.version,
+      );
+    }
+    await notifications.saveEventPreference(
+      selected,
+      expectedVersion: selected.version,
+    );
+    _notificationDraftDirty = false;
+    _notificationDraftIdentity = event.seriesId;
+    _notificationDraftVersion = selected.version;
+  }
+
+  PlannerEvent? _findCreatedEvent(
+    PlannerController controller,
+    EventDraft draft,
+  ) {
+    final groupId = controller.selectedGroup?.id;
+    final ownerId = controller.user?.id;
+    if (groupId == null || ownerId == null) return null;
+    final matches =
+        controller.events
+            .where(
+              (event) =>
+                  event.groupId == groupId &&
+                  event.ownerId == ownerId &&
+                  event.title == draft.title &&
+                  event.startAt == draft.startAt.toUtc() &&
+                  event.endAt == draft.endAt.toUtc() &&
+                  event.allDay == draft.allDay &&
+                  !event.isDeleted,
+            )
+            .toList()
+          ..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
+    return matches.firstOrNull;
+  }
+
+  PlannerEvent? _findUpdatedEvent(
+    PlannerController controller,
+    PlannerEvent existing,
+  ) {
+    for (final event in controller.events) {
+      if ((event.id == existing.id &&
+              event.occurrenceKey == existing.occurrenceKey) ||
+          event.identityKey == existing.identityKey) {
+        return event;
+      }
+    }
+    return null;
+  }
+
+  void _showPartialNotificationWarning() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('참여자는 저장했지만 알림 설정을 저장하지 못했어요. 최신 일정을 불러온 뒤 다시 시도해 주세요.'),
+      ),
+    );
+  }
+
+  Future<void> _clearNotificationAfterMembershipRemoval(
+    NotificationController notifications,
+    PlannerEvent event,
+  ) async {
+    final eventId = event.seriesId;
+    // The membership mutation already notifies NotificationController and its
+    // server-side trigger owns deletion/cancellation. Only clear this route's
+    // private draft/cache so a later rebuild cannot offer a stale save.
+    _notificationEnabled = false;
+    _notificationChannel = NotificationChannel.local;
+    _timedLeadSeconds = 900;
+    _allDayDaysBefore = 0;
+    _notificationApplyToWholeSeries = true;
+    _notificationDraftDirty = false;
+    _notificationDraftIdentity = eventId;
+    _notificationDraftVersion = 0;
+    _notificationPreferenceLoadedKey = null;
+    _notificationPreferenceFailedKey = null;
+    try {
+      // Evict this event from the controller's local snapshot after the
+      // membership commit. Remote deletion/cancellation remains owned by the
+      // membership trigger and the normal controller reconciliation.
+      await notifications.forgetEventPreferences(eventId);
+    } catch (_) {
+      // The draft has already been cleared. Keep the user-facing membership
+      // result generic even if an in-memory eviction unexpectedly fails.
+    }
+  }
+
+  void _showMembershipNotificationDisabled() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('참여에서 제외되어 알림도 해제됐어요.')));
   }
 
   Future<void> _delete(PlannerEvent event) async {
@@ -716,6 +1161,7 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   @override
   Widget build(BuildContext context) {
     final controller = ref.watch(plannerControllerProvider);
+    final notifications = ref.watch(notificationControllerProvider);
     final existing = _existing(controller);
     if (widget.eventId != null && existing == null) {
       _maybeLoadDeepLinkedEvent(controller);
@@ -817,7 +1263,11 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
         ),
       );
     }
-    if (existing != null) _syncIncomingEventDraft(existing);
+    if (existing != null) {
+      _syncIncomingEventDraft(existing);
+      _syncNotificationDraft(existing, notifications);
+      _maybeLoadNotificationPreferences(existing, notifications, controller);
+    }
     final canEditBody =
         existing == null || existing.ownerId == controller.user?.id;
     final recurringEvent = existing?.recurrenceRule != null;
@@ -830,7 +1280,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
         ? canManageParticipants
         : canManageParticipants &&
               (!recurringEvent || _recurrenceScope == EventEditScope.all);
-    final canSave = canEditBody || canEditParticipants;
+    final canEditReminder =
+        controller.user != null &&
+        (existing == null || existing.memberIds.contains(controller.user!.id));
     final protectsCreator = existing != null
         ? (recurringEvent || _recurrenceRule != null)
         : _recurrenceRule != null;
@@ -847,12 +1299,25 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       }
     }
     final scheme = Theme.of(context).colorScheme;
+    // Notification reads share the editor's generic error surface. Keep the
+    // planner mutation error first when both operations fail, and never expose
+    // transport/provider details from the notification controller.
+    final editorErrorMessage =
+        controller.errorMessage ?? notifications.errorMessage;
+    final notificationLoadKey = existing == null
+        ? null
+        : '${notifications.userId}:${existing.seriesId}';
+    final canRetryNotificationLoad =
+        existing != null &&
+        controller.user?.id == notifications.userId &&
+        existing.memberIds.contains(controller.user!.id) &&
+        _notificationPreferenceFailedKey == notificationLoadKey;
     return Scaffold(
       appBar: AppBar(
         title: Text(
           existing == null
               ? '새 일정'
-              : canSave
+              : (canEditBody || canEditParticipants)
               ? '일정 편집'
               : '일정 보기',
         ),
@@ -863,7 +1328,7 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
               onPressed: controller.isSaving ? null : () => _delete(existing),
               icon: const Icon(Icons.delete_outline),
             ),
-          if (canSave)
+          if (canEditBody || canEditParticipants)
             TextButton(
               onPressed: controller.isSaving ? null : _save,
               child: const Text('저장'),
@@ -1108,16 +1573,84 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
                 });
               },
             ),
-            if (controller.errorMessage != null) ...<Widget>[
+            const SizedBox(height: 12),
+            EventNotificationControls(
+              allDay: _allDay,
+              recurring: recurringEvent || _recurrenceRule != null,
+              enabled: _notificationEnabled,
+              channel: _notificationChannel,
+              timedLeadSeconds: _timedLeadSeconds,
+              allDayDaysBefore: _allDayDaysBefore,
+              localCapability: notifications.capability,
+              pushCapability: notifications.pushCapability,
+              applyToWholeSeries: _notificationApplyToWholeSeries,
+              onEnabledChanged: canEditReminder
+                  ? (value) {
+                      setState(() {
+                        _notificationEnabled = value;
+                        _notificationDraftDirty = true;
+                      });
+                    }
+                  : null,
+              onChannelChanged: canEditReminder
+                  ? (value) {
+                      setState(() {
+                        _notificationChannel = value;
+                        _notificationDraftDirty = true;
+                      });
+                    }
+                  : null,
+              onTimedLeadChanged: canEditReminder
+                  ? (value) {
+                      setState(() {
+                        _timedLeadSeconds = value;
+                        _notificationDraftDirty = true;
+                      });
+                    }
+                  : null,
+              onAllDayDaysChanged: canEditReminder
+                  ? (value) {
+                      setState(() {
+                        _allDayDaysBefore = value;
+                        _notificationDraftDirty = true;
+                      });
+                    }
+                  : null,
+              onApplyToWholeSeriesChanged: canEditReminder
+                  ? (value) {
+                      setState(() {
+                        _notificationApplyToWholeSeries = value;
+                        _notificationDraftDirty = true;
+                      });
+                    }
+                  : null,
+            ),
+            if (editorErrorMessage != null) ...<Widget>[
               const SizedBox(height: 20),
               Semantics(
                 liveRegion: true,
-                label: '오류: ${controller.errorMessage!}',
+                label: '오류: $editorErrorMessage',
                 child: Text(
-                  controller.errorMessage!,
+                  editorErrorMessage,
                   style: TextStyle(color: scheme.error),
                 ),
               ),
+              if (canRetryNotificationLoad) ...<Widget>[
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton(
+                    onPressed: controller.isSaving
+                        ? null
+                        : () => _retryNotificationPreferences(
+                            existing,
+                            notifications,
+                            controller,
+                          ),
+                    child: const Text('알림 설정 다시 불러오기'),
+                  ),
+                ),
+              ],
             ],
             const SizedBox(height: 28),
             if (canEditBody)
@@ -1129,6 +1662,11 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
               FilledButton(
                 onPressed: controller.isSaving ? null : _save,
                 child: const Text('참여자 저장하기'),
+              )
+            else if (canEditReminder)
+              FilledButton(
+                onPressed: controller.isSaving ? null : _save,
+                child: const Text('알림 저장하기'),
               )
             else
               OutlinedButton(
@@ -1150,6 +1688,12 @@ String _colorLabel(int value) => switch (value) {
   0xff9a7b32 => '황금색',
   _ => '사용자 지정 색상',
 };
+
+bool _sameMemberIdSet(Iterable<String> left, Iterable<String> right) {
+  final leftSet = left.toSet();
+  final rightSet = right.toSet();
+  return leftSet.length == rightSet.length && leftSet.containsAll(rightSet);
+}
 
 class _ParticipantPicker extends StatelessWidget {
   const _ParticipantPicker({

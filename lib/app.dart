@@ -15,6 +15,7 @@ import 'screens/legal_screens.dart';
 import 'screens/members_screen.dart';
 import 'screens/settings_screen.dart';
 import 'platform/browser_location_source.dart';
+import 'platform/notification_bindings.dart';
 import 'state/app_state.dart';
 
 class ModulyApp extends ConsumerWidget {
@@ -68,11 +69,17 @@ class ModulyApp extends ConsumerWidget {
       themeMode: controller.darkMode ? ThemeMode.dark : ThemeMode.light,
       builder: (context, child) {
         final media = MediaQuery.of(context);
-        return MediaQuery(
-          data: media.copyWith(
-            textScaler: _AppTextScaler(media.textScaler, controller.textScale),
+        return NotificationLifecycleBinding(
+          router: router,
+          child: MediaQuery(
+            data: media.copyWith(
+              textScaler: _AppTextScaler(
+                media.textScaler,
+                controller.textScale,
+              ),
+            ),
+            child: child ?? const SizedBox.shrink(),
           ),
-          child: child ?? const SizedBox.shrink(),
         );
       },
       routerConfig: router,
@@ -298,6 +305,10 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/settings',
             builder: (context, state) => const SettingsScreen(),
+          ),
+          GoRoute(
+            path: '/settings/notifications',
+            builder: (context, state) => const NotificationSettingsRoute(),
           ),
         ],
       ),
