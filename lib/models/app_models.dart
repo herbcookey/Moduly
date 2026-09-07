@@ -252,8 +252,129 @@ class InviteCode {
   final DateTime updatedAt;
 
   bool get isRevoked => revokedAt != null;
-  bool get isExpired => expiresAt.isBefore(DateTime.now().toUtc());
+
+  /// Expiry is inclusive: a token at exactly `now` is no longer usable.
+  /// Keeping this boundary equal to the database predicate avoids local
+  /// preview/accept races around the expiry instant.
+  bool get isExpired => !expiresAt.isAfter(DateTime.now().toUtc());
   bool get isExhausted => usesCount >= maxUses;
+}
+
+/// Minimal, sanitized preview returned by `preview_invite(p_token)`.
+///
+/// The server intentionally omits usage counts, revocation flags, token
+/// material, and other invite metadata.  Invalid/expired/revoked/exhausted/
+/// archived responses are represented by repository exceptions instead of a
+/// partially populated model.
+@immutable
+class InvitePreview {
+  const InvitePreview({
+    required this.groupId,
+    required this.groupName,
+    required this.groupDescription,
+    required this.groupTimezone,
+    required this.expiresAt,
+    required this.alreadyMember,
+  });
+
+  final String groupId;
+  final String groupName;
+  final String groupDescription;
+  final String groupTimezone;
+  final DateTime expiresAt;
+  final bool alreadyMember;
+
+  bool get isExpired => !expiresAt.isAfter(DateTime.now().toUtc());
+  bool get isJoinable => !alreadyMember && !isExpired;
+
+  InvitePreview copyWith({
+    String? groupId,
+    String? groupName,
+    String? groupDescription,
+    String? groupTimezone,
+    DateTime? expiresAt,
+    bool? alreadyMember,
+  }) {
+    return InvitePreview(
+      groupId: groupId ?? this.groupId,
+      groupName: groupName ?? this.groupName,
+      groupDescription: groupDescription ?? this.groupDescription,
+      groupTimezone: groupTimezone ?? this.groupTimezone,
+      expiresAt: expiresAt ?? this.expiresAt,
+      alreadyMember: alreadyMember ?? this.alreadyMember,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is InvitePreview &&
+        other.groupId == groupId &&
+        other.groupName == groupName &&
+        other.groupDescription == groupDescription &&
+        other.groupTimezone == groupTimezone &&
+        other.expiresAt == expiresAt &&
+        other.alreadyMember == alreadyMember;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    groupId,
+    groupName,
+    groupDescription,
+    groupTimezone,
+    expiresAt,
+    alreadyMember,
+  );
+}
+
+/// UI-facing lifecycle for one pending invite intent.  The bearer token is
+/// never exposed by this enum/snapshot; it remains private to the controller.
+enum PendingInviteState {
+  none,
+  captured,
+  loading,
+  ready,
+  accepting,
+  succeeded,
+  error,
+}
+
+@immutable
+class PendingInviteSnapshot {
+  const PendingInviteSnapshot({
+    required this.state,
+    required this.preview,
+    required this.error,
+    required this.generation,
+    required this.returnRoute,
+    required this.expiresAt,
+  });
+
+  final PendingInviteState state;
+  final InvitePreview? preview;
+  final String? error;
+  final int generation;
+  final String? returnRoute;
+  final DateTime? expiresAt;
+
+  bool get hasPendingIntent =>
+      state != PendingInviteState.none && expiresAt != null;
+  bool get canRetry => state == PendingInviteState.error && hasPendingIntent;
+
+  @override
+  bool operator ==(Object other) {
+    return other is PendingInviteSnapshot &&
+        other.state == state &&
+        other.preview == preview &&
+        other.error == error &&
+        other.generation == generation &&
+        other.returnRoute == returnRoute &&
+        other.expiresAt == expiresAt;
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(state, preview, error, generation, returnRoute, expiresAt);
 }
 
 @immutable

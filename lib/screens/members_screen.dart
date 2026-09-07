@@ -1,10 +1,18 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../app.dart';
+import '../core/config/app_config.dart';
 import '../core/invite_code_utils.dart';
+import '../core/invite_link.dart';
 import '../models/app_models.dart';
+import '../platform/invite_share_service.dart';
 import '../repositories/schedule_repository.dart';
 import '../state/app_state.dart';
 import 'group_management_dialogs.dart';
@@ -453,21 +461,14 @@ class MembersScreen extends ConsumerWidget {
             maxUses: options.$2,
           );
       if (!context.mounted) return;
+      final config = ref.read(appConfigProvider);
+      final shareService = ref.read(inviteShareServiceProvider);
       await showDialog<void>(
         context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const Text('초대 코드가 준비됐어요'),
-          content: SelectableText(
-            '${invite.token == null ? '(보안상 다시 표시되지 않음)' : formatInviteCode(invite.token!)}\n\n'
-            '유효 기간: ${_date(invite.expiresAt)}\n'
-            '사용 횟수: ${invite.maxUses}회',
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('닫기'),
-            ),
-          ],
+        builder: (dialogContext) => _InviteCreatedDialog(
+          invite: invite,
+          config: config,
+          shareService: shareService,
         ),
       );
     } catch (_) {
@@ -597,6 +598,170 @@ class _CreateInviteDialogState extends State<_CreateInviteDialog> {
   );
 }
 
+class _InviteCreatedDialog extends StatefulWidget {
+  const _InviteCreatedDialog({
+    required this.invite,
+    required this.config,
+    required this.shareService,
+  });
+
+  final InviteCode invite;
+  final AppConfig config;
+  final InviteShareService shareService;
+
+  @override
+  State<_InviteCreatedDialog> createState() => _InviteCreatedDialogState();
+}
+
+class _InviteCreatedDialogState extends State<_InviteCreatedDialog> {
+  bool _copied = false;
+  bool _sharing = false;
+
+  String? get _displayCode {
+    final token = widget.invite.token;
+    if (token == null || token.isEmpty) return null;
+    return formatInviteCode(token);
+  }
+
+  Uri? get _shareLink {
+    final token = widget.invite.token;
+    if (token == null || token.isEmpty) return null;
+    // A missing/invalid base intentionally yields code-only sharing.  Never
+    // derive a link from the Supabase API URL or invent a hostname.
+    return InviteLinkParser.build(
+      token,
+      config: widget.config,
+      isRelease: kReleaseMode,
+    );
+  }
+
+  Future<void> _copyCode() async {
+    final code = _displayCode;
+    if (code == null) return;
+    try {
+      await Clipboard.setData(ClipboardData(text: code));
+      if (!mounted) return;
+      setState(() => _copied = true);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('초대 코드를 복사했어요.')));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('코드를 복사하지 못했어요.')));
+    }
+  }
+
+  Future<void> _shareCode(Rect? origin) async {
+    final code = _displayCode;
+    if (code == null || _sharing) return;
+    setState(() => _sharing = true);
+    try {
+      final result = await widget.shareService.shareInvite(
+        code: code,
+        link: _shareLink,
+        sharePositionOrigin: origin,
+      );
+      if (!mounted) return;
+      if (result.status == ShareResultStatus.unavailable) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('공유 기능을 사용할 수 없어요. 코드를 복사해 주세요.')),
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('공유 창을 열지 못했어요. 코드를 복사해 주세요.')),
+      );
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final code = _displayCode;
+    final invite = widget.invite;
+    return AlertDialog(
+      scrollable: true,
+      title: const Text('초대 코드가 준비됐어요'),
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          if (code == null)
+            const Text('보안상 초대 코드는 생성 직후에만 표시돼요.')
+          else
+            SelectableText(
+              code,
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.2,
+              ),
+            ),
+          const SizedBox(height: 16),
+          Text('유효 기간: ${MembersScreen._date(invite.expiresAt)}'),
+          Text('사용 횟수: ${invite.maxUses}회'),
+          if (code != null) ...<Widget>[
+            const SizedBox(height: 18),
+            Text(
+              _shareLink == null
+                  ? '링크 설정이 없어 코드만 공유해요.'
+                  : '코드와 초대 링크를 함께 공유해요.',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+      actions: <Widget>[
+        if (code != null)
+          Semantics(
+            button: true,
+            label: '초대 코드 복사',
+            child: TextButton.icon(
+              onPressed: _copyCode,
+              icon: Icon(_copied ? Icons.check : Icons.copy_outlined),
+              label: Text(_copied ? '복사됨' : '코드 복사'),
+            ),
+          ),
+        if (code != null)
+          Semantics(
+            button: true,
+            label: '초대 코드 공유',
+            child: Builder(
+              builder: (buttonContext) => TextButton.icon(
+                onPressed: _sharing
+                    ? null
+                    : () {
+                        final renderObject = buttonContext.findRenderObject();
+                        final origin = renderObject is RenderBox
+                            ? renderObject.localToGlobal(Offset.zero) &
+                                  renderObject.size
+                            : null;
+                        unawaited(_shareCode(origin));
+                      },
+                icon: _sharing
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.ios_share_outlined),
+                label: const Text('공유'),
+              ),
+            ),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('닫기'),
+        ),
+      ],
+    );
+  }
+}
+
 class _MemberTile extends StatelessWidget {
   const _MemberTile({
     required this.member,
@@ -690,8 +855,18 @@ class _InviteSection extends StatelessWidget {
                       ? '만료된 코드'
                       : '사용 가능한 코드',
                 ),
-                subtitle: Text(
-                  '만료 ${MembersScreen._date(invite.expiresAt)} · ${invite.usesCount}/${invite.maxUses}회 사용',
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      '만료 ${MembersScreen._date(invite.expiresAt)} · ${invite.usesCount}/${invite.maxUses}회 사용',
+                    ),
+                    if (invite.token == null)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 4),
+                        child: Text('복사와 공유는 생성 직후에만 가능해요.'),
+                      ),
+                  ],
                 ),
                 trailing: !invite.isRevoked && !invite.isExpired
                     ? IconButton(

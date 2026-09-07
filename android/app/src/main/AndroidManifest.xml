@@ -40,6 +40,16 @@
                     android:scheme="moduly"
                     android:host="auth-callback" />
             </intent-filter>
+            <!-- Invite links use a separate host so they never get mixed with
+                 the Supabase auth callback's intent-filter data. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="moduly"
+                    android:host="invite" />
+            </intent-filter>
         </activity>
         <!-- 아래 메타데이터를 삭제하지 않는다.
              Flutter 도구가 GeneratedPluginRegistrant.java를 생성할 때 사용한다. -->

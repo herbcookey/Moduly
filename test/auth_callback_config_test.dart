@@ -58,7 +58,11 @@ void main() {
         .map((line) => line.substring(0, line.indexOf('=')))
         .toSet();
 
-    expect(assignments, <String>{'SUPABASE_URL', 'SUPABASE_PUBLISHABLE_KEY'});
+    expect(assignments, <String>{
+      'SUPABASE_URL',
+      'SUPABASE_PUBLISHABLE_KEY',
+      'INVITE_BASE_URL',
+    });
     expect(source, isNot(contains('SUPABASE_SERVICE_ROLE_KEY')));
     expect(source, isNot(contains('DATABASE_URL')));
     expect(source, isNot(contains('DB_PASSWORD')));

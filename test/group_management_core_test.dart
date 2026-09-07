@@ -618,7 +618,18 @@ void main() {
         controller.invites.where((invite) => invite.id == returned.id),
         hasLength(1),
       );
-      expect(controller.invites.single, same(returned));
+      // The creation RPC may return plaintext once, but controller list state
+      // is always a sanitized copy so later refreshes cannot expose the token.
+      expect(controller.invites.single.token, isNull);
+      expect(controller.invites.single.id, returned.id);
+      expect(controller.invites.single.groupId, returned.groupId);
+      expect(controller.invites.single.expiresAt, returned.expiresAt);
+      expect(controller.invites.single.maxUses, returned.maxUses);
+      expect(controller.invites.single.usesCount, returned.usesCount);
+      expect(controller.invites.single.version, returned.version);
+      expect(controller.invites.single.revokedAt, returned.revokedAt);
+      expect(controller.invites.single.createdAt, returned.createdAt);
+      expect(controller.invites.single.updatedAt, returned.updatedAt);
       expect(
         controller.invites.single.version,
         repository.mutationInvite.version,

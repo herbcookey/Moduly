@@ -1,17 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_web_plugins/url_strategy.dart' as url_strategy;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:timezone/data/latest.dart' as tzdata;
 
 import 'app.dart';
 import 'core/config/app_config.dart';
+import 'platform/invite_link_source.dart';
 import 'screens/runtime_configuration_error_screen.dart';
 import 'state/app_state.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Use clean `/invite/<token>` and `/auth-callback` paths in the browser.
+  // Hosting must rewrite those paths to web/index.html (see README); native
+  // platforms simply ignore this web-only URL strategy.
+  if (kIsWeb) url_strategy.usePathUrlStrategy();
   tzdata.initializeTimeZones();
+  // AppLinks is also used internally by Supabase for auth callbacks.  Create
+  // our passive source now, but attach its stream only after Supabase has
+  // established the auth observer.  The source's post-init getInitialLink
+  // probe recovers a native cold invite without racing auth callback setup.
+  final inviteLinkSource = InviteLinkSource();
   final config = AppConfig.fromEnvironment();
   final releaseConfigurationError = AppConfigPolicy.releaseConfigurationError(
     config,
@@ -21,18 +32,22 @@ Future<void> main() async {
   // 조용히 로컬 데모로 전환하면 안 된다. 아래에서 유효한 설정을 초기화한다.
   var supabaseReady = !config.hasSupabase && releaseConfigurationError == null;
   String? supabaseError;
-  if (config.hasSupabase && releaseConfigurationError == null) {
-    try {
-      await Supabase.initialize(
-        url: config.supabaseUrl,
-        publishableKey: config.supabasePublishableKey,
-      );
-      supabaseReady = true;
-    } catch (error) {
-      // 미리보기는 계속 사용할 수 있게 하되, 연결된 세션인 것처럼 보이지
-      // 않도록 설정 오류를 설정 화면에 표시한다.
-      supabaseError = 'Supabase 연결을 시작하지 못했습니다 (${error.runtimeType}).';
-    }
+  try {
+    await initializeBeforeInviteSource(
+      initialize: () async {
+        if (!config.hasSupabase || releaseConfigurationError != null) return;
+        await Supabase.initialize(
+          url: config.supabaseUrl,
+          publishableKey: config.supabasePublishableKey,
+        );
+        supabaseReady = true;
+      },
+      startInviteSource: inviteLinkSource.start,
+    );
+  } catch (error) {
+    // 미리보기는 계속 사용할 수 있게 하되, 연결된 세션인 것처럼 보이지
+    // 않도록 설정 오류를 설정 화면에 표시한다.
+    supabaseError = 'Supabase 연결을 시작하지 못했습니다 (${error.runtimeType}).';
   }
   final releaseError =
       releaseConfigurationError ??
@@ -47,7 +62,12 @@ Future<void> main() async {
         supabaseInitializationErrorProvider.overrideWithValue(supabaseError),
         releaseConfigurationErrorProvider.overrideWithValue(releaseError),
       ],
-      child: const RuntimeConfigurationGate(child: ModulyApp()),
+      child: InviteLinkBinding(
+        source: inviteLinkSource,
+        config: config,
+        isRelease: kReleaseMode,
+        child: const RuntimeConfigurationGate(child: ModulyApp()),
+      ),
     ),
   );
 }

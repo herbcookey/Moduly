@@ -8,6 +8,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../core/config/app_config.dart';
+import '../core/invite_link.dart';
+import '../core/invite_code_utils.dart';
+import '../core/pending_invite_store.dart';
 import '../core/timezone_utils.dart';
 import '../models/app_models.dart';
 import '../repositories/auth_repository.dart';
@@ -111,9 +114,21 @@ class PlannerController extends ChangeNotifier {
     required ScheduleRepository repository,
     Duration oauthTimeout = const Duration(minutes: 2),
     Duration? socialAuthTimeout,
+    PendingInviteStore? pendingInviteStore,
+    Duration pendingInviteTtl = const Duration(minutes: 30),
   }) : _auth = auth,
        _repository = repository,
-       _oauthTimeout = socialAuthTimeout ?? oauthTimeout {
+       _oauthTimeout = socialAuthTimeout ?? oauthTimeout,
+       _pendingInviteStore =
+           pendingInviteStore ?? createDefaultPendingInviteStore(),
+       _pendingInviteTtl = pendingInviteTtl {
+    if (pendingInviteTtl <= Duration.zero) {
+      throw ArgumentError.value(
+        pendingInviteTtl,
+        'pendingInviteTtl',
+        'must be positive',
+      );
+    }
     _authSubscription = _auth.onAuthStateChange.listen(
       _enqueueAuthEvent,
       onError: (Object error, StackTrace stackTrace) {
@@ -122,17 +137,31 @@ class PlannerController extends ChangeNotifier {
         notifyListeners();
       },
     );
+    _pendingHydration = _hydratePendingInvite();
     unawaited(bootstrap());
   }
 
   final AuthRepository _auth;
   final ScheduleRepository _repository;
   final Duration _oauthTimeout;
+  final PendingInviteStore _pendingInviteStore;
+  final Duration _pendingInviteTtl;
+  late final Future<void> _pendingHydration;
 
   PlannerUser? user;
   List<PlannerGroup> groups = const <PlannerGroup>[];
   List<PlannerMember> members = const <PlannerMember>[];
-  List<InviteCode> invites = const <InviteCode>[];
+  List<InviteCode> _invites = const <InviteCode>[];
+
+  /// Invite rows are never allowed to retain the one-shot plaintext token at
+  /// the controller boundary.  A repository/fake may return a token-bearing
+  /// row, but every list assignment is defensively copied with `token: null`.
+  List<InviteCode> get invites => _invites;
+
+  set invites(Iterable<InviteCode> value) {
+    _invites = List<InviteCode>.unmodifiable(value.map(_inviteWithoutToken));
+  }
+
   List<PlannerEvent> _events = const <PlannerEvent>[];
   List<PlannerEvent> get events => _events;
 
@@ -242,6 +271,38 @@ class PlannerController extends ChangeNotifier {
   // clears the tombstone for an ordinary (non-archived) leave.
   final Set<String> _terminalGroupTombstones = <String>{};
   int _inviteOperation = 0;
+  // Pending invite intents are intentionally independent from planner
+  // clearing/auth operation generations.  An intent captured while signed
+  // out must survive the first successful login, but an explicit sign-out or
+  // subsequent identity switch must invalidate it synchronously.
+  String? _pendingInviteToken;
+  DateTime? _pendingInviteExpiresAt;
+  String? _pendingInviteReturnRoute;
+  String? _pendingInviteBoundUserId;
+  PendingInviteState _pendingInviteState = PendingInviteState.none;
+  InvitePreview? _pendingInvitePreview;
+  String? _pendingInviteError;
+  int _pendingInviteGeneration = 0;
+  int _pendingInviteSessionGeneration = 0;
+  // Planner/group operations advance `_plannerRevision` without clearing an
+  // invite intent.  Capture the revision at each preview/accept attempt so a
+  // callback that belongs to an older selected-group context cannot commit a
+  // projection into a newer one.
+  int _pendingInvitePlannerRevision = 0;
+  int _pendingInviteAcceptGeneration = 0;
+  bool _pendingInvitePreviewInFlight = false;
+  bool _pendingInviteAcceptInFlight = false;
+  Future<InvitePreview?>? _pendingInvitePreviewFuture;
+  int _pendingInvitePreviewRequestCounter = 0;
+  int? _pendingInvitePreviewActiveRequestId;
+  int? _pendingInvitePreviewFutureGeneration;
+  String? _pendingInvitePreviewFutureToken;
+  String? _pendingInvitePreviewFutureUserId;
+  int? _pendingInvitePreviewFutureSessionGeneration;
+  int? _pendingInvitePreviewFuturePlannerRevision;
+  Timer? _pendingInviteExpiryTimer;
+  Future<void> _pendingStoreQueue = Future<void>.value();
+  StreamSubscription<Uri>? _inviteLinkSubscription;
   bool _disposed = false;
 
   bool get isAuthenticated => user != null;
@@ -289,6 +350,51 @@ class PlannerController extends ChangeNotifier {
   SocialAuthProvider? get socialAuthProviderInFlight =>
       _socialAuthProviderInFlight;
 
+  /// Public invite projection.  The bearer token remains private to this
+  /// controller and its ephemeral store; UI code receives only sanitized
+  /// preview/status data.
+  PendingInviteSnapshot? get pendingInvite {
+    if (_pendingInviteState == PendingInviteState.none) return null;
+    return PendingInviteSnapshot(
+      state: _pendingInviteState,
+      preview: _pendingInvitePreview,
+      error: _pendingInviteError,
+      generation: _pendingInviteGeneration,
+      returnRoute: _pendingInviteReturnRoute,
+      expiresAt: _pendingInviteExpiresAt,
+    );
+  }
+
+  PendingInviteSnapshot? get pendingInviteSnapshot => pendingInvite;
+  PendingInviteState get pendingInviteState => _pendingInviteState;
+  InvitePreview? get pendingInvitePreview => _pendingInvitePreview;
+  String? get pendingInviteError => _pendingInviteError;
+  String? get pendingInviteReturnRoute => _pendingInviteReturnRoute;
+  bool get hasPendingInvite => _pendingInviteToken != null;
+  bool get isPreviewingInvite => _pendingInvitePreviewInFlight;
+  bool get isAcceptingInvite => _pendingInviteAcceptInFlight;
+
+  /// Binds platform deep-link intake without coupling the controller to a
+  /// native/web plugin.  A replacement stream retires the previous
+  /// subscription; every URI is validated before it can create state.
+  void bindInviteLinkStream(
+    Stream<Uri> links, {
+    AppConfig? config,
+    required bool isRelease,
+    bool allowLocalhostHttp = true,
+  }) {
+    final effectiveConfig = config ?? AppConfig.fromEnvironment();
+    unawaited(_inviteLinkSubscription?.cancel());
+    _inviteLinkSubscription = links.listen((uri) {
+      captureInviteUri(
+        uri,
+        config: effectiveConfig,
+        isRelease: isRelease,
+        allowLocalhostHttp: allowLocalhostHttp,
+      );
+    });
+  }
+
   List<PlannerEvent> get visibleEvents {
     final selected = dateOnly(selectedDay);
     final viewTimezone = selectedGroup?.timezone;
@@ -332,10 +438,12 @@ class PlannerController extends ChangeNotifier {
     notifyListeners();
     PlannerUser? existing;
     try {
+      await _pendingHydration;
       existing = _auth.currentUser;
       if (existing != null) {
         user = existing;
         authFlowState = AuthFlowState.signedIn;
+        _bindPendingInviteToUser(existing.id);
         await loadGroups();
       } else {
         authFlowState = AuthFlowState.signedOut;
@@ -352,6 +460,583 @@ class PlannerController extends ChangeNotifier {
         notifyListeners();
       }
     }
+  }
+
+  Future<void> _hydratePendingInvite() async {
+    // A slow storage read must not be able to resurrect an intent that was
+    // explicitly cleared (or invalidated by a newer auth/planner session)
+    // while the read was pending.
+    final hydrationGeneration = _pendingInviteGeneration;
+    final hydrationSessionGeneration = _plannerSessionGeneration;
+    PendingInviteRecord? stored;
+    try {
+      stored = await _pendingInviteStore.readRecord();
+    } catch (_) {
+      stored = null;
+    }
+    if (_disposed ||
+        _pendingInviteToken != null ||
+        hydrationGeneration != _pendingInviteGeneration ||
+        hydrationSessionGeneration != _plannerSessionGeneration ||
+        stored == null) {
+      return;
+    }
+    final normalized = normalizeStrictInviteToken(stored.token);
+    if (normalized == null) {
+      _queuePendingStoreClear();
+      return;
+    }
+    // The store has already enforced its persisted expiry.  Legacy stores
+    // without a deadline get a bounded in-tab fallback.
+    final expiresAt =
+        stored.expiresAt ?? DateTime.now().toUtc().add(_pendingInviteTtl);
+    if (!expiresAt.isAfter(DateTime.now().toUtc())) {
+      _queuePendingStoreClear();
+      return;
+    }
+    _pendingInviteToken = normalized;
+    _pendingInviteExpiresAt = expiresAt;
+    _pendingInviteBoundUserId = user?.id;
+    _pendingInviteSessionGeneration = _plannerSessionGeneration;
+    _pendingInvitePlannerRevision = _plannerRevision;
+    _pendingInviteState = PendingInviteState.captured;
+    _pendingInvitePreview = null;
+    _pendingInviteError = null;
+    _schedulePendingInviteExpiry(expiresAt, _pendingInviteGeneration);
+    notifyListeners();
+  }
+
+  /// Captures a strictly validated link while keeping the raw URI out of
+  /// controller state.  Invalid or unconfigured links are ignored so a
+  /// malformed deep link cannot become a user-visible token oracle.
+  bool captureInviteUri(
+    Uri uri, {
+    required AppConfig config,
+    Uri? currentOrigin,
+    required bool isRelease,
+    bool allowLocalhostHttp = true,
+    String? returnRoute,
+  }) {
+    final parsed = InviteLinkParser.tryParse(
+      uri,
+      config: config,
+      currentOrigin: currentOrigin,
+      isRelease: isRelease,
+      allowLocalhostHttp: allowLocalhostHttp,
+    );
+    if (parsed == null) return false;
+    return captureInviteToken(parsed.token, returnRoute: returnRoute);
+  }
+
+  /// Captures a canonical token supplied by platform routing.  Manual code
+  /// entry continues through [joinGroup]; this method intentionally rejects
+  /// the local `family` demo magic code and display separators.
+  bool captureInviteToken(String token, {String? returnRoute}) {
+    final normalized = normalizeStrictInviteToken(token);
+    if (normalized == null) return false;
+    if (_pendingInviteToken == normalized &&
+        _pendingInviteState != PendingInviteState.none &&
+        _pendingInviteExpiresAt != null &&
+        _pendingInviteExpiresAt!.isAfter(DateTime.now().toUtc())) {
+      return true;
+    }
+    ++_pendingInviteGeneration;
+    _pendingInviteToken = normalized;
+    _pendingInviteExpiresAt = DateTime.now().toUtc().add(_pendingInviteTtl);
+    _pendingInviteBoundUserId = user?.id;
+    _pendingInviteSessionGeneration = _plannerSessionGeneration;
+    _pendingInvitePlannerRevision = _plannerRevision;
+    _pendingInviteReturnRoute = _sanitizeInviteReturnRoute(returnRoute);
+    _pendingInviteState = PendingInviteState.captured;
+    _pendingInvitePreview = null;
+    _pendingInviteError = null;
+    _pendingInvitePreviewInFlight = false;
+    _pendingInviteAcceptInFlight = false;
+    final generation = _pendingInviteGeneration;
+    final expiresAt = _pendingInviteExpiresAt!;
+    _schedulePendingInviteExpiry(expiresAt, generation);
+    _queuePendingStoreWrite(normalized, expiresAt, generation);
+    notifyListeners();
+    return true;
+  }
+
+  Future<InvitePreview?> previewPendingInvite() async {
+    await _pendingHydration;
+    final token = _pendingInviteToken;
+    final current = user;
+    if (token == null) return null;
+    if (current == null) {
+      throw const AuthException('로그인 세션을 다시 확인해 주세요.');
+    }
+    if (_pendingInviteExpiresAt == null ||
+        !_pendingInviteExpiresAt!.isAfter(DateTime.now().toUtc())) {
+      _expirePendingInvite();
+      return null;
+    }
+    final capability = _repository;
+    if (capability is! InvitePreviewCapability) {
+      const error = ScheduleCapabilityException('초대 미리보기를 지원하지 않는 저장소입니다.');
+      _setPendingInviteError(error);
+      throw error;
+    }
+    final previewCapability = capability as InvitePreviewCapability;
+    if (_pendingInviteBoundUserId == null) {
+      _bindPendingInviteToUser(current.id);
+    }
+    if (_pendingInviteBoundUserId != current.id) {
+      _clearPendingInvite();
+      return null;
+    }
+    final generation = _pendingInviteGeneration;
+    final sessionGeneration = _plannerSessionGeneration;
+    final plannerRevision = _plannerRevision;
+    _pendingInvitePlannerRevision = plannerRevision;
+    if (_matchesPendingInvitePreviewFuture(
+      generation: generation,
+      token: token,
+      userId: current.id,
+      sessionGeneration: sessionGeneration,
+      plannerRevision: plannerRevision,
+    )) {
+      // A second route/widget callback for this same intent joins the
+      // existing request instead of issuing another oracle call.
+      return _pendingInvitePreviewFuture!;
+    }
+    final requestId = ++_pendingInvitePreviewRequestCounter;
+    _pendingInvitePreviewActiveRequestId = requestId;
+    final future = _previewPendingInviteRequest(
+      capability: previewCapability,
+      token: token,
+      userId: current.id,
+      generation: generation,
+      sessionGeneration: sessionGeneration,
+      plannerRevision: plannerRevision,
+      requestId: requestId,
+    );
+    _pendingInvitePreviewFuture = future;
+    _pendingInvitePreviewFutureGeneration = generation;
+    _pendingInvitePreviewFutureToken = token;
+    _pendingInvitePreviewFutureUserId = current.id;
+    _pendingInvitePreviewFutureSessionGeneration = sessionGeneration;
+    _pendingInvitePreviewFuturePlannerRevision = plannerRevision;
+    try {
+      return await future;
+    } finally {
+      if (identical(_pendingInvitePreviewFuture, future)) {
+        _clearPendingInvitePreviewFuture();
+      }
+    }
+  }
+
+  Future<InvitePreview?> _previewPendingInviteRequest({
+    required InvitePreviewCapability capability,
+    required String token,
+    required String userId,
+    required int generation,
+    required int sessionGeneration,
+    required int plannerRevision,
+    required int requestId,
+  }) async {
+    _pendingInvitePreviewInFlight = true;
+    _pendingInviteState = PendingInviteState.loading;
+    _pendingInviteError = null;
+    notifyListeners();
+    try {
+      final preview = await capability.previewInvite(
+        userId: userId,
+        token: token,
+      );
+      if (!_isCurrentPendingInvite(
+        generation: generation,
+        token: token,
+        userId: userId,
+        sessionGeneration: sessionGeneration,
+        plannerRevision: plannerRevision,
+      )) {
+        return null;
+      }
+      _pendingInvitePreview = preview;
+      _pendingInviteState = PendingInviteState.ready;
+      _pendingInviteError = null;
+      return preview;
+    } catch (error) {
+      if (_isCurrentPendingInvite(
+        generation: generation,
+        token: token,
+        userId: userId,
+        sessionGeneration: sessionGeneration,
+        plannerRevision: plannerRevision,
+      )) {
+        _setPendingInviteError(error, notify: false);
+      }
+      rethrow;
+    } finally {
+      if (_isActivePendingInvitePreviewRequest(
+        requestId: requestId,
+        generation: generation,
+        token: token,
+        userId: userId,
+        sessionGeneration: sessionGeneration,
+        plannerRevision: plannerRevision,
+      )) {
+        _pendingInvitePreviewInFlight = false;
+        if (_pendingInviteState == PendingInviteState.loading) {
+          _pendingInviteState = PendingInviteState.captured;
+        }
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<InvitePreview?> retryPendingInvite() => previewPendingInvite();
+
+  /// Performs the explicit accept exactly once.  The pending token is
+  /// cleared immediately after the server join commits, before selecting the
+  /// group, so a subsequent group-load failure cannot cause a second join.
+  Future<PlannerGroup?> acceptPendingInvite() async {
+    await _pendingHydration;
+    final token = _pendingInviteToken;
+    final current = user;
+    final preview = _pendingInvitePreview;
+    if (token == null || current == null || preview == null) return null;
+    if (_pendingInviteState != PendingInviteState.ready ||
+        _pendingInviteAcceptInFlight) {
+      return null;
+    }
+    // A preview can intentionally report `alreadyMember: true` even when
+    // the token has since expired/revoked/exhausted. The membership may have
+    // changed between preview and accept, so never trust this hint to bypass
+    // the authoritative idempotent join RPC. Only a non-member with a locally
+    // expired preview is terminal before making that request.
+    if (!preview.alreadyMember && preview.isExpired) {
+      _expirePendingInvite();
+      return null;
+    }
+    final generation = _pendingInviteGeneration;
+    final sessionGeneration = _plannerSessionGeneration;
+    final plannerRevision = _pendingInvitePlannerRevision;
+    final userId = current.id;
+    _pendingInviteAcceptGeneration = generation;
+    _pendingInviteAcceptInFlight = true;
+    _pendingInviteState = PendingInviteState.accepting;
+    _pendingInviteError = null;
+    notifyListeners();
+    var committed = false;
+    try {
+      final joined = await _repository.joinGroup(userId, token);
+      committed = true;
+      if (!_isCurrentPendingInvite(
+        generation: generation,
+        token: token,
+        userId: userId,
+        sessionGeneration: sessionGeneration,
+        plannerRevision: plannerRevision,
+      )) {
+        // The join RPC has already committed. If only the selected planner
+        // context became stale, clear this exact generation before returning
+        // so a caller cannot retry the same bearer token. A newer token or
+        // identity has its own generation and remains untouched.
+        _clearPendingInviteIfCurrent(
+          generation: generation,
+          token: token,
+          userId: userId,
+          sessionGeneration: sessionGeneration,
+        );
+        return null;
+      }
+      _clearPendingInvite();
+      if (!groups.any((candidate) => candidate.id == joined.id)) {
+        groups = <PlannerGroup>[...groups, joined];
+      }
+      try {
+        await selectGroup(joined.id);
+      } catch (error) {
+        if (user?.id == userId && !_disposed) {
+          errorMessage = _friendlyError(error);
+          notifyListeners();
+        }
+      }
+      return joined;
+    } catch (error) {
+      if (error is InviteJoinCommittedException) {
+        // The repository has already committed membership but could not load
+        // the resulting group projection. Clear this exact bearer intent even
+        // when a planner revision changed; retrying would submit the token a
+        // second time. A newer token or identity remains untouched.
+        final exactPendingContext = _isCurrentPendingInvite(
+          generation: generation,
+          token: token,
+          userId: userId,
+          sessionGeneration: sessionGeneration,
+          plannerRevision: plannerRevision,
+        );
+        _clearPendingInviteIfCurrent(
+          generation: generation,
+          token: token,
+          userId: userId,
+          sessionGeneration: sessionGeneration,
+        );
+        if (exactPendingContext && !_disposed && user?.id == userId) {
+          errorMessage = _friendlyError(error);
+          notifyListeners();
+        }
+        rethrow;
+      }
+      if (!committed &&
+          _isCurrentPendingInvite(
+            generation: generation,
+            token: token,
+            userId: userId,
+            sessionGeneration: sessionGeneration,
+            plannerRevision: plannerRevision,
+          )) {
+        _setPendingInviteError(error, notify: false);
+      }
+      rethrow;
+    } finally {
+      if (_pendingInviteAcceptGeneration == generation &&
+          _pendingInviteToken == token &&
+          user?.id == userId &&
+          _pendingInviteBoundUserId == userId &&
+          _pendingInviteSessionGeneration == sessionGeneration &&
+          _plannerSessionGeneration == sessionGeneration &&
+          _plannerRevision == plannerRevision) {
+        _pendingInviteAcceptInFlight = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void cancelPendingInvite() => _clearPendingInvite();
+
+  /// Account-deletion flows can use the same privacy fence as explicit
+  /// cancellation without depending on the invite implementation details.
+  void clearPendingInvite() => _clearPendingInvite();
+
+  void _bindPendingInviteToUser(String userId) {
+    final token = _pendingInviteToken;
+    if (token == null || userId.trim().isEmpty) return;
+    final bound = _pendingInviteBoundUserId;
+    if (bound != null && bound != userId) {
+      _clearPendingInvite();
+      return;
+    }
+    _pendingInviteBoundUserId = userId;
+    _pendingInviteSessionGeneration = _plannerSessionGeneration;
+    _pendingInvitePlannerRevision = _plannerRevision;
+  }
+
+  bool _isCurrentPendingInvite({
+    required int generation,
+    required String token,
+    required String userId,
+    required int sessionGeneration,
+    int? plannerRevision,
+  }) {
+    return !_disposed &&
+        generation == _pendingInviteGeneration &&
+        token == _pendingInviteToken &&
+        user?.id == userId &&
+        _pendingInviteBoundUserId == userId &&
+        _pendingInviteSessionGeneration == sessionGeneration &&
+        _plannerSessionGeneration == sessionGeneration &&
+        (plannerRevision == null || _plannerRevision == plannerRevision);
+  }
+
+  void _clearPendingInviteIfCurrent({
+    required int generation,
+    required String token,
+    required String userId,
+    required int sessionGeneration,
+  }) {
+    if (_disposed ||
+        generation != _pendingInviteGeneration ||
+        token != _pendingInviteToken ||
+        user?.id != userId ||
+        _pendingInviteBoundUserId != userId ||
+        _pendingInviteSessionGeneration != sessionGeneration ||
+        _plannerSessionGeneration != sessionGeneration) {
+      return;
+    }
+    _clearPendingInvite();
+  }
+
+  void _setPendingInviteError(Object error, {bool notify = true}) {
+    if (error is InviteUnavailableException) {
+      // Expiry retires the generation, so the preview finally block will not
+      // emit its usual state-change notification. Always notify here even
+      // when the caller suppressed the transient catch notification.
+      _expirePendingInvite(error: error, notify: true);
+      return;
+    }
+    _pendingInviteError = _friendlyError(error);
+    _pendingInviteState = PendingInviteState.error;
+    if (notify) notifyListeners();
+  }
+
+  /// Retires the bearer token and persisted intent while retaining a
+  /// token-free terminal error long enough for the landing page to explain
+  /// why no preview is available. The route can be dismissed without a
+  /// subsequent retry accidentally probing an expired token.
+  void _expirePendingInvite({
+    Object error = const InviteUnavailableException.invalidOrExpired(),
+    bool notify = true,
+  }) {
+    if (_pendingInviteToken == null &&
+        _pendingInviteState == PendingInviteState.none) {
+      return;
+    }
+    ++_pendingInviteGeneration;
+    _pendingInviteToken = null;
+    _pendingInviteExpiresAt = null;
+    _pendingInviteReturnRoute = null;
+    _pendingInviteBoundUserId = null;
+    _pendingInvitePlannerRevision = 0;
+    _pendingInvitePreview = null;
+    _pendingInviteError = _friendlyError(error);
+    _pendingInviteState = PendingInviteState.error;
+    _pendingInvitePreviewInFlight = false;
+    _pendingInviteAcceptInFlight = false;
+    _clearPendingInvitePreviewFuture();
+    _pendingInviteExpiryTimer?.cancel();
+    _pendingInviteExpiryTimer = null;
+    _queuePendingStoreClear();
+    if (notify) notifyListeners();
+  }
+
+  void _clearPendingInvite() {
+    if (_pendingInviteState == PendingInviteState.none &&
+        _pendingInviteToken == null) {
+      // Even before hydration has completed, an explicit cancel/sign-out is a
+      // privacy fence. Advance the generation so a slow persisted-store read
+      // cannot repopulate the just-cleared intent, and clear any stale record
+      // best-effort without emitting a no-op notification.
+      ++_pendingInviteGeneration;
+      _clearPendingInvitePreviewFuture();
+      _pendingInviteExpiryTimer?.cancel();
+      _pendingInviteExpiryTimer = null;
+      _queuePendingStoreClear();
+      return;
+    }
+    ++_pendingInviteGeneration;
+    _pendingInviteToken = null;
+    _pendingInviteExpiresAt = null;
+    _pendingInviteReturnRoute = null;
+    _pendingInviteBoundUserId = null;
+    _pendingInvitePlannerRevision = 0;
+    _pendingInvitePreview = null;
+    _pendingInviteError = null;
+    _pendingInviteState = PendingInviteState.none;
+    _pendingInvitePreviewInFlight = false;
+    _pendingInviteAcceptInFlight = false;
+    _clearPendingInvitePreviewFuture();
+    _pendingInviteExpiryTimer?.cancel();
+    _pendingInviteExpiryTimer = null;
+    _queuePendingStoreClear();
+    notifyListeners();
+  }
+
+  void _schedulePendingInviteExpiry(DateTime expiresAt, int generation) {
+    _pendingInviteExpiryTimer?.cancel();
+    final delay = expiresAt.difference(DateTime.now().toUtc());
+    _pendingInviteExpiryTimer = Timer(
+      delay.isNegative ? Duration.zero : delay,
+      () {
+        _pendingInviteExpiryTimer = null;
+        if (_disposed ||
+            generation != _pendingInviteGeneration ||
+            _pendingInviteToken == null ||
+            _pendingInviteExpiresAt != expiresAt) {
+          return;
+        }
+        _expirePendingInvite();
+      },
+    );
+  }
+
+  void _clearPendingInvitePreviewFuture() {
+    _pendingInvitePreviewFuture = null;
+    _pendingInvitePreviewActiveRequestId = null;
+    _pendingInvitePreviewFutureGeneration = null;
+    _pendingInvitePreviewFutureToken = null;
+    _pendingInvitePreviewFutureUserId = null;
+    _pendingInvitePreviewFutureSessionGeneration = null;
+    _pendingInvitePreviewFuturePlannerRevision = null;
+  }
+
+  bool _isActivePendingInvitePreviewRequest({
+    required int requestId,
+    required int generation,
+    required String token,
+    required String userId,
+    required int sessionGeneration,
+    required int plannerRevision,
+  }) {
+    return !_disposed &&
+        _pendingInvitePreviewActiveRequestId == requestId &&
+        generation == _pendingInviteGeneration &&
+        token == _pendingInviteToken &&
+        user?.id == userId &&
+        _pendingInviteBoundUserId == userId &&
+        _pendingInviteSessionGeneration == sessionGeneration &&
+        _plannerSessionGeneration == sessionGeneration &&
+        _pendingInvitePreviewFutureGeneration == generation &&
+        _pendingInvitePreviewFutureToken == token &&
+        _pendingInvitePreviewFutureUserId == userId &&
+        _pendingInvitePreviewFutureSessionGeneration == sessionGeneration &&
+        _pendingInvitePreviewFuturePlannerRevision == plannerRevision;
+  }
+
+  bool _matchesPendingInvitePreviewFuture({
+    required int generation,
+    required String token,
+    required String userId,
+    required int sessionGeneration,
+    required int plannerRevision,
+  }) {
+    return _pendingInvitePreviewFuture != null &&
+        _pendingInvitePreviewFutureGeneration == generation &&
+        _pendingInvitePreviewFutureToken == token &&
+        _pendingInvitePreviewFutureUserId == userId &&
+        _pendingInvitePreviewFutureSessionGeneration == sessionGeneration &&
+        _pendingInvitePreviewFuturePlannerRevision == plannerRevision;
+  }
+
+  void _queuePendingStoreWrite(
+    String token,
+    DateTime expiresAt,
+    int generation,
+  ) {
+    _pendingStoreQueue = _pendingStoreQueue.then((_) async {
+      if (_disposed || generation != _pendingInviteGeneration) return;
+      try {
+        await _pendingInviteStore.write(token, expiresAt);
+      } catch (_) {
+        // Persistence is best effort; live controller state remains valid.
+      }
+    });
+  }
+
+  void _queuePendingStoreClear() {
+    _pendingStoreQueue = _pendingStoreQueue.then((_) async {
+      try {
+        await _pendingInviteStore.clear();
+      } catch (_) {
+        // Best effort and intentionally silent.
+      }
+    });
+  }
+
+  static String? _sanitizeInviteReturnRoute(String? route) {
+    if (route == null || route.isEmpty || route != route.trim()) return null;
+    if (!route.startsWith('/') || route.contains('?') || route.contains('#')) {
+      return null;
+    }
+    if (route == '/invite' || route.startsWith('/invite/')) return null;
+    if (route == '/auth-callback' || route.startsWith('/auth-callback/')) {
+      return null;
+    }
+    return route;
   }
 
   Future<void> signIn(String email, String password) async {
@@ -542,6 +1227,8 @@ class PlannerController extends ChangeNotifier {
     _queuedPasswordRecoveryIdentity = null;
     _staleSocialIdentityCommitted = false;
     _staleSocialPendingMismatchObserved = false;
+    // Explicit sign-out is a terminal privacy boundary for invite intents.
+    _clearPendingInvite();
     try {
       // Clear local state before waiting for a potentially slow remote revoke.
       // The clear helper mutates synchronously before its first await.
@@ -585,6 +1272,7 @@ class PlannerController extends ChangeNotifier {
       if (identical(_signOutSettlement, settlement)) {
         _signOutSettlement = null;
         _signOutSettlementCompleter = null;
+        _signOutOperationToken = null;
       }
       if (!settlementCompleter.isCompleted) {
         settlementCompleter.complete();
@@ -1005,6 +1693,9 @@ class PlannerController extends ChangeNotifier {
     if (!_isCurrentAuthOperation(operation, generation)) return;
     _assertAuthResultSessionConsistency(authenticated);
     final previousId = user?.id;
+    if (previousId != null && previousId != authenticated.id) {
+      _clearPendingInvite();
+    }
     if (previousId != authenticated.id ||
         groups.isNotEmpty ||
         _hasGroupScopedData) {
@@ -1012,6 +1703,7 @@ class PlannerController extends ChangeNotifier {
       if (!_isCurrentAuthOperation(operation, generation)) return;
     }
     user = authenticated;
+    _bindPendingInviteToUser(authenticated.id);
     if (_staleSocialAuthFence) {
       _commitSocialAuthIdentity(authenticated.id);
     } else {
@@ -1100,6 +1792,12 @@ class PlannerController extends ChangeNotifier {
 
   void _enqueueAuthEvent(AuthRepositoryEvent event) {
     if (event.type == AuthEventType.signedOut) {
+      // Supabase may emit an initial ambient SIGNED_OUT event while a user is
+      // opening an invite in a logged-out tab.  Preserve that pending intent;
+      // only an explicit sign-out/known committed identity is a privacy fence.
+      if (user != null || _signOutOperationToken != null) {
+        _clearPendingInvite();
+      }
       // Signed-out is a synchronous fence even when no identity is currently
       // visible. Forget any identity previously committed behind a social
       // tombstone before a delayed callback can be inspected.
@@ -1154,6 +1852,16 @@ class PlannerController extends ChangeNotifier {
       final preserveSignOutOperation =
           event.type == AuthEventType.signedOut &&
           _signOutOperationToken == _operationToken;
+      // A switch from one known identity to another is a synchronous privacy
+      // boundary.  Clear the bearer intent before the queued planner clear so
+      // a caller cannot observe the old token while the auth event is waiting
+      // behind an older operation.  The first signed-in event after a logged-
+      // out capture intentionally keeps the intent and binds it in the queued
+      // handler below; ambient SIGNED_OUT events likewise preserve it.
+      if (event.type != AuthEventType.signedOut &&
+          (user != null || _queuedAuthIdentity != null)) {
+        _clearPendingInvite();
+      }
       _queuedAuthIdentity = incomingId;
       ++_authEventGeneration;
       if (event.type == AuthEventType.signedOut) {
@@ -1209,6 +1917,11 @@ class PlannerController extends ChangeNotifier {
       case AuthEventType.signedIn:
         final incoming = event.user ?? _auth.currentUser;
         if (incoming == null) break;
+        if (previousId != null && previousId != incoming.id) {
+          _clearPendingInvite();
+        } else if (previousId == null) {
+          _bindPendingInviteToUser(incoming.id);
+        }
         if (previousId != incoming.id) {
           await _clearPlannerData(
             clearSaving:
@@ -1218,6 +1931,7 @@ class PlannerController extends ChangeNotifier {
         }
         if (!_isCurrentAuthEvent(eventGeneration, authGeneration)) return;
         user = incoming;
+        _bindPendingInviteToUser(incoming.id);
         if (_staleSocialAuthFence) {
           _recordSocialAuthIdentity(incoming.id);
           if (!_authOperationInFlight) {
@@ -1257,6 +1971,11 @@ class PlannerController extends ChangeNotifier {
       case AuthEventType.userUpdated:
         final incoming = event.user ?? _auth.currentUser;
         if (incoming != null) {
+          if (previousId != null && previousId != incoming.id) {
+            _clearPendingInvite();
+          } else if (previousId == null) {
+            _bindPendingInviteToUser(incoming.id);
+          }
           if (previousId != incoming.id) {
             await _clearPlannerData(
               clearSaving:
@@ -1269,6 +1988,7 @@ class PlannerController extends ChangeNotifier {
           }
           if (!_isCurrentAuthEvent(eventGeneration, authGeneration)) return;
           user = incoming;
+          _bindPendingInviteToUser(incoming.id);
           if (_staleSocialAuthFence) {
             _recordSocialAuthIdentity(incoming.id);
             if (!_authOperationInFlight) {
@@ -1291,6 +2011,11 @@ class PlannerController extends ChangeNotifier {
       case AuthEventType.passwordRecovery:
         final incoming = event.user ?? _auth.currentUser;
         if (incoming != null) {
+          if (previousId != null && previousId != incoming.id) {
+            _clearPendingInvite();
+          } else if (previousId == null) {
+            _bindPendingInviteToUser(incoming.id);
+          }
           if (previousId != incoming.id) {
             await _clearPlannerData(
               clearSaving:
@@ -1303,6 +2028,7 @@ class PlannerController extends ChangeNotifier {
           }
           if (!_isCurrentAuthEvent(eventGeneration, authGeneration)) return;
           user = incoming;
+          _bindPendingInviteToUser(incoming.id);
           _commitSocialAuthIdentity(incoming.id);
           _queuedAuthIdentity = incoming.id;
         }
@@ -2699,7 +3425,8 @@ class PlannerController extends ChangeNotifier {
         ttl: ttl,
         maxUses: maxUses,
       );
-      if (inviteOperation == _inviteOperation &&
+      final isCurrent =
+          inviteOperation == _inviteOperation &&
           _isCurrentPlannerContext(
             revision,
             userId: currentUserId,
@@ -2710,9 +3437,13 @@ class PlannerController extends ChangeNotifier {
             userId: currentUserId,
             groupId: group.id,
             plannerRevision: revision,
-          )) {
-        _upsertInvite(invite);
+          );
+      if (!isCurrent) {
+        // Do not return a plaintext token to a caller whose auth/group
+        // context changed while the create RPC was pending.
+        throw const InviteOperationStaleException();
       }
+      _upsertInvite(invite);
       return invite;
     } catch (error) {
       if (inviteOperation == _inviteOperation &&
@@ -2877,8 +3608,9 @@ class PlannerController extends ChangeNotifier {
       )) {
         return;
       }
+      final sanitized = _inviteWithoutToken(revoked);
       final nextInvites = invites
-          .map((item) => item.id == revoked.id ? revoked : item)
+          .map((item) => item.id == sanitized.id ? sanitized : item)
           .toList(growable: false);
       if (!_isOperationCurrent(
         operation,
@@ -3739,16 +4471,33 @@ class PlannerController extends ChangeNotifier {
   /// Merge an invite returned by a mutation with an in-flight lifecycle
   /// metadata refresh. Both responses can contain the same row id; replacing
   /// by id keeps the visible projection canonical instead of prepending a
-  /// duplicate when the mutation Future settles last.
+  /// duplicate when the mutation Future settles last. The creation RPC is the
+  /// one-shot plaintext boundary; cached/listed rows must never retain it.
   void _upsertInvite(InviteCode incoming) {
-    final index = invites.indexWhere((invite) => invite.id == incoming.id);
+    final sanitized = _inviteWithoutToken(incoming);
+    final index = invites.indexWhere((invite) => invite.id == sanitized.id);
     if (index == -1) {
-      invites = <InviteCode>[incoming, ...invites];
+      invites = <InviteCode>[sanitized, ...invites];
       return;
     }
     final next = <InviteCode>[...invites];
-    next[index] = incoming;
+    next[index] = sanitized;
     invites = List<InviteCode>.unmodifiable(next);
+  }
+
+  static InviteCode _inviteWithoutToken(InviteCode incoming) {
+    return InviteCode(
+      id: incoming.id,
+      groupId: incoming.groupId,
+      expiresAt: incoming.expiresAt,
+      maxUses: incoming.maxUses,
+      usesCount: incoming.usesCount,
+      version: incoming.version,
+      token: null,
+      revokedAt: incoming.revokedAt,
+      createdAt: incoming.createdAt,
+      updatedAt: incoming.updatedAt,
+    );
   }
 
   Future<void> deleteEvent(PlannerEvent event) async {
@@ -3815,6 +4564,12 @@ class PlannerController extends ChangeNotifier {
   String _friendlyError(Object error) {
     if (error is AuthException) return error.message;
     if (error is RuntimeConfigurationException) return error.message;
+    if (error is InviteUnavailableException) return error.message;
+    if (error is InviteRateLimitedException) return error.message;
+    if (error is InviteJoinCommittedException) return error.message;
+    if (error is InviteOperationStaleException) return error.message;
+    if (error is InviteLinkFormatException) return error.message;
+    if (error is InviteLinkConfigurationException) return error.message;
     if (error is ScheduleConflictException) return error.message;
     if (error is ScheduleValidationException) return error.message;
     if (error is FormatException) return error.message;
@@ -3826,7 +4581,7 @@ class PlannerController extends ChangeNotifier {
               lower.contains('만료') ||
               lower.contains('올바르') ||
               lower.contains('사용'))) {
-        return message;
+        return const InviteUnavailableException.invalidOrExpired().message;
       }
     }
     if (error is PostgrestException && error.code == '40001') {
@@ -3893,7 +4648,12 @@ class PlannerController extends ChangeNotifier {
     _eventInvalidationSubscription = null;
     _oauthTimeoutTimer?.cancel();
     _oauthTimeoutTimer = null;
+    _pendingInviteExpiryTimer?.cancel();
+    _pendingInviteExpiryTimer = null;
+    _clearPendingInvitePreviewFuture();
     unawaited(_authSubscription?.cancel());
+    unawaited(_inviteLinkSubscription?.cancel());
+    _inviteLinkSubscription = null;
     unawaited(_eventSubscription?.cancel());
     unawaited(_groupLifecycleSubscription?.cancel());
     _groupLifecycleSubscription = null;

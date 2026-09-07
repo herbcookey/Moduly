@@ -1,3 +1,5 @@
+import '../invite_link.dart';
+
 /// `--dart-define`으로 전달하는 런타임 설정이다.
 ///
 /// 앱은 의도적으로 Supabase 공개(anon) 키만 받는다. service-role 키는
@@ -6,18 +8,58 @@ class AppConfig {
   const AppConfig({
     required this.supabaseUrl,
     required this.supabasePublishableKey,
+    this.inviteBaseUrl = '',
   });
 
   final String supabaseUrl;
   final String supabasePublishableKey;
 
+  /// Public origin used when constructing shareable invite links.  This is
+  /// deliberately independent from [supabaseUrl]: a Supabase project URL is
+  /// an API endpoint, not an application/deep-link origin.  The value is
+  /// supplied with `--dart-define=INVITE_BASE_URL=...` and may be omitted in
+  /// local/demo builds.
+  final String inviteBaseUrl;
+
   factory AppConfig.fromEnvironment() => const AppConfig(
     supabaseUrl: String.fromEnvironment('SUPABASE_URL'),
     supabasePublishableKey: String.fromEnvironment('SUPABASE_PUBLISHABLE_KEY'),
+    inviteBaseUrl: String.fromEnvironment('INVITE_BASE_URL'),
   );
 
   bool get hasSupabase =>
       supabaseUrl.trim().isNotEmpty && supabasePublishableKey.trim().isNotEmpty;
+
+  /// Raw configuration presence.  URI/scheme/host validation is kept in
+  /// `invite_link.dart` so all callers (builder, parser, and UI policy) share
+  /// exactly one canonical validator.
+  bool get hasInviteBaseUrl => inviteBaseUrl.trim().isNotEmpty;
+
+  /// Whether the configured origin can be used for share links in a
+  /// development/test build.  Production callers should use
+  /// [inviteLinksEnabledFor] with `isRelease: true` to enforce HTTPS.
+  bool get inviteLinksEnabled => validateInviteBaseUrl(inviteBaseUrl).isValid;
+
+  String? get inviteLinkConfigurationError =>
+      validateInviteBaseUrl(inviteBaseUrl).message;
+
+  bool inviteLinksEnabledFor({
+    required bool isRelease,
+    bool allowLocalhostHttp = true,
+  }) => validateInviteBaseUrl(
+    inviteBaseUrl,
+    isRelease: isRelease,
+    allowLocalhostHttp: allowLocalhostHttp,
+  ).isValid;
+
+  String? inviteLinkConfigurationErrorFor({
+    required bool isRelease,
+    bool allowLocalhostHttp = true,
+  }) => validateInviteBaseUrl(
+    inviteBaseUrl,
+    isRelease: isRelease,
+    allowLocalhostHttp: allowLocalhostHttp,
+  ).message;
 
   /// 사용할 수 있는 공개 Supabase 설정이 없는 릴리스 빌드에서 안전하고
   /// 조치 가능한 메시지를 반환한다. 비밀 값은 절대 포함하지 않는다.

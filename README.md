@@ -189,14 +189,15 @@ and are not claimed as executed here.
 
 1. Keep `.env.example` as the checked-in placeholder reference. For Flutter
    3.44 or newer, copy it to an ignored `.env.local` file and replace the two
-   public values with the deployment values:
+   public values with the deployment values. Set `INVITE_BASE_URL` only when
+   the operator owns a public HTTPS origin that serves the Flutter app:
 
    ```sh
    cp .env.example .env.local
    ```
 
    The checked-in example uses Flutter's `.env` key-value format. Flutter 3.44+
-   accepts either this format or a JSON object with the same two keys when
+   accepts either this format or a JSON object with the same three keys when
    loading `--dart-define-from-file`. Never put a service-role key, database
    password/URI, or any other server-only credential in Flutter, source control,
    or a mobile binary.
@@ -342,6 +343,56 @@ migration or by the client. Keep the native custom-scheme entry in every
 environment that ships a native app, and keep the web origin entries for every
 hosted web deployment.
 
+### Invite links and sharing
+
+The owner sees a one-shot invite code after creating it. The dialog can copy
+the formatted code or open the OS share sheet. A shareable URL is appended only
+when `INVITE_BASE_URL` is a valid configured HTTPS origin; otherwise the app
+shares the code alone. The Supabase API URL is never used as an application
+origin, and this repository does not invent a production hostname. A listed
+invite row has no plaintext token, so copy/share is intentionally available
+only in the creation result.
+
+Native fallback links use the registered `moduly://invite/<token>` scheme. The
+existing `moduly://auth-callback` scheme remains separate for Supabase auth and
+password recovery. The Flutter listener captures a link before Supabase auth
+initialization completes, buffers cold-start values, and de-duplicates warm and
+initial deliveries. Auth/recovery callback parameters always remain owned by
+Supabase; invite preview and joining happen only after an authenticated user
+explicitly confirms the group.
+
+The web build uses Flutter's path URL strategy, so a direct
+`https://<configured-origin>/invite/<token>` request and a refresh must be
+rewritten by the hosting provider to the same `web/index.html` SPA entry. The
+same rewrite is required for `/auth-callback` (including its query string).
+The app removes the token from the browser route immediately and keeps it in a
+short-lived pending invite state (memory, with best-effort tab-scoped
+`sessionStorage` hydration so a login redirect can resume). It is never put in
+query parameters, logs, analytics, or the public preview model. The current
+build intentionally does not generate hash-style links; a host that cannot
+provide SPA rewrites must add the rewrite before enabling web invite links.
+
+Verified HTTPS links require operator-owned platform association files in
+addition to the Flutter changes:
+
+* Android App Links need a separate `https` intent filter with
+  `android:autoVerify="true"`, the final host, and
+  `https://<host>/.well-known/assetlinks.json` containing the
+  `com.herbcookey.moduly` package and every release signing certificate's
+  SHA-256 fingerprint. Verify on a device with
+  `adb shell pm verify-app-links --re-verify com.herbcookey.moduly`.
+* iOS Universal Links need `applinks:<host>` in the signed Associated Domains
+  entitlement and `https://<host>/.well-known/apple-app-site-association`
+  (no `.json` suffix or redirects) with the real Apple Team ID and
+  `com.herbcookey.moduly` app ID. Each subdomain needs its own entitlement and
+  association file.
+
+No HTTPS intent filter, Apple entitlement, Team ID, association file, Windows
+MSIX/registry entry, or Linux `.desktop` registration is checked in here until
+the operator supplies the real host/signing metadata. Desktop custom-scheme
+delivery therefore remains an installer responsibility; use the web URL or
+manual code on unpackaged Windows/Linux builds.
+
 ### Desktop custom-scheme packaging
 
 The macOS Runner registers `moduly` in `macos/Runner/Info.plist`, so packaged
@@ -459,6 +510,9 @@ real contact route before release rather than copying a placeholder.
   participant-aware create/update/replace RPCs, parent-event version
   invalidation, and leave/deactivation pruning. It is intentionally not added
   to the `supabase_realtime` publication.
+- `supabase/migrations/20260907130004_invite_links.sql` adds the narrow,
+  authenticated invite-preview RPC. It returns sanitized group metadata only;
+  the bearer token is never persisted or returned by the preview endpoint.
 - `supabase/seed.sql` is an idempotent, local-only demo seed that never creates
   an auth user or stores an invite plaintext token.
 

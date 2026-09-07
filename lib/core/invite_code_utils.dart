@@ -1,5 +1,30 @@
 const String inviteCodeAlphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const int inviteCodeLength = 12;
+const int legacyInviteCodeLength = 48;
+
+final RegExp _shortInviteCodePattern = RegExp(
+  '^[${RegExp.escape(inviteCodeAlphabet)}]{$inviteCodeLength}'
+  r'$',
+);
+final RegExp _legacyInviteCodePattern = RegExp(r'^[0-9a-fA-F]{48}$');
+
+/// Returns the canonical bearer-token form accepted by invite links.
+///
+/// Manual code entry remains intentionally more permissive through
+/// [normalizeInviteCode], which strips display separators.  Link parsing must
+/// call this strict helper instead so a path can never contain hidden
+/// separators, whitespace, or an unsupported token shape.
+String? normalizeStrictInviteToken(String value) {
+  if (value.isEmpty || value.trim() != value) return null;
+  if (value.contains(RegExp(r'[\s\u0000-\u001f\u007f]'))) return null;
+  final upper = value.toUpperCase();
+  if (_shortInviteCodePattern.hasMatch(upper)) return upper;
+  if (_legacyInviteCodePattern.hasMatch(value)) return value.toLowerCase();
+  return null;
+}
+
+bool isStrictInviteToken(String value) =>
+    normalizeStrictInviteToken(value) != null;
 
 /// 사용자 입력을 서버로 보낼 토큰으로 변환한다.
 ///

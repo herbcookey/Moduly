@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -201,6 +202,17 @@ abstract interface class EventMemberAssignmentCapability {
   });
 }
 
+/// Optional authenticated capability for reading the non-sensitive group
+/// projection behind an invite token.  The token is a local context hint;
+/// Supabase adapters derive the actor from auth.uid() and send only `p_token`
+/// to the RPC.
+abstract interface class InvitePreviewCapability {
+  Future<InvitePreview> previewInvite({
+    required String userId,
+    required String token,
+  });
+}
+
 class ScheduleConflictException implements Exception {
   const ScheduleConflictException(this.message);
   final String message;
@@ -232,6 +244,65 @@ class ScheduleValidationException implements Exception {
   String toString() => message;
 }
 
+/// All terminal invite states intentionally collapse to one public reason so
+/// callers cannot probe token existence, revocation, usage, or group state.
+enum InviteUnavailableReason { invalidOrExpired }
+
+class InviteUnavailableException implements Exception {
+  const InviteUnavailableException.invalidOrExpired()
+    : reason = InviteUnavailableReason.invalidOrExpired,
+      message = '초대 링크가 만료되었거나 올바르지 않습니다.';
+
+  final InviteUnavailableReason reason;
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+/// The only invite oracle state exposed distinctly is a server-side rate
+/// limit.  [retryAfter] is optional and never includes token material.
+/// Raised when the actor-local invite preview/join budget is exhausted.  The
+/// longer name is the canonical API; the typedef below preserves the original
+/// spelling used by older screens and test doubles.
+class InviteRateLimitedException implements Exception {
+  const InviteRateLimitedException({this.retryAfter})
+    : message = '초대 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.';
+
+  final Duration? retryAfter;
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+/// Backwards-compatible spelling retained for existing callers.  A typedef
+/// (rather than a subclass) keeps `isA<InviteRateLimitException>()` and
+/// `isA<InviteRateLimitedException>()` equivalent at runtime.
+typedef InviteRateLimitException = InviteRateLimitedException;
+
+/// The join RPC has committed membership, but the follow-up group projection
+/// could not be read.  Callers must not retry the bearer token: membership is
+/// already authoritative on the server.  The message is fixed and contains no
+/// transport details or invite material.
+class InviteJoinCommittedException extends ScheduleConflictException {
+  const InviteJoinCommittedException()
+    : super('그룹 참여는 완료되었지만 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.');
+}
+
+/// A create response arrived after its originating auth/group context was
+/// invalidated.  The raw one-shot token is deliberately discarded instead of
+/// returning it to a stale caller.
+class InviteOperationStaleException extends ScheduleConflictException {
+  const InviteOperationStaleException()
+    : super('초대 코드 생성 결과가 더 이상 유효하지 않습니다. 다시 시도해 주세요.');
+}
+
+final RegExp _inviteUuidPattern = RegExp(
+  r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+  r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+);
+
 /// Lifecycle state for one Supabase invalidation channel. Capturing this
 /// object in callbacks lets a failed/retired channel be removed without ever
 /// clearing or tearing down a newer channel that has replaced it.
@@ -255,8 +326,14 @@ class LocalScheduleRepository
         GroupLifecycleCapability,
         EventMemberAssignmentCapability,
         BoundedEventRangeReadCapability,
-        EventByIdReadCapability {
-  LocalScheduleRepository({Iterable<PlannerMember> seedMembers = const []}) {
+        EventByIdReadCapability,
+        InvitePreviewCapability {
+  LocalScheduleRepository({
+    Iterable<PlannerMember> seedMembers = const [],
+    DateTime Function()? clock,
+    Random? random,
+  }) : _clock = clock ?? DateTime.now,
+       _random = random ?? Random.secure() {
     _seed(seedMembers);
   }
 
@@ -291,7 +368,62 @@ class LocalScheduleRepository
   _groupControllers = <String, Map<String, StreamController<PlannerGroup?>>>{};
   final Map<String, Set<StreamController<void>>> _rangeInvalidationControllers =
       <String, Set<StreamController<void>>>{};
+  final DateTime Function() _clock;
+  final Random _random;
+  final Map<String, List<DateTime>> _previewAttempts =
+      <String, List<DateTime>>{};
+  final Map<String, List<DateTime>> _joinAttempts = <String, List<DateTime>>{};
   int _counter = 0;
+  int _inviteCounter = 0;
+
+  DateTime _nowUtc() => _clock().toUtc();
+
+  /// Records one real invite attempt in an actor-scoped sliding-hour ledger.
+  /// The ledgers intentionally contain timestamps only: bearer tokens never
+  /// become part of rate-limit state.  At the limit, the request is rejected
+  /// without adding a timestamp, matching the database RPC's lockout
+  /// semantics.
+  bool _recordInviteAttempt({
+    required Map<String, List<DateTime>> ledger,
+    required String actorId,
+    required int limit,
+  }) {
+    final now = _nowUtc();
+    final cutoff = now.subtract(const Duration(hours: 1));
+    final attempts = ledger.putIfAbsent(actorId, () => <DateTime>[]);
+    attempts.removeWhere((timestamp) => !timestamp.isAfter(cutoff));
+    if (attempts.isEmpty) {
+      ledger.remove(actorId);
+    }
+    final activeAttempts = ledger.putIfAbsent(actorId, () => <DateTime>[]);
+    if (activeAttempts.length >= limit) {
+      return false;
+    }
+    activeAttempts.add(now);
+    return true;
+  }
+
+  String _generateInviteToken() {
+    // Random.secure is used by default because this value is a bearer token.
+    // The bounded retry also guarantees progress if an injected deterministic
+    // source happens to collide with a token already held by this adapter.
+    for (var attempt = 0; attempt < 64; attempt++) {
+      final token = String.fromCharCodes(
+        List<int>.generate(
+          inviteCodeLength,
+          (_) => inviteCodeAlphabet.codeUnitAt(
+            _random.nextInt(inviteCodeAlphabet.length),
+          ),
+          growable: false,
+        ),
+      );
+      if (normalizeStrictInviteToken(token) != token) continue;
+      if (_invites.values.every((invite) => invite.token != token)) {
+        return token;
+      }
+    }
+    throw StateError('초대 코드를 만들 수 없습니다.');
+  }
 
   void _seed(Iterable<PlannerMember> seedMembers) {
     const group = PlannerGroup(
@@ -830,9 +962,83 @@ class LocalScheduleRepository
   }
 
   @override
+  Future<InvitePreview> previewInvite({
+    required String userId,
+    required String token,
+  }) async {
+    if (userId.trim().isEmpty) {
+      throw const ScheduleValidationException('로그인 세션을 다시 확인해 주세요.');
+    }
+    if (!_recordInviteAttempt(
+      ledger: _previewAttempts,
+      actorId: userId,
+      limit: 60,
+    )) {
+      throw const InviteRateLimitedException();
+    }
+    final strict = normalizeStrictInviteToken(token);
+    final normalized = strict ?? normalizeInviteCode(token);
+    if (normalized.isEmpty ||
+        (normalizeStrictInviteToken(normalized) == null &&
+            normalized != normalizeInviteCode('family'))) {
+      throw const InviteUnavailableException.invalidOrExpired();
+    }
+    final matchingInvite = _invites.values
+        .where(
+          (invite) => normalizeInviteCode(invite.token ?? '') == normalized,
+        )
+        .firstOrNull;
+    PlannerGroup? group;
+    DateTime? expiresAt;
+    if (matchingInvite != null) {
+      group = _groups[matchingInvite.groupId];
+      expiresAt = matchingInvite.expiresAt;
+      if (group == null || group.isArchived) {
+        throw const InviteUnavailableException.invalidOrExpired();
+      }
+      final isActiveMember = (_members[group.id] ?? const <PlannerMember>[])
+          .any((member) => member.id == userId && member.isActive);
+      if (!isActiveMember &&
+          (matchingInvite.isRevoked ||
+              matchingInvite.isExpired ||
+              matchingInvite.isExhausted)) {
+        throw const InviteUnavailableException.invalidOrExpired();
+      }
+    } else if (normalized == normalizeInviteCode('family')) {
+      // The local demo's hand-written code is intentionally available for
+      // manual fallback.  It is not emitted by the strict share-link builder.
+      group = _groups['demo-group'];
+      expiresAt = DateTime.utc(9999, 12, 31, 23, 59, 59);
+      if (group == null || group.isArchived) {
+        throw const InviteUnavailableException.invalidOrExpired();
+      }
+    } else {
+      throw const InviteUnavailableException.invalidOrExpired();
+    }
+    final alreadyMember = (_members[group.id] ?? const <PlannerMember>[]).any(
+      (member) => member.id == userId && member.isActive,
+    );
+    return InvitePreview(
+      groupId: group.id,
+      groupName: group.name,
+      groupDescription: group.description,
+      groupTimezone: group.timezone,
+      expiresAt: expiresAt.toUtc(),
+      alreadyMember: alreadyMember,
+    );
+  }
+
+  @override
   Future<PlannerGroup> joinGroup(String userId, String inviteCode) async {
     if (userId.trim().isEmpty) {
       throw const ScheduleValidationException('로그인 세션을 다시 확인해 주세요.');
+    }
+    if (!_recordInviteAttempt(
+      ledger: _joinAttempts,
+      actorId: userId,
+      limit: 20,
+    )) {
+      throw const InviteRateLimitedException();
     }
     final code = normalizeInviteCode(inviteCode);
     if (code.isEmpty) {
@@ -841,25 +1047,36 @@ class LocalScheduleRepository
     final matchingInvite = _invites.values
         .where((invite) => normalizeInviteCode(invite.token ?? '') == code)
         .firstOrNull;
-    final group = matchingInvite == null
-        ? _groups.values.firstWhere(
-            (candidate) =>
-                (candidate.id == 'demo-group' &&
-                code == normalizeInviteCode('family')),
-            orElse: () => throw StateError('초대 코드를 찾을 수 없습니다.'),
-          )
-        : _groups[matchingInvite.groupId]!;
-    if (group.isArchived) {
-      throw const ScheduleConflictException('보관된 그룹에는 참여할 수 없습니다.');
+    final PlannerGroup? group = matchingInvite == null
+        ? _groups.values
+              .where(
+                (candidate) =>
+                    candidate.id == 'demo-group' &&
+                    code == normalizeInviteCode('family'),
+              )
+              .firstOrNull
+        : _groups[matchingInvite.groupId];
+    // Missing, archived, revoked, expired, and exhausted invites deliberately
+    // collapse to one terminal reason.  This keeps Local parity with the
+    // Supabase preview/join oracle and avoids a token/group existence probe.
+    if (group == null || group.isArchived) {
+      throw const InviteUnavailableException.invalidOrExpired();
+    }
+    final current = _members[group.id] ?? <PlannerMember>[];
+    final existingIndex = current.indexWhere((member) => member.id == userId);
+    // Acceptance is idempotent for an already-active member.  The server
+    // oracle may have returned this hint even after token expiry/revocation;
+    // re-check the live membership before applying invite validity or usage
+    // limits and never consume another use in this branch.
+    if (existingIndex >= 0 && current[existingIndex].isActive) {
+      return group;
     }
     if (matchingInvite != null &&
         (matchingInvite.isRevoked ||
             matchingInvite.isExpired ||
             matchingInvite.isExhausted)) {
-      throw StateError('초대 코드가 만료되었거나 사용 횟수를 초과했습니다.');
+      throw const InviteUnavailableException.invalidOrExpired();
     }
-    final current = _members[group.id] ?? <PlannerMember>[];
-    final existingIndex = current.indexWhere((member) => member.id == userId);
     final shouldConsumeInvite =
         matchingInvite != null &&
         (existingIndex < 0 || !current[existingIndex].isActive);
@@ -923,13 +1140,9 @@ class LocalScheduleRepository
     if (maxUses < 1 || maxUses > 100000 || ttl <= Duration.zero) {
       throw const FormatException('초대 만료일과 사용 횟수를 확인해 주세요.');
     }
-    final now = DateTime.now().toUtc();
-    final id = 'invite-${now.microsecondsSinceEpoch}';
-    final token =
-        groupId == 'demo-group' &&
-            !_invites.values.any((invite) => invite.groupId == groupId)
-        ? 'family'
-        : 'family-${now.microsecondsSinceEpoch}';
+    final now = _nowUtc();
+    final id = 'invite-${now.microsecondsSinceEpoch}-${_inviteCounter++}';
+    final token = _generateInviteToken();
     final invite = InviteCode(
       id: id,
       groupId: groupId,
@@ -949,7 +1162,22 @@ class LocalScheduleRepository
   Future<List<InviteCode>> inviteCodesForGroup(String groupId) async {
     if (_groups[groupId]?.isArchived == true) return const <InviteCode>[];
     return List<InviteCode>.unmodifiable(
-      _invites.values.where((invite) => invite.groupId == groupId),
+      _invites.values
+          .where((invite) => invite.groupId == groupId)
+          .map(
+            (invite) => InviteCode(
+              id: invite.id,
+              groupId: invite.groupId,
+              expiresAt: invite.expiresAt,
+              maxUses: invite.maxUses,
+              usesCount: invite.usesCount,
+              version: invite.version,
+              token: null,
+              revokedAt: invite.revokedAt,
+              createdAt: invite.createdAt,
+              updatedAt: invite.updatedAt,
+            ),
+          ),
     );
   }
 
@@ -1669,6 +1897,12 @@ class ConfigurationBlockedScheduleRepository extends LocalScheduleRepository {
       Future<PlannerGroup>.error(_error);
 
   @override
+  Future<InvitePreview> previewInvite({
+    required String userId,
+    required String token,
+  }) => Future<InvitePreview>.error(ScheduleCapabilityException(message));
+
+  @override
   Future<String> createInviteCode(String groupId) =>
       Future<String>.error(_error);
 
@@ -1738,7 +1972,14 @@ class SupabaseScheduleRepository
         GroupLifecycleCapability,
         EventMemberAssignmentCapability,
         BoundedEventRangeReadCapability,
-        EventByIdReadCapability {
+        EventByIdReadCapability,
+        InvitePreviewCapability {
+  /// Current authenticated actor used by authenticated-only capabilities.
+  /// Kept as a small overridable seam so transport tests can provide a
+  /// matching session without manufacturing a signed JWT; production code
+  /// always reads the Supabase auth client.
+  String? get currentSessionUserId => _client.auth.currentUser?.id;
+
   /// [lifecyclePollInterval] is deliberately bounded to a conservative
   /// default for production (15 seconds).  Tests may inject a shorter clock
   /// interval when exercising the authoritative recheck path; the app uses
@@ -2795,32 +3036,89 @@ class SupabaseScheduleRepository
   }
 
   @override
+  Future<InvitePreview> previewInvite({
+    required String userId,
+    required String token,
+  }) async {
+    if (userId.trim().isEmpty) {
+      throw const ScheduleValidationException('로그인 세션을 다시 확인해 주세요.');
+    }
+    final normalizedToken = normalizeStrictInviteToken(token);
+    if (normalizedToken == null) {
+      throw const InviteUnavailableException.invalidOrExpired();
+    }
+    // The caller-provided id is only a stale-session guard.  It is never sent
+    // as an RPC parameter; the database derives auth.uid() from the session.
+    final currentUserId = currentSessionUserId;
+    if (currentUserId == null || currentUserId != userId) {
+      throw const ScheduleAuthorizationException('로그인 세션을 다시 확인해 주세요.');
+    }
+    dynamic result;
+    try {
+      result = await _client.rpc<dynamic>(
+        'preview_invite',
+        params: <String, dynamic>{'p_token': normalizedToken},
+      );
+    } catch (error) {
+      if (_isInviteRateLimitError(error)) {
+        throw const InviteRateLimitedException();
+      }
+      rethrow;
+    }
+    return _invitePreviewFromRpcResult(result);
+  }
+
+  @override
   Future<PlannerGroup> joinGroup(String userId, String inviteCode) async {
     if (userId.trim().isEmpty) {
       throw const ScheduleValidationException('로그인 세션을 다시 확인해 주세요.');
+    }
+    // The local user id is only a stale-session guard.  The RPC derives the
+    // actor from auth.uid(), so a missing or mismatched SDK session must fail
+    // closed before any bearer token is sent over the wire.
+    final currentUserId = currentSessionUserId;
+    if (currentUserId == null || currentUserId != userId) {
+      throw const ScheduleAuthorizationException('로그인 세션을 다시 확인해 주세요.');
     }
     final normalizedCode = normalizeInviteCode(inviteCode);
     if (normalizedCode.isEmpty) {
       throw const FormatException('초대 코드를 입력해 주세요.');
     }
-    final result = await _client.rpc<dynamic>(
-      'join_group_with_invite',
-      params: <String, dynamic>{'p_token': normalizedCode},
-    );
-    final row = result is List
-        ? (result.isEmpty ? null : result.first)
-        : result;
-    if (row is! Map<String, dynamic> ||
-        row['group_id'] == null ||
-        row['joined'] != true) {
-      throw StateError('초대 코드가 만료되었거나 올바르지 않습니다.');
+    dynamic result;
+    try {
+      result = await _client.rpc<dynamic>(
+        'join_group_with_invite',
+        params: <String, dynamic>{'p_token': normalizedCode},
+      );
+    } catch (error) {
+      if (_isInviteRateLimitError(error)) {
+        throw const InviteRateLimitedException();
+      }
+      rethrow;
     }
-    final group = await _client
-        .from('groups')
-        .select('id,owner_id,name,description,timezone,version,deleted_at')
-        .eq('id', row['group_id'])
-        .single();
-    return _groupFromRow(group);
+    final row = _strictSingleRpcMap(result);
+    if (row == null ||
+        row['group_id'] is! String ||
+        (row['group_id'] as String).trim().isEmpty ||
+        row['joined'] != true) {
+      if (row?['reason'] == 'rate_limited') {
+        throw const InviteRateLimitException();
+      }
+      throw const InviteUnavailableException.invalidOrExpired();
+    }
+    try {
+      final group = await _client
+          .from('groups')
+          .select('id,owner_id,name,description,timezone,version,deleted_at')
+          .eq('id', row['group_id'])
+          .single();
+      return _groupFromRow(group);
+    } catch (_) {
+      // The RPC has already inserted/reactivated membership.  Never make the
+      // caller retry the bearer token merely because this projection read
+      // failed; expose a fixed refresh error instead.
+      throw const InviteJoinCommittedException();
+    }
   }
 
   @override
@@ -3215,6 +3513,90 @@ class SupabaseScheduleRepository
     final parsed = _strictVersionValue(value);
     if (parsed == null || parsed < 0 || parsed > 0xffffffff) return null;
     return parsed;
+  }
+
+  static InvitePreview _invitePreviewFromRpcResult(Object? result) {
+    // `preview_invite` returns jsonb, i.e. one JSON object.  Unlike table RPC
+    // rows, a one-element array is not a valid response and must fail closed.
+    final row = _strictInvitePreviewMap(result);
+    if (row == null || row['valid'] is! bool) {
+      throw const ScheduleCapabilityException('초대 미리보기 응답을 확인할 수 없습니다.');
+    }
+    final valid = row['valid'] as bool;
+    if (!valid) {
+      const invalidKeys = <String>{'valid', 'reason'};
+      if (row.length != invalidKeys.length ||
+          row.keys.toSet().difference(invalidKeys).isNotEmpty ||
+          row['reason'] is! String) {
+        throw const ScheduleCapabilityException('초대 미리보기 응답을 확인할 수 없습니다.');
+      }
+      switch (row['reason']) {
+        case 'invalid_or_expired':
+          throw const InviteUnavailableException.invalidOrExpired();
+        case 'rate_limited':
+          throw const InviteRateLimitedException();
+        default:
+          throw const ScheduleCapabilityException('초대 미리보기 응답을 확인할 수 없습니다.');
+      }
+    }
+    const expectedKeys = <String>{
+      'valid',
+      'group_id',
+      'group_name',
+      'group_description',
+      'group_timezone',
+      'expires_at',
+      'already_member',
+    };
+    if (row.length != expectedKeys.length ||
+        row.keys.toSet().difference(expectedKeys).isNotEmpty ||
+        !expectedKeys.every(row.containsKey) ||
+        row['group_id'] is! String ||
+        row['group_name'] is! String ||
+        row['group_description'] is! String ||
+        row['group_timezone'] is! String ||
+        row['expires_at'] is! String ||
+        row['already_member'] is! bool) {
+      throw const ScheduleCapabilityException('초대 미리보기 응답을 확인할 수 없습니다.');
+    }
+    final groupId = row['group_id'] as String;
+    final groupName = row['group_name'] as String;
+    final groupDescription = row['group_description'] as String;
+    final timezone = row['group_timezone'] as String;
+    final alreadyMember = row['already_member'] as bool;
+    final expiresAt = parseStrictExplicitOffsetTimestamp(row['expires_at']);
+    if (!_inviteUuidPattern.hasMatch(groupId) ||
+        groupId != groupId.trim() ||
+        groupName.trim().isEmpty ||
+        groupName != groupName.trim() ||
+        groupDescription != groupDescription.trim() ||
+        timezone.trim().isEmpty ||
+        timezone != timezone.trim() ||
+        !isValidIanaTimezone(timezone) ||
+        expiresAt == null ||
+        (!alreadyMember && !expiresAt.isAfter(DateTime.now().toUtc()))) {
+      throw const ScheduleCapabilityException('초대 미리보기 응답을 확인할 수 없습니다.');
+    }
+    return InvitePreview(
+      groupId: groupId,
+      groupName: groupName,
+      groupDescription: groupDescription,
+      groupTimezone: timezone,
+      expiresAt: expiresAt,
+      alreadyMember: alreadyMember,
+    );
+  }
+
+  static bool _isInviteRateLimitError(Object error) {
+    return error is PostgrestException && error.code == '429';
+  }
+
+  static Map<String, dynamic>? _strictInvitePreviewMap(Object? result) {
+    if (result is Map<String, dynamic>) return result;
+    if (result is Map && result.keys.every((key) => key is String)) {
+      return Map<String, dynamic>.from(result);
+    }
+    return null;
   }
 
   static Map<String, dynamic>? _strictSingleRpcMap(Object? result) {

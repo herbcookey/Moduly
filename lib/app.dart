@@ -1,15 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'core/config/app_config.dart';
+import 'core/invite_link.dart';
 import 'repositories/auth_repository.dart';
 import 'screens/auth_screens.dart';
 import 'screens/event_editor_screen.dart';
 import 'screens/group_picker_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/invite_preview_screen.dart';
 import 'screens/legal_screens.dart';
 import 'screens/members_screen.dart';
 import 'screens/settings_screen.dart';
+import 'platform/browser_location_source.dart';
 import 'state/app_state.dart';
 
 class ModulyApp extends ConsumerWidget {
@@ -79,6 +84,8 @@ final routerProvider = Provider<GoRouter>((ref) {
   // GoRouter가 변경 감지를 관리하므로 여기서는 읽기만 하여
   // 일정 이벤트가 올 때마다 라우터 전체가 다시 빌드되지 않게 한다.
   final controller = ref.read(plannerControllerProvider);
+  final config = ref.read(appConfigProvider);
+  final browserLocationSource = ref.read(browserLocationSourceProvider);
   // 비밀번호 복구 화면은 비밀번호 업데이트가 완료되면 성공 상태를
   // 잠시 보여줘야 한다. 컨트롤러가 세션을 signed-in으로 바꾸는 알림과
   // 화면이 성공 상태를 그리는 사이에 라우터가 /groups로 이동하지 않도록
@@ -87,8 +94,41 @@ final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     initialLocation: '/login',
     refreshListenable: controller,
+    // GoRouter's default error page includes the unmatched location.  A
+    // malformed invite path could therefore echo a bearer token back into the
+    // widget tree. Keep all routing failures token-free and actionable.
+    errorBuilder: (context, state) => const _SafeRouteErrorScreen(),
     redirect: (context, state) {
       final location = state.uri.path;
+      // A browser path strategy strips an application's deployment prefix
+      // before GoRouter sees it.  The source below preserves the complete
+      // address-bar URI so the strict parser can check the configured origin
+      // and *full* base path.  Every invite-shaped candidate is scrubbed in
+      // this same branch, even when parsing fails, so an opaque value cannot
+      // reach GoRouter's error page or widget tree.
+      final inviteCandidate = _inviteRouteCandidate(
+        route: state.uri,
+        browserLocation: browserLocationSource.currentLocation,
+        config: config,
+      );
+      if (inviteCandidate.isCandidate) {
+        final captured =
+            inviteCandidate.uri != null &&
+            controller.captureInviteUri(
+              inviteCandidate.uri!,
+              config: config,
+              currentOrigin: inviteCandidate.currentOrigin,
+              isRelease: kReleaseMode,
+            );
+        if (captured) {
+          return controller.isAuthenticated ? '/invite' : '/login';
+        }
+        // Invalid, unconfigured, wrong-origin, encoded, query-bearing,
+        // repeated-base, and trailing-slash invite paths all leave through a
+        // token-free route.  The signed-in destination is deliberately
+        // groups rather than the preview, because no pending token exists.
+        return controller.isAuthenticated ? '/groups' : '/login';
+      }
       final isAuthCallback =
           location == '/auth-callback' || state.uri.host == 'auth-callback';
       // 네이티브 Supabase 어댑터가 콜백 URI를 처리한 뒤 인증 이벤트를
@@ -102,6 +142,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         final query = state.uri.hasQuery ? '?${state.uri.query}' : '';
         return '/auth-callback$query';
       }
+      final isInviteRoute = location == '/invite';
       final publicAuthRoute =
           location == '/login' ||
           location == '/signup' ||
@@ -110,7 +151,14 @@ final routerProvider = Provider<GoRouter>((ref) {
           location == '/reset-password' ||
           location == '/privacy-policy' ||
           location == '/terms-of-service' ||
-          location == '/auth-callback';
+          location == '/auth-callback' ||
+          isInviteRoute;
+      // Keep the pending invite in the controller while a signed-out user
+      // authenticates. Login/signup submitters traditionally navigate to
+      // /groups; the pending invite wins that intermediate destination once
+      // the session is established. A warm link also moves an already signed
+      // in user to the token-free preview route.
+      if (!controller.isAuthenticated && isInviteRoute) return '/login';
       if (!controller.isAuthenticated && !publicAuthRoute) return '/login';
       if (location != '/reset-password' && !controller.isInPasswordRecovery) {
         allowPasswordResetSuccess = false;
@@ -119,6 +167,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       // 의도적으로 /reset-password에 남겨 둔다.
       if (controller.isInPasswordRecovery && location != '/reset-password') {
         return '/reset-password';
+      }
+      if (controller.isAuthenticated &&
+          controller.hasPendingInvite &&
+          location != '/invite') {
+        return '/invite';
       }
       // 확인 링크는 일반 로그인 이벤트를 만들지만, 복구 링크는
       // 비밀번호를 바꿀 때까지 재설정 화면에 남겨 둔다.
@@ -224,6 +277,10 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const TermsOfServiceScreen(),
       ),
       GoRoute(
+        path: '/invite',
+        builder: (context, state) => const InvitePreviewScreen(),
+      ),
+      GoRoute(
         path: '/groups',
         builder: (context, state) => const GroupPickerScreen(),
       ),
@@ -256,6 +313,154 @@ final routerProvider = Provider<GoRouter>((ref) {
     ],
   );
 });
+
+@immutable
+class _InviteRouteCandidate {
+  const _InviteRouteCandidate({
+    required this.isCandidate,
+    this.uri,
+    this.currentOrigin,
+  });
+
+  const _InviteRouteCandidate.none() : this(isCandidate: false);
+
+  final bool isCandidate;
+  final Uri? uri;
+  final Uri? currentOrigin;
+}
+
+/// Chooses the exact URI to hand to the strict invite parser.
+///
+/// On web, [browserLocation] is authoritative: it includes `/app` when a
+/// PathUrlStrategy deployment uses `<base href="/app/">`, while [route] is
+/// only `/invite/<token>`.  Native and test routers can still provide an
+/// absolute route directly.  A path-only route can be synthesized only for a
+/// root configured base; synthesizing a nested base without the browser seam
+/// would silently broaden acceptance of a wrong deployment root.
+_InviteRouteCandidate _inviteRouteCandidate({
+  required Uri route,
+  required Uri? browserLocation,
+  required AppConfig config,
+}) {
+  final routeHasCandidate = _hasInviteCandidate(route);
+  if (!routeHasCandidate) return const _InviteRouteCandidate.none();
+
+  if (browserLocation != null && _hasInviteCandidate(browserLocation)) {
+    return _InviteRouteCandidate(
+      isCandidate: true,
+      uri: browserLocation,
+      currentOrigin: _originOf(browserLocation),
+    );
+  }
+
+  final routeUri = _inviteUriForRoute(route, config);
+  return _InviteRouteCandidate(
+    isCandidate: true,
+    uri: routeUri,
+    currentOrigin:
+        routeUri != null &&
+            (routeUri.scheme.isNotEmpty || routeUri.host.isNotEmpty)
+        ? _originOf(routeUri)
+        : null,
+  );
+}
+
+/// Returns true when [uri] contains an invite marker followed by any raw
+/// candidate, including malformed/encoded values and a trailing slash.  A
+/// bare token-free `/invite` route remains available for the preview screen.
+bool _hasInviteCandidate(Uri uri) {
+  if (uri.scheme.toLowerCase() == 'moduly' &&
+      uri.host.toLowerCase() == 'invite') {
+    return uri.pathSegments.isNotEmpty || uri.path.endsWith('/');
+  }
+
+  final decodedSegments = uri.pathSegments;
+  for (var index = 0; index < decodedSegments.length; index++) {
+    if (decodedSegments[index].toLowerCase() != 'invite') continue;
+    if (index + 1 < decodedSegments.length ||
+        uri.path.endsWith('/') ||
+        uri.hasQuery ||
+        uri.hasFragment) {
+      return true;
+    }
+  }
+
+  // `Uri.pathSegments` usually decodes percent escapes, but retain a raw-path
+  // scan for malformed or partially encoded forms that Dart cannot decode
+  // into the literal marker.  They must be scrubbed just like any other
+  // invite-shaped value, never passed through a fallback route.
+  final rawSegments = uri.path.split('/');
+  for (var index = 0; index < rawSegments.length; index++) {
+    final raw = rawSegments[index].toLowerCase();
+    String decoded;
+    try {
+      decoded = Uri.decodeComponent(raw).toLowerCase();
+    } catch (_) {
+      decoded = raw;
+    }
+    if (decoded == 'invite') {
+      if (index + 1 < rawSegments.length || uri.hasQuery || uri.hasFragment) {
+        return true;
+      }
+    } else if (decoded.startsWith('invite') &&
+        decoded.length > 'invite'.length) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// Converts a path-only GoRouter location into the absolute URI expected by
+/// the strict invite parser.  Browser routing supplies an absolute seam for
+/// nested deployments; this fallback is intentionally limited to a root
+/// configured base and to routes that already carry the configured prefix.
+/// Native custom-scheme URIs are left untouched when supplied directly.
+Uri? _inviteUriForRoute(Uri route, AppConfig config) {
+  if (route.scheme.isNotEmpty || route.host.isNotEmpty) return route;
+  // A percent escape may be decoded when rebuilding a Uri from path
+  // segments.  Preserve the parser's fail-closed encoded-form policy.
+  if (route.toString().contains('%')) return null;
+  final base = validateInviteBaseUrl(
+    config.inviteBaseUrl,
+    isRelease: kReleaseMode,
+  ).uri;
+  if (base == null) return null;
+
+  final baseSegments = base.pathSegments;
+  final routeSegments = route.pathSegments;
+  if (baseSegments.isNotEmpty &&
+      _matchingInviteBaseOffset(routeSegments, baseSegments) == null) {
+    return null;
+  }
+  return Uri(
+    scheme: base.scheme,
+    host: base.host,
+    port: base.hasPort ? base.port : null,
+    path: route.path,
+    query: route.hasQuery ? route.query : null,
+    fragment: route.hasFragment ? route.fragment : null,
+  );
+}
+
+int? _matchingInviteBaseOffset(
+  List<String> routeSegments,
+  List<String> baseSegments,
+) {
+  if (routeSegments.length < baseSegments.length) return null;
+  for (var index = 0; index < baseSegments.length; index++) {
+    if (routeSegments[index] != baseSegments[index]) return null;
+  }
+  return baseSegments.length;
+}
+
+Uri? _originOf(Uri uri) {
+  if (uri.scheme.isEmpty || uri.host.isEmpty) return null;
+  return Uri(
+    scheme: uri.scheme,
+    host: uri.host,
+    port: uri.hasPort ? uri.port : null,
+  );
+}
 
 String? _emailFromRouteState(GoRouterState state) {
   final queryEmail = state.uri.queryParameters['email'];
@@ -336,6 +541,38 @@ class AppShell extends StatelessWidget {
               context.go('/home');
           }
         },
+      ),
+    );
+  }
+}
+
+class _SafeRouteErrorScreen extends StatelessWidget {
+  const _SafeRouteErrorScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('페이지를 찾을 수 없어요')),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Icon(Icons.link_off_outlined, size: 48),
+              const SizedBox(height: 16),
+              const Text(
+                '요청한 페이지를 열 수 없어요. 링크를 다시 확인해 주세요.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 20),
+              FilledButton(
+                onPressed: () => context.go('/login'),
+                child: const Text('로그인 화면으로 이동'),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

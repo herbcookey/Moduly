@@ -96,6 +96,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ? '$authPasswordMinimumLength자 이상 입력해 주세요.'
                   : null,
             ),
+            if (controller.hasPendingInvite) ...<Widget>[
+              const SizedBox(height: 16),
+              const _PendingInviteLoginNotice(),
+            ],
             if (demoMode) ...<Widget>[
               const SizedBox(height: 8),
               TextButton.icon(
@@ -164,6 +168,57 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             ),
             const SizedBox(height: 12),
             const AuthLegalLinks(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A signed-out invite recipient must be able to leave the forced invite
+/// flow without seeing or copying the bearer token.  Clearing the controller
+/// intent is enough to let ordinary login navigation proceed; the router's
+/// pending-invite guard no longer redirects the user back to the preview.
+class _PendingInviteLoginNotice extends ConsumerWidget {
+  const _PendingInviteLoginNotice();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = ref.watch(plannerControllerProvider);
+    if (!controller.hasPendingInvite) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    return Semantics(
+      container: true,
+      label: '초대 로그인 흐름',
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: scheme.secondaryContainer,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text(
+              '초대가 준비됐어요.',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: scheme.onSecondaryContainer,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '로그인하면 초대받은 그룹을 확인할 수 있어요.',
+              style: TextStyle(color: scheme.onSecondaryContainer),
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: () {
+                ref.read(plannerControllerProvider).cancelPendingInvite();
+              },
+              icon: const Icon(Icons.close),
+              label: const Text('초대 흐름 취소'),
+            ),
           ],
         ),
       ),
