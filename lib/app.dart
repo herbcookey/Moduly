@@ -8,6 +8,7 @@ import 'core/invite_link.dart';
 import 'repositories/auth_repository.dart';
 import 'screens/auth_screens.dart';
 import 'screens/event_editor_screen.dart';
+import 'screens/event_search_screen.dart';
 import 'screens/group_picker_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/invite_preview_screen.dart';
@@ -196,6 +197,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       final requiresGroup =
           location.startsWith('/home') ||
           location.startsWith('/members') ||
+          location.startsWith('/search') ||
           location.startsWith('/event');
       if (controller.isAuthenticated &&
           controller.selectedGroup == null &&
@@ -297,6 +299,10 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/home',
             builder: (context, state) => const HomeScreen(),
+          ),
+          GoRoute(
+            path: '/search',
+            builder: (context, state) => const EventSearchScreen(),
           ),
           GoRoute(
             path: '/members',

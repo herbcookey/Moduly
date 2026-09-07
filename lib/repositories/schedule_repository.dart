@@ -173,6 +173,27 @@ abstract interface class BoundedEventRangeReadCapability {
   Stream<void> watchEventInvalidations(String userId, String groupId);
 }
 
+/// Optional capability for bounded, server-backed event search.  Keeping this
+/// additive to [ScheduleRepository] preserves source compatibility with
+/// legacy adapters and test doubles while allowing production controllers to
+/// fail closed instead of falling back to an unbounded event download.
+abstract interface class EventSearchCapability {
+  /// Reads one keyset page of events visible to an authenticated active group
+  /// member.  [query] is trim-normalized; an empty query is valid for
+  /// period/filter-only searches.  Remote adapters derive actor identity from
+  /// their auth session and must never serialize [userId].
+  Future<EventRangePage> searchEvents({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    required String query,
+    EventRangeCursor? cursor,
+    int limit = eventSearchDefaultPageSize,
+    String? creatorId,
+    String? participantId,
+  });
+}
+
 /// Optional point lookup used by deep links/details routes. It is separate
 /// from bounded pages so an event outside the current calendar range can be
 /// opened without polluting that range's pagination projection.
@@ -397,6 +418,7 @@ class LocalScheduleRepository
         RecurringEventMemberAssignmentCapability,
         RecurrenceCapability,
         BoundedEventRangeReadCapability,
+        EventSearchCapability,
         EventByIdReadCapability,
         EventOccurrenceReadCapability,
         InvitePreviewCapability {
@@ -709,6 +731,75 @@ class LocalScheduleRepository
   }
 
   @override
+  Future<EventRangePage> searchEvents({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    required String query,
+    EventRangeCursor? cursor,
+    int limit = eventSearchDefaultPageSize,
+    String? creatorId,
+    String? participantId,
+  }) async {
+    final normalizedQuery = normalizeEventSearchQuery(query);
+    if (cursor != null &&
+        (cursor.occurrenceKey.isEmpty ||
+            !isValidOccurrenceKey(cursor.occurrenceKey))) {
+      throw const ScheduleValidationException('지원하지 않는 검색 페이지 커서입니다.');
+    }
+    _validateSearchRequest(
+      userId: userId,
+      groupId: groupId,
+      range: range,
+      limit: limit,
+      creatorId: creatorId,
+      participantId: participantId,
+    );
+    final normalizedCreator = creatorId?.trim();
+    final normalizedParticipant = participantId?.trim();
+    final foldedQuery = normalizedQuery.toLowerCase();
+    final candidates =
+        _materializedEventsForRange(
+              groupId: groupId,
+              range: range,
+              participantId: normalizedParticipant,
+            )
+            .where((event) {
+              if (normalizedCreator != null &&
+                  event.ownerId != normalizedCreator) {
+                return false;
+              }
+              if (foldedQuery.isEmpty) return true;
+              return event.title.toLowerCase().contains(foldedQuery) ||
+                  event.note.toLowerCase().contains(foldedQuery);
+            })
+            .toList(growable: true);
+    candidates.sort(_compareEventRangeRows);
+
+    final afterCursor = cursor == null
+        ? candidates
+        : candidates
+              .where((event) => _isAfterEventRangeCursor(event, cursor))
+              .toList(growable: false);
+    final hasMore = afterCursor.length > limit;
+    final pageEvents = afterCursor.take(limit).toList(growable: false);
+    final nextCursor = hasMore && pageEvents.isNotEmpty
+        ? EventRangeCursor(
+            startsAtUtc: pageEvents.last.startAt.toUtc(),
+            eventId: pageEvents.last.id,
+            // Search always emits the complete v2 tuple, including the
+            // explicit `single` key for non-recurring events.
+            occurrenceKey: pageEvents.last.occurrenceKey,
+          )
+        : null;
+    return EventRangePage(
+      events: pageEvents,
+      nextCursor: nextCursor,
+      hasMore: hasMore,
+    );
+  }
+
+  @override
   Future<PlannerEvent?> eventById({
     required String userId,
     required String groupId,
@@ -895,6 +986,34 @@ class LocalScheduleRepository
       final normalized = participantId.trim();
       if (normalized.isEmpty || !_isActiveMember(groupId, normalized)) {
         throw const ScheduleAuthorizationException('일정 멤버는 이 그룹의 활성 멤버여야 합니다.');
+      }
+    }
+  }
+
+  void _validateSearchRequest({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    required int limit,
+    String? creatorId,
+    String? participantId,
+  }) {
+    if (limit < 1 || limit > 100) {
+      throw const ScheduleValidationException('검색 페이지 크기를 확인해 주세요.');
+    }
+    _validateBoundedRangeRequest(
+      userId: userId,
+      groupId: groupId,
+      range: range,
+      limit: limit,
+      participantId: participantId,
+    );
+    if (creatorId != null) {
+      final normalized = creatorId.trim();
+      if (normalized.isEmpty || !_isActiveMember(groupId, normalized)) {
+        throw const ScheduleAuthorizationException(
+          '검색 작성자는 이 그룹의 활성 멤버여야 합니다.',
+        );
       }
     }
   }
@@ -2768,6 +2887,18 @@ class ConfigurationBlockedScheduleRepository extends LocalScheduleRepository {
   }) => Future<EventRangePage>.error(_error);
 
   @override
+  Future<EventRangePage> searchEvents({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    required String query,
+    EventRangeCursor? cursor,
+    int limit = eventSearchDefaultPageSize,
+    String? creatorId,
+    String? participantId,
+  }) => Future<EventRangePage>.error(_error);
+
+  @override
   Future<PlannerEvent?> eventById({
     required String userId,
     required String groupId,
@@ -2943,6 +3074,7 @@ class SupabaseScheduleRepository
         RecurringEventMemberAssignmentCapability,
         RecurrenceCapability,
         BoundedEventRangeReadCapability,
+        EventSearchCapability,
         EventByIdReadCapability,
         EventOccurrenceReadCapability,
         InvitePreviewCapability {
@@ -3087,6 +3219,87 @@ class SupabaseScheduleRepository
       limit: limit,
       participantId: normalizedParticipant,
     );
+  }
+
+  @override
+  Future<EventRangePage> searchEvents({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    required String query,
+    EventRangeCursor? cursor,
+    int limit = eventSearchDefaultPageSize,
+    String? creatorId,
+    String? participantId,
+  }) async {
+    final normalizedQuery = normalizeEventSearchQuery(query);
+    if (userId.trim().isEmpty || groupId.trim().isEmpty) {
+      throw const ScheduleValidationException('로그인 세션과 그룹을 확인해 주세요.');
+    }
+    _validateRemoteSearchShape(range, limit);
+    _requireCurrentRemoteUser(userId);
+    if (cursor != null &&
+        (cursor.occurrenceKey.isEmpty ||
+            !isValidOccurrenceKey(cursor.occurrenceKey))) {
+      throw const ScheduleValidationException('지원하지 않는 검색 페이지 커서입니다.');
+    }
+    final normalizedCreator = creatorId?.trim();
+    final normalizedParticipant = participantId?.trim();
+    if (creatorId != null && normalizedCreator!.isEmpty ||
+        participantId != null && normalizedParticipant!.isEmpty) {
+      throw const ScheduleValidationException('검색 멤버를 확인해 주세요.');
+    }
+    final result = await _client.rpc<dynamic>(
+      'search_events_v1',
+      params: <String, dynamic>{
+        'p_group_id': groupId,
+        'p_range_start': range.startUtc.toIso8601String(),
+        'p_range_end': range.endUtc.toIso8601String(),
+        'p_view_timezone': range.viewTimezone,
+        'p_query': normalizedQuery,
+        'p_limit': limit,
+        'p_cursor': cursor?.encode(),
+        'p_creator_id': normalizedCreator,
+        'p_participant_id': normalizedParticipant,
+      },
+    );
+    final page = _eventRangePageFromRpcResult(
+      result,
+      expectedGroupId: groupId,
+      range: range,
+      cursor: cursor,
+      limit: limit,
+      participantId: normalizedParticipant,
+      strictRowKeys: true,
+    );
+    final foldedQuery = normalizedQuery.toLowerCase();
+    for (final event in page.events) {
+      if ((normalizedCreator != null && event.ownerId != normalizedCreator) ||
+          (foldedQuery.isNotEmpty &&
+              !event.title.toLowerCase().contains(foldedQuery) &&
+              !event.note.toLowerCase().contains(foldedQuery))) {
+        throw const ScheduleConflictException('검색 결과 응답을 확인할 수 없습니다.');
+      }
+      // Search cursors are always strict v2 tuples. The range parser accepts
+      // v1 cursors for backwards compatibility, so enforce the stronger
+      // search contract here before returning the page to callers.
+      if (page.nextCursor != null && page.nextCursor!.occurrenceKey.isEmpty) {
+        throw const ScheduleConflictException('검색 결과 커서를 확인할 수 없습니다.');
+      }
+    }
+    if (page.nextCursor != null && page.events.isEmpty) {
+      throw const ScheduleConflictException('검색 결과 커서를 확인할 수 없습니다.');
+    }
+    if (page.nextCursor != null && page.events.isNotEmpty) {
+      final last = page.events.last;
+      final next = page.nextCursor!;
+      if (next.startsAtUtc != last.startAt.toUtc() ||
+          next.eventId != last.id ||
+          next.occurrenceKey != last.occurrenceKey) {
+        throw const ScheduleConflictException('검색 결과 커서를 확인할 수 없습니다.');
+      }
+    }
+    return page;
   }
 
   @override
@@ -5002,6 +5215,49 @@ class SupabaseScheduleRepository
     return true;
   }
 
+  /// Search rows are a fixed wire projection.  Search RPC responses must
+  /// include the complete occurrence shape emitted by the v1 RPC (including
+  /// singleton rows whose occurrence key is `single`); accepting the base
+  /// event shape here would lose the tuple component required for strict v2
+  /// keyset pagination.  Arbitrary/unknown keys are rejected at this
+  /// boundary.
+  static bool _hasExactEventRowKeys(Map<String, dynamic> row) {
+    const baseKeys = <String>{
+      'id',
+      'group_id',
+      'created_by',
+      'title',
+      'description',
+      'starts_at',
+      'ends_at',
+      'timezone',
+      'is_all_day',
+      'all_day_start',
+      'all_day_end',
+      'version',
+      'deleted_at',
+      'created_at',
+      'updated_at',
+      'color_value',
+      'member_ids',
+    };
+    const occurrenceKeys = <String>{
+      'event_id',
+      'series_id',
+      'occurrence_key',
+      'occurrence_index',
+      'occurrence_version',
+      'is_occurrence',
+      'scheduled_starts_at',
+      'scheduled_ends_at',
+      'recurrence_rule',
+    };
+    final keys = row.keys.toSet();
+    return keys.length == baseKeys.length + occurrenceKeys.length &&
+        keys.containsAll(baseKeys) &&
+        keys.containsAll(occurrenceKeys);
+  }
+
   static bool _validEventDates(Map<String, dynamic> row) {
     final allDay = row['is_all_day'] == true;
     final start = row['all_day_start'];
@@ -5200,6 +5456,13 @@ class SupabaseScheduleRepository
     }
   }
 
+  static void _validateRemoteSearchShape(EventRange range, int limit) {
+    if (limit < 1 || limit > 100) {
+      throw const ScheduleValidationException('검색 페이지 크기를 확인해 주세요.');
+    }
+    _validateRemoteRangeShape(range, limit);
+  }
+
   EventRangePage _eventRangePageFromRpcResult(
     Object? result, {
     required String expectedGroupId,
@@ -5207,6 +5470,7 @@ class SupabaseScheduleRepository
     required EventRangeCursor? cursor,
     required int limit,
     required String? participantId,
+    bool strictRowKeys = false,
   }) {
     try {
       if (result is! Map || result.keys.any((key) => key is! String)) {
@@ -5253,6 +5517,9 @@ class SupabaseScheduleRepository
           throw const FormatException('일정 페이지 응답을 확인해 주세요.');
         }
         final row = raw.cast<String, dynamic>();
+        if (strictRowKeys && !_hasExactEventRowKeys(row)) {
+          throw const FormatException('일정 페이지 응답을 확인해 주세요.');
+        }
         if (!_hasCompleteEventFields(row, strictLifecycleTimestamps: true)) {
           throw const FormatException('일정 페이지 응답을 확인해 주세요.');
         }

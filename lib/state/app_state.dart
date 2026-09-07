@@ -123,18 +123,27 @@ class PlannerController extends ChangeNotifier {
     Duration? socialAuthTimeout,
     PendingInviteStore? pendingInviteStore,
     Duration pendingInviteTtl = const Duration(minutes: 30),
+    Duration searchDebounce = const Duration(milliseconds: 300),
   }) : _auth = auth,
        _repository = repository,
        _notifications = notifications,
        _oauthTimeout = socialAuthTimeout ?? oauthTimeout,
        _pendingInviteStore =
            pendingInviteStore ?? createDefaultPendingInviteStore(),
-       _pendingInviteTtl = pendingInviteTtl {
+       _pendingInviteTtl = pendingInviteTtl,
+       _searchDebounce = searchDebounce {
     if (pendingInviteTtl <= Duration.zero) {
       throw ArgumentError.value(
         pendingInviteTtl,
         'pendingInviteTtl',
         'must be positive',
+      );
+    }
+    if (searchDebounce < Duration.zero) {
+      throw ArgumentError.value(
+        searchDebounce,
+        'searchDebounce',
+        'must not be negative',
       );
     }
     _authSubscription = _auth.onAuthStateChange.listen(
@@ -155,6 +164,7 @@ class PlannerController extends ChangeNotifier {
   final Duration _oauthTimeout;
   final PendingInviteStore _pendingInviteStore;
   final Duration _pendingInviteTtl;
+  final Duration _searchDebounce;
   late final Future<void> _pendingHydration;
 
   PlannerUser? user;
@@ -272,6 +282,35 @@ class PlannerController extends ChangeNotifier {
   bool _rangeRefreshQueued = false;
   Timer? _rangeInvalidationTimer;
   String? _rangeKey;
+  // Search is an independent projection from the selected calendar range.
+  // It owns its own debounce, generation, cursor and loading flags so a late
+  // search response can never overwrite calendar pages (or vice versa).
+  String searchQuery = '';
+  List<PlannerEvent> _searchResults = const <PlannerEvent>[];
+  List<PlannerEvent> get searchResults => _searchResults;
+
+  set searchResults(Iterable<PlannerEvent> value) {
+    _searchResults = List<PlannerEvent>.unmodifiable(value);
+  }
+
+  EventRange? searchRange;
+  String? searchCreatorId;
+  String? searchParticipantId;
+  EventRangeCursor? searchCursor;
+  bool hasMoreSearchResults = false;
+  bool isSearching = false;
+  bool isLoadingMoreSearch = false;
+  String? searchError;
+  Timer? _searchTimer;
+  Timer? _searchInvalidationTimer;
+  int _searchGeneration = 0;
+  bool _searchRefreshInFlight = false;
+  int? _searchRefreshOwnerGeneration;
+  bool _searchLoadMoreInFlight = false;
+  int? _searchLoadMoreOwnerGeneration;
+  bool _searchRefreshQueued = false;
+  String? _searchKey;
+  bool _searchActive = false;
   final Set<String> _terminalGroupOperations = <String>{};
   // Leave/archive and a remote lifecycle tombstone are terminal from the
   // controller's point of view.  Keeping this separate from the in-flight
@@ -2096,6 +2135,7 @@ class PlannerController extends ChangeNotifier {
     groups = const <PlannerGroup>[];
     selectedGroup = null;
     _resetRangeState();
+    _resetSearchState();
     selectedEventRange = null;
     events = const <PlannerEvent>[];
     members = const <PlannerMember>[];
@@ -2137,6 +2177,9 @@ class PlannerController extends ChangeNotifier {
         members.isNotEmpty ||
         invites.isNotEmpty ||
         events.isNotEmpty ||
+        searchResults.isNotEmpty ||
+        searchRange != null ||
+        searchQuery.isNotEmpty ||
         _eventSubscription != null ||
         _eventInvalidationSubscription != null ||
         _groupLifecycleSubscription != null;
@@ -2147,6 +2190,7 @@ class PlannerController extends ChangeNotifier {
     _inviteCodeInFlight = false;
     _cancelGroupMetadataRefresh();
     _resetRangeState();
+    _resetSearchState();
     selectedGroup = null;
     members = const <PlannerMember>[];
     invites = const <InviteCode>[];
@@ -2206,6 +2250,7 @@ class PlannerController extends ChangeNotifier {
     _inviteCodeInFlight = false;
     _cancelGroupMetadataRefresh();
     _resetRangeState();
+    _resetSearchState();
     selectedGroup = null;
     members = const <PlannerMember>[];
     invites = const <InviteCode>[];
@@ -2546,6 +2591,7 @@ class PlannerController extends ChangeNotifier {
     final previousLifecycleSubscription = _groupLifecycleSubscription;
     _groupLifecycleSubscription = null;
     _resetRangeState();
+    _resetSearchState();
     selectedGroup = group;
     final groupNow = utcToWallTime(DateTime.now().toUtc(), group.timezone);
     selectedDay = dateOnly(groupNow);
@@ -3826,6 +3872,75 @@ class PlannerController extends ChangeNotifier {
     if (clearRange) selectedEventRange = null;
   }
 
+  void _resetSearchState({bool clearQuery = true}) {
+    _searchTimer?.cancel();
+    _searchTimer = null;
+    _searchInvalidationTimer?.cancel();
+    _searchInvalidationTimer = null;
+    _searchGeneration++;
+    _searchActive = false;
+    _searchKey = null;
+    hasMoreSearchResults = false;
+    isSearching = false;
+    isLoadingMoreSearch = false;
+    searchError = null;
+    _searchRefreshQueued = false;
+    _searchRefreshInFlight = false;
+    _searchRefreshOwnerGeneration = null;
+    _searchLoadMoreInFlight = false;
+    _searchLoadMoreOwnerGeneration = null;
+    searchCursor = null;
+    searchResults = const <PlannerEvent>[];
+    if (clearQuery) {
+      searchQuery = '';
+      searchRange = null;
+      searchCreatorId = null;
+      searchParticipantId = null;
+    }
+  }
+
+  String _searchIdentity(
+    EventRange range,
+    String query,
+    String? creatorId,
+    String? participantId,
+  ) {
+    return '${range.viewTimezone}|${range.startUtc.toIso8601String()}|'
+        '${range.endUtc.toIso8601String()}|$query|'
+        '${creatorId ?? ''}|${participantId ?? ''}';
+  }
+
+  bool _isCurrentSearchContext({
+    required int plannerRevision,
+    required int sessionGeneration,
+    required int searchGeneration,
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    required String searchKey,
+  }) {
+    String? currentKey;
+    try {
+      currentKey = _searchIdentity(
+        range,
+        normalizeEventSearchQuery(searchQuery),
+        searchCreatorId,
+        searchParticipantId,
+      );
+    } on FormatException {
+      currentKey = null;
+    }
+    return !_disposed &&
+        _plannerRevision == plannerRevision &&
+        _plannerSessionGeneration == sessionGeneration &&
+        _searchGeneration == searchGeneration &&
+        user?.id == userId &&
+        selectedGroup?.id == groupId &&
+        searchRange == range &&
+        _searchKey == searchKey &&
+        currentKey == searchKey;
+  }
+
   void _beginSelectedRange({required bool fetch}) {
     final range = _rangeForCalendarSelection();
     if (range == null || !_usesBoundedEventRangeReads) {
@@ -3886,6 +4001,11 @@ class PlannerController extends ChangeNotifier {
     )) {
       return;
     }
+    _scheduleSearchInvalidation(
+      operation: operation,
+      userId: userId,
+      groupId: groupId,
+    );
     _rangeInvalidationTimer?.cancel();
     _rangeInvalidationTimer = Timer(const Duration(milliseconds: 80), () {
       _rangeInvalidationTimer = null;
@@ -3897,6 +4017,34 @@ class PlannerController extends ChangeNotifier {
         return;
       }
       unawaited(refreshSelectedEventRange(force: true));
+    });
+  }
+
+  void _scheduleSearchInvalidation({
+    required int operation,
+    required String userId,
+    required String groupId,
+  }) {
+    if (!_isCurrentPlannerContext(
+          operation,
+          userId: userId,
+          groupId: groupId,
+        ) ||
+        searchRange == null ||
+        (_repository is! EventSearchCapability)) {
+      return;
+    }
+    _searchInvalidationTimer?.cancel();
+    _searchInvalidationTimer = Timer(const Duration(milliseconds: 80), () {
+      _searchInvalidationTimer = null;
+      if (!_isCurrentPlannerContext(
+        operation,
+        userId: userId,
+        groupId: groupId,
+      )) {
+        return;
+      }
+      unawaited(refreshSearch(force: true));
     });
   }
 
@@ -4217,6 +4365,505 @@ class PlannerController extends ChangeNotifier {
     }
   }
 
+  /// Whether a search projection is currently owned by the selected group.
+  /// The query may be empty when the caller intentionally searches by period
+  /// and/or member filters alone.
+  bool get hasActiveSearch => _searchActive;
+
+  /// Updates the query and schedules a debounced search.  Invalid non-empty
+  /// terms are rejected locally and never reach a repository/RPC.
+  void setSearchQuery(String query) {
+    unawaited(searchEvents(query: query));
+  }
+
+  /// Updates the optional period/creator/participant filters and schedules a
+  /// debounced search.  `clear*` flags make clearing one nullable filter
+  /// explicit while retaining convenient partial updates for UI callers.
+  void setSearchFilters({
+    EventRange? range,
+    String? creatorId,
+    String? participantId,
+    bool clearRange = false,
+    bool clearCreator = false,
+    bool clearParticipant = false,
+  }) {
+    if (range != null || clearRange) searchRange = range;
+    if (creatorId != null || clearCreator) {
+      searchCreatorId = creatorId?.trim();
+    }
+    if (participantId != null || clearParticipant) {
+      searchParticipantId = participantId?.trim();
+    }
+    unawaited(searchEvents());
+  }
+
+  /// Applies any supplied search inputs and either starts immediately or
+  /// waits for the configured debounce interval.  The returned future settles
+  /// when an immediate request completes; debounced calls return after the
+  /// request has been scheduled so text-field updates remain non-blocking.
+  Future<void> searchEvents({
+    String? query,
+    EventRange? range,
+    String? creatorId,
+    String? participantId,
+    bool immediate = false,
+  }) async {
+    if (query != null) searchQuery = query.trim();
+    if (range != null) searchRange = range;
+    if (creatorId != null) searchCreatorId = creatorId.trim();
+    if (participantId != null) searchParticipantId = participantId.trim();
+    _searchActive = true;
+    try {
+      searchQuery = normalizeEventSearchQuery(searchQuery);
+      if (searchCreatorId != null && searchCreatorId!.isEmpty ||
+          searchParticipantId != null && searchParticipantId!.isEmpty) {
+        throw const FormatException('검색 멤버를 확인해 주세요.');
+      }
+    } catch (error) {
+      _resetSearchState(clearQuery: false);
+      // Keep the draft/query and validation message visible to the field, but
+      // mark the projection inactive so realtime invalidation cannot retry an
+      // invalid term outside this validation boundary.
+      _searchActive = false;
+      searchError = _friendlyError(error);
+      notifyListeners();
+      return;
+    }
+    _queueSearchRequest();
+    if (!immediate) return;
+    _searchTimer?.cancel();
+    _searchTimer = null;
+    await _fetchSearchFirstPage(
+      force: true,
+      preserveCurrentResults: false,
+      advanceGeneration: false,
+    );
+  }
+
+  /// Forces revalidation of the current search without mutating the selected
+  /// calendar range or its pagination state.
+  Future<void> refreshSearch({bool force = true}) async {
+    if (!_searchActive) return;
+    if (!force && searchResults.isNotEmpty) return;
+    final range =
+        searchRange ?? selectedEventRange ?? _rangeForCalendarSelection();
+    if (range == null) return;
+    searchRange ??= range;
+    await _fetchSearchFirstPage(
+      force: force,
+      preserveCurrentResults: force,
+      advanceGeneration: force,
+    );
+  }
+
+  /// Cancels pending debounce/in-flight ownership and clears all private
+  /// search state.  Futures cannot be forcibly aborted, but their captured
+  /// generation makes every late success/error a no-op.
+  void cancelSearch() {
+    _resetSearchState();
+    notifyListeners();
+  }
+
+  void clearSearch() => cancelSearch();
+
+  Future<void> loadMoreSearchResults() async {
+    final capability = _repository;
+    final current = user;
+    final group = selectedGroup;
+    final range = searchRange;
+    final cursor = searchCursor;
+    if (capability is! EventSearchCapability ||
+        current == null ||
+        group == null ||
+        range == null ||
+        cursor == null ||
+        cursor.occurrenceKey.isEmpty ||
+        !hasMoreSearchResults ||
+        _searchLoadMoreInFlight ||
+        _searchRefreshInFlight) {
+      return;
+    }
+    final searchCapability = capability as EventSearchCapability;
+    final normalizedQuery = normalizeEventSearchQuery(searchQuery);
+    final creatorId = searchCreatorId;
+    final participantId = searchParticipantId;
+    final plannerRevision = _plannerRevision;
+    final sessionGeneration = _plannerSessionGeneration;
+    final searchGeneration = _searchGeneration;
+    final searchKey = _searchIdentity(
+      range,
+      normalizedQuery,
+      creatorId,
+      participantId,
+    );
+    _searchKey = searchKey;
+    _searchLoadMoreInFlight = true;
+    _searchLoadMoreOwnerGeneration = searchGeneration;
+    isLoadingMoreSearch = true;
+    notifyListeners();
+    try {
+      final page = await searchCapability.searchEvents(
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        query: normalizedQuery,
+        cursor: cursor,
+        limit: eventSearchDefaultPageSize,
+        creatorId: creatorId,
+        participantId: participantId,
+      );
+      if (!_isCurrentSearchContext(
+        plannerRevision: plannerRevision,
+        sessionGeneration: sessionGeneration,
+        searchGeneration: searchGeneration,
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        searchKey: searchKey,
+      )) {
+        return;
+      }
+      _validateSearchPage(
+        page,
+        groupId: group.id,
+        range: range,
+        cursor: cursor,
+        query: normalizedQuery,
+        creatorId: creatorId,
+        participantId: participantId,
+        limit: eventSearchDefaultPageSize,
+      );
+      for (final event in page.events) {
+        final previous = searchResults
+            .where((item) => item.identityKey == event.identityKey)
+            .firstOrNull;
+        if (previous != null && previous != event) {
+          throw const ScheduleConflictException('검색 결과 응답을 확인할 수 없습니다.');
+        }
+      }
+      final merged = <String, PlannerEvent>{
+        for (final event in searchResults) event.identityKey: event,
+      };
+      for (final event in page.events) {
+        final previous = merged[event.identityKey];
+        if (previous == null || previous.version <= event.version) {
+          merged[event.identityKey] = event;
+        }
+      }
+      final ordered = merged.values.toList(growable: false)
+        ..sort(_comparePlannerEvents);
+      searchResults = ordered;
+      searchCursor = page.nextCursor;
+      hasMoreSearchResults = page.hasMore;
+      searchError = null;
+      notifyListeners();
+    } catch (error) {
+      if (_isCurrentSearchContext(
+        plannerRevision: plannerRevision,
+        sessionGeneration: sessionGeneration,
+        searchGeneration: searchGeneration,
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        searchKey: searchKey,
+      )) {
+        searchError = _friendlyError(error);
+        if (_isAuthoritativeRangeDenial(error)) {
+          searchResults = const <PlannerEvent>[];
+          searchCursor = null;
+          hasMoreSearchResults = false;
+        }
+        notifyListeners();
+      }
+    } finally {
+      if (_searchLoadMoreOwnerGeneration == searchGeneration) {
+        _searchLoadMoreInFlight = false;
+        _searchLoadMoreOwnerGeneration = null;
+        isLoadingMoreSearch = false;
+        if (_isCurrentSearchContext(
+          plannerRevision: _plannerRevision,
+          sessionGeneration: _plannerSessionGeneration,
+          searchGeneration: _searchGeneration,
+          userId: current.id,
+          groupId: group.id,
+          range: range,
+          searchKey: searchKey,
+        )) {
+          notifyListeners();
+        }
+        if (_searchRefreshQueued && !_disposed) {
+          _searchRefreshQueued = false;
+          if (_isCurrentSearchContext(
+            plannerRevision: _plannerRevision,
+            sessionGeneration: _plannerSessionGeneration,
+            searchGeneration: _searchGeneration,
+            userId: current.id,
+            groupId: group.id,
+            range: range,
+            searchKey: _searchKey ?? searchKey,
+          )) {
+            unawaited(
+              _fetchSearchFirstPage(
+                force: true,
+                preserveCurrentResults: true,
+                advanceGeneration: true,
+              ),
+            );
+          }
+        }
+      }
+    }
+  }
+
+  Future<void> loadMoreSearch() => loadMoreSearchResults();
+
+  void _queueSearchRequest() {
+    _searchTimer?.cancel();
+    _searchTimer = null;
+    _searchGeneration++;
+    _searchRefreshQueued = false;
+    _searchRefreshInFlight = false;
+    _searchRefreshOwnerGeneration = null;
+    _searchLoadMoreInFlight = false;
+    _searchLoadMoreOwnerGeneration = null;
+    isSearching = false;
+    isLoadingMoreSearch = false;
+    searchCursor = null;
+    hasMoreSearchResults = false;
+    searchError = null;
+    searchResults = const <PlannerEvent>[];
+    final range =
+        searchRange ?? selectedEventRange ?? _rangeForCalendarSelection();
+    if (searchRange == null && range != null) searchRange = range;
+    notifyListeners();
+    if (range == null || user == null || selectedGroup == null) return;
+    if (_repository is! EventSearchCapability) {
+      // Keep unsupported adapters from exposing an apparently active search
+      // projection/retry action that can never issue a request.  The draft
+      // inputs remain available for a future repository swap, but this
+      // controller instance is inactive until explicitly re-entered.
+      _searchActive = false;
+      searchError = const ScheduleCapabilityException(
+        '검색을 지원하지 않는 저장소입니다.',
+      ).message;
+      notifyListeners();
+      return;
+    }
+    _searchTimer = Timer(_searchDebounce, () {
+      _searchTimer = null;
+      if (_disposed || !_searchActive) return;
+      unawaited(
+        _fetchSearchFirstPage(
+          force: true,
+          preserveCurrentResults: false,
+          advanceGeneration: false,
+        ),
+      );
+    });
+  }
+
+  Future<void> _fetchSearchFirstPage({
+    required bool force,
+    required bool preserveCurrentResults,
+    required bool advanceGeneration,
+  }) async {
+    final capability = _repository;
+    final current = user;
+    final group = selectedGroup;
+    final range =
+        searchRange ?? selectedEventRange ?? _rangeForCalendarSelection();
+    if (!_searchActive ||
+        capability is! EventSearchCapability ||
+        current == null ||
+        group == null ||
+        range == null) {
+      return;
+    }
+    final searchCapability = capability as EventSearchCapability;
+    final normalizedQuery = normalizeEventSearchQuery(searchQuery);
+    if (_searchRefreshInFlight || _searchLoadMoreInFlight) {
+      _searchRefreshQueued = true;
+      return;
+    }
+    if (advanceGeneration) {
+      _searchGeneration++;
+      _searchLoadMoreInFlight = false;
+      _searchLoadMoreOwnerGeneration = null;
+      isLoadingMoreSearch = false;
+    }
+    final plannerRevision = _plannerRevision;
+    final sessionGeneration = _plannerSessionGeneration;
+    final searchGeneration = _searchGeneration;
+    final creatorId = searchCreatorId;
+    final participantId = searchParticipantId;
+    final searchKey = _searchIdentity(
+      range,
+      normalizedQuery,
+      creatorId,
+      participantId,
+    );
+    final previousSearchCursor = preserveCurrentResults ? searchCursor : null;
+    final previousHasMoreSearchResults =
+        preserveCurrentResults && hasMoreSearchResults;
+    _searchKey = searchKey;
+    searchRange = range;
+    _searchRefreshInFlight = true;
+    _searchRefreshOwnerGeneration = searchGeneration;
+    searchCursor = null;
+    hasMoreSearchResults = false;
+    isSearching = true;
+    searchError = null;
+    if (!preserveCurrentResults) searchResults = const <PlannerEvent>[];
+    notifyListeners();
+    try {
+      final page = await searchCapability.searchEvents(
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        query: normalizedQuery,
+        limit: eventSearchDefaultPageSize,
+        creatorId: creatorId,
+        participantId: participantId,
+      );
+      if (!_isCurrentSearchContext(
+        plannerRevision: plannerRevision,
+        sessionGeneration: sessionGeneration,
+        searchGeneration: searchGeneration,
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        searchKey: searchKey,
+      )) {
+        return;
+      }
+      _validateSearchPage(
+        page,
+        groupId: group.id,
+        range: range,
+        cursor: null,
+        query: normalizedQuery,
+        creatorId: creatorId,
+        participantId: participantId,
+        limit: eventSearchDefaultPageSize,
+      );
+      searchResults = page.events;
+      searchCursor = page.nextCursor;
+      hasMoreSearchResults = page.hasMore;
+      searchError = null;
+      notifyListeners();
+    } catch (error) {
+      if (_isCurrentSearchContext(
+        plannerRevision: plannerRevision,
+        sessionGeneration: sessionGeneration,
+        searchGeneration: searchGeneration,
+        userId: current.id,
+        groupId: group.id,
+        range: range,
+        searchKey: searchKey,
+      )) {
+        searchError = _friendlyError(error);
+        final authoritative = _isAuthoritativeRangeDenial(error);
+        if (!preserveCurrentResults || authoritative) {
+          searchResults = const <PlannerEvent>[];
+          searchCursor = null;
+          hasMoreSearchResults = false;
+        } else {
+          // A forced refresh temporarily clears continuation state while the
+          // first page is in flight.  Preserve the prior page's keyset on a
+          // transient/validation conflict so the user can still load more
+          // last-good results after retrying the refresh.
+          searchCursor = previousSearchCursor;
+          hasMoreSearchResults = previousHasMoreSearchResults;
+        }
+        notifyListeners();
+      }
+    } finally {
+      if (_searchRefreshOwnerGeneration == searchGeneration) {
+        _searchRefreshInFlight = false;
+        _searchRefreshOwnerGeneration = null;
+        isSearching = false;
+        if (_isCurrentSearchContext(
+          plannerRevision: _plannerRevision,
+          sessionGeneration: _plannerSessionGeneration,
+          searchGeneration: _searchGeneration,
+          userId: current.id,
+          groupId: group.id,
+          range: range,
+          searchKey: searchKey,
+        )) {
+          notifyListeners();
+        }
+      }
+      if (_searchRefreshQueued && !_disposed) {
+        _searchRefreshQueued = false;
+        if (_isCurrentSearchContext(
+          plannerRevision: _plannerRevision,
+          sessionGeneration: _plannerSessionGeneration,
+          searchGeneration: _searchGeneration,
+          userId: current.id,
+          groupId: group.id,
+          range: range,
+          searchKey: _searchKey ?? searchKey,
+        )) {
+          unawaited(
+            _fetchSearchFirstPage(
+              force: true,
+              preserveCurrentResults: true,
+              advanceGeneration: true,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  void _validateSearchPage(
+    EventRangePage page, {
+    required String groupId,
+    required EventRange range,
+    required EventRangeCursor? cursor,
+    required String query,
+    required String? creatorId,
+    required String? participantId,
+    required int limit,
+  }) {
+    if (cursor != null && cursor.occurrenceKey.isEmpty) {
+      throw const ScheduleConflictException('검색 결과 커서를 확인할 수 없습니다.');
+    }
+    _validateRangePage(
+      page,
+      groupId: groupId,
+      range: range,
+      cursor: cursor,
+      participantId: participantId,
+      limit: limit,
+    );
+    if (page.hasMore && page.events.length != limit) {
+      throw const ScheduleConflictException('검색 결과 응답을 확인할 수 없습니다.');
+    }
+    final foldedQuery = query.toLowerCase();
+    for (final event in page.events) {
+      if ((creatorId != null && event.ownerId != creatorId) ||
+          (foldedQuery.isNotEmpty &&
+              !event.title.toLowerCase().contains(foldedQuery) &&
+              !event.note.toLowerCase().contains(foldedQuery))) {
+        throw const ScheduleConflictException('검색 결과 응답을 확인할 수 없습니다.');
+      }
+    }
+    final next = page.nextCursor;
+    if (next != null) {
+      if (page.events.isEmpty || next.occurrenceKey.isEmpty) {
+        throw const ScheduleConflictException('검색 결과 커서를 확인할 수 없습니다.');
+      }
+      final last = page.events.last;
+      if (next.startsAtUtc != last.startAt.toUtc() ||
+          next.eventId != last.id ||
+          next.occurrenceKey != last.occurrenceKey) {
+        throw const ScheduleConflictException('검색 결과 커서를 확인할 수 없습니다.');
+      }
+    }
+  }
+
   static int _comparePlannerEvents(PlannerEvent left, PlannerEvent right) {
     final byStart = left.startAt.toUtc().compareTo(right.startAt.toUtc());
     if (byStart != 0) return byStart;
@@ -4310,6 +4957,26 @@ class PlannerController extends ChangeNotifier {
         selectedEventRange != null &&
         _usesBoundedEventRangeReads) {
       _beginSelectedRange(fetch: true);
+    }
+    var searchFilterCleared = false;
+    final searchCreator = searchCreatorId;
+    if (searchCreator != null &&
+        !members.any(
+          (member) => member.id == searchCreator && member.isActive,
+        )) {
+      searchCreatorId = null;
+      searchFilterCleared = true;
+    }
+    final searchParticipant = searchParticipantId;
+    if (searchParticipant != null &&
+        !members.any(
+          (member) => member.id == searchParticipant && member.isActive,
+        )) {
+      searchParticipantId = null;
+      searchFilterCleared = true;
+    }
+    if (searchFilterCleared && _searchActive) {
+      _queueSearchRequest();
     }
   }
 
@@ -5115,7 +5782,10 @@ class PlannerController extends ChangeNotifier {
     if (error is ScheduleAuthorizationException) return true;
     if (error is PostgrestException) {
       final code = error.code;
-      return code == '42501' || code == '401' || code == '403';
+      return code == '42501' ||
+          code == '28000' ||
+          code == '401' ||
+          code == '403';
     }
     if (error is AuthException) {
       final status = error.statusCode;
@@ -5161,6 +5831,7 @@ class PlannerController extends ChangeNotifier {
     _plannerRevision++;
     _groupOperationToken = 0;
     _resetRangeState();
+    _resetSearchState();
     _cancelGroupMetadataRefresh();
     unawaited(_eventInvalidationSubscription?.cancel());
     _eventInvalidationSubscription = null;

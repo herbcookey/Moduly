@@ -58,7 +58,7 @@ void main() {
     expect(timestamps.length, migrations.length);
     expect(timestamps.toSet().length, timestamps.length);
     expect(migrations, contains('20260907130004_invite_links.sql'));
-    expect(timestamps.last, '20260907130006');
+    expect(timestamps.last, '20260907171029');
     expect(migration, isNot(contains('drop table public.')));
     expect(migration, isNot(contains('truncate public.')));
     expect(upgrade, contains('reapplying'));

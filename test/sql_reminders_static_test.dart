@@ -53,9 +53,9 @@ void main() {
         .whereType<RegExpMatch>()
         .map((match) => match.group(1)!)
         .toList();
-    expect(names.length, 15);
+    expect(names.length, 16);
     expect(timestamps.toSet().length, names.length);
-    expect(timestamps.last, '20260907130006');
+    expect(timestamps.last, '20260907171029');
     expect(
       migration,
       contains('create table if not exists public.notification_preferences'),

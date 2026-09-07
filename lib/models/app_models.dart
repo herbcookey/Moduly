@@ -2,6 +2,43 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+/// Bounds enforced by the server-backed event search contract.  Search terms
+/// are counted as Unicode scalar values (`String.runes`) rather than UTF-16
+/// code units so emoji and supplementary-plane characters have the same
+/// semantics on local and remote adapters.
+const int eventSearchMinScalars = 2;
+const int eventSearchMaxScalars = 100;
+const int eventSearchMaxUtf8Bytes = 400;
+const int eventSearchDefaultPageSize = 50;
+
+/// Trims and validates one event-search query.  Empty input is intentional:
+/// it represents a period/filter-only search and is therefore valid.  A
+/// non-empty query must contain 2..100 Unicode scalar values and at most 400
+/// UTF-8 bytes.  Repositories call this helper before any local work or RPC so
+/// malformed input never becomes a network request.
+String normalizeEventSearchQuery(String query) {
+  final normalized = query.trim();
+  if (normalized.isEmpty) return normalized;
+  final scalarCount = normalized.runes.length;
+  if (scalarCount < eventSearchMinScalars ||
+      scalarCount > eventSearchMaxScalars ||
+      utf8.encode(normalized).length > eventSearchMaxUtf8Bytes) {
+    throw const FormatException('검색어는 2~100자(UTF-8 400바이트 이내)로 입력해 주세요.');
+  }
+  return normalized;
+}
+
+/// Public predicate useful to text-field validation without exposing the
+/// exception text used by repositories/controllers.
+bool isValidEventSearchQuery(String query) {
+  try {
+    normalizeEventSearchQuery(query);
+    return true;
+  } on FormatException {
+    return false;
+  }
+}
+
 /// Parses the explicit-offset ISO-8601 timestamp shape used by Supabase
 /// event rows and v1 range cursors.  Dart's [DateTime.parse] normalizes
 /// impossible calendar/time components (for example February 30), so wire

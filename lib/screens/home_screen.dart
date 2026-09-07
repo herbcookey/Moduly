@@ -139,6 +139,12 @@ class HomeScreen extends ConsumerWidget {
         ),
         actions: <Widget>[
           IconButton(
+            tooltip: '일정 검색',
+            constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+            onPressed: () => context.push('/search'),
+            icon: const Icon(Icons.search),
+          ),
+          IconButton(
             tooltip: '그룹 바꾸기',
             onPressed: () => context.go('/groups'),
             icon: const Icon(Icons.swap_horiz),

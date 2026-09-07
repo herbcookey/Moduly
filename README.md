@@ -296,6 +296,59 @@ APNs, VAPID, service-worker, worker/cron, and signed-release configuration are
 external blockers until an operator supplies the corresponding project and
 signing metadata.
 
+### Event search (Feature 7)
+
+Event search is a server-side, active-group projection. It searches title and
+description with literal matching (not a client-side scan or fuzzy index), and
+also supports a bounded local-date period plus independent active-member
+creator and participant filters. An empty query intentionally means
+period/filter-only search; a non-empty query is 2–100 Unicode scalar values and
+at most 400 UTF-8 bytes. The selected group's IANA timezone defines the
+half-open date range; the UI's inclusive end date is converted to the next
+local midnight and the range may cover at most 366 calendar days.
+
+The `search_events_v1` RPC returns complete event/occurrence rows in bounded
+pages (50 by default) with an opaque keyset cursor over
+`(starts_at,event_id,occurrence_key)`. Effective recurring occurrence fields,
+including overrides and stable occurrence identity, are retained so selecting
+a result opens the exact event and occurrence. Search results never alter the
+calendar range snapshot or its cursor. Typing is debounced; cancelling,
+switching users/groups/filters, and stale responses are fenced by the
+controller generation.
+
+The RPC checks authentication, group existence/lifecycle, and active
+membership before searching or counting. Outsiders, inactive members,
+archived groups, and missing groups receive the same unavailable response, and
+creator/participant IDs must be active members of that group. Its public
+execution is revoked for `public`/`anon` and granted only to `authenticated`;
+the function uses an empty `search_path`. No title, description, member data,
+or query is placed in a URL or log. Results can be opened at `/event/:id` or
+`/event/:seriesId?occurrence=...`, with the selected day updated in the group
+timezone.
+
+Credential-free checks for this slice are:
+
+```sh
+flutter test --no-pub test/event_search_core_test.dart \
+  test/event_search_ui_test.dart \
+  test/sql_event_search_static_test.dart
+flutter analyze --no-pub
+bash supabase/tests/run_event_search_upgrade.sh
+```
+
+The upgrade runner applies the migration on an isolated local PostgreSQL
+cluster, re-applies it for idempotence, and executes the `event_search.sql`
+fixture with real authenticated-role claims (or its assertion fallback when
+pgTAP is unavailable). For release verification, run `supabase db reset` on a
+disposable Auth/Postgres deployment, create owner/member/inactive/outsider
+accounts, and repeat the RLS denial, Unicode/special-character, date/DST,
+creator/participant, and 1,000+ row no-gap/no-duplicate cursor checks with
+real JWTs. Exercise debounce/cancel/retry and exact occurrence navigation in
+the Flutter app, then repeat at 320x568 with 2x text, a 300 px keyboard inset,
+hardware focus, VoiceOver/TalkBack, and web/native targets. These live
+service, load, network, and real-device checks are external to this checkout
+and are not claimed as executed here.
+
 ## Flutter development
 
 1. Keep `.env.example` as the checked-in placeholder reference. For Flutter
@@ -621,9 +674,18 @@ real contact route before release rather than copying a placeholder.
   participant-aware create/update/replace RPCs, parent-event version
   invalidation, and leave/deactivation pruning. It is intentionally not added
   to the `supabase_realtime` publication.
+- `supabase/migrations/20260907130003_calendar_range.sql` adds the bounded,
+  timezone-aware calendar range RPC and opaque keyset pagination.
 - `supabase/migrations/20260907130004_invite_links.sql` adds the narrow,
   authenticated invite-preview RPC. It returns sanitized group metadata only;
   the bearer token is never persisted or returned by the preview endpoint.
+- `supabase/migrations/20260907130005_recurrence.sql` adds stable recurring
+  occurrence expansion, overrides, and occurrence-aware range reads.
+- `supabase/migrations/20260907130006_reminders.sql` adds local reminder
+  settings plus the private, server-owned delivery queue.
+- `supabase/migrations/20260907171029_event_search.sql` adds the bounded,
+  authenticated title/description search RPC with creator/participant filters
+  and occurrence-aware keyset cursors.
 - `supabase/seed.sql` is an idempotent, local-only demo seed that never creates
   an auth user or stores an invite plaintext token.
 
@@ -641,12 +703,12 @@ password recovery, group selection, member listing, owner member removal, invite
 creation/listing/revocation with expiry and max-use controls, event create/edit,
 timed/all-day and recurring events, participant assignment/filtering,
 creator-versus-group-owner participant permissions, optimistic conflict handling,
-parent-event realtime refreshes, and authenticated self-service account deletion
-with explicit owned-data cleanup. The backend additionally provides
-profile/timezone records for the next UI iteration. Useful follow-ups are profile
-editing, reminders/notifications, attachment storage, pagination and rate-limit
-retention jobs, TLS/secret management in deployment, backups, and a full
-pgTAP/RLS integration suite.
+parent-event realtime refreshes, bounded server-side event search, local
+reminders, and authenticated self-service account deletion with explicit
+owned-data cleanup. The backend additionally provides profile/timezone records
+for the next UI iteration. Useful follow-ups are profile editing, attachment
+storage, pagination and rate-limit retention jobs, TLS/secret management in
+deployment, backups, and a full pgTAP/RLS integration suite.
 
 ### Manual group/account verification
 
