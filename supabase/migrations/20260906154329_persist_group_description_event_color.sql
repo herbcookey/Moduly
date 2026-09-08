@@ -7,7 +7,8 @@ alter table public.groups
   add column if not exists description text;
 
 update public.groups
-set description = ''
+set description = '',
+    version = version + 1
 where description is null;
 
 alter table public.groups
@@ -36,7 +37,8 @@ alter table public.events
   add column if not exists color_value bigint;
 
 update public.events
-set color_value = 4282874742
+set color_value = 4282874742,
+    version = version + 1
 where color_value is null;
 
 alter table public.events

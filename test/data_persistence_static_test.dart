@@ -4,12 +4,16 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   late String migration;
+  late String upgradeScript;
   late String repository;
   late String readme;
 
   setUpAll(() {
     migration = File(
       'supabase/migrations/20260906154329_persist_group_description_event_color.sql',
+    ).readAsStringSync().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+    upgradeScript = File(
+      'supabase/tests/run_group_management_upgrade.sh',
     ).readAsStringSync().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
     repository = File(
       'lib/repositories/schedule_repository.dart',
@@ -27,7 +31,7 @@ void main() {
     expect(
       migration,
       contains(
-        "update public.groups set description = '' where description is null;",
+        "update public.groups set description = '', version = version + 1 where description is null;",
       ),
     );
     expect(migration, contains("alter column description set default ''"));
@@ -44,7 +48,7 @@ void main() {
     expect(
       migration,
       contains(
-        'update public.events set color_value = 4282874742 where color_value is null;',
+        'update public.events set color_value = 4282874742, version = version + 1 where color_value is null;',
       ),
     );
     expect(
@@ -94,6 +98,18 @@ void main() {
       ),
     );
     expect(migration, contains('commit;'));
+  });
+
+  test('기존 행 업그레이드가 표시 값을 백필하고 버전을 한 단계만 올린다', () {
+    expect(upgradeScript, contains('persist-upgrade-owner@example.test'));
+    expect(upgradeScript, contains('persist upgrade group'));
+    expect(upgradeScript, contains('v_persist_group.description <> \'\''));
+    expect(upgradeScript, contains('v_persist_group.version <> 8'));
+    expect(
+      upgradeScript,
+      contains('v_persist_event.color_value <> 4282874742'),
+    );
+    expect(upgradeScript, contains('v_persist_event.version <> 2'));
   });
 
   test('기존 RLS 아래에서 필요한 열 권한만 확장한다', () {

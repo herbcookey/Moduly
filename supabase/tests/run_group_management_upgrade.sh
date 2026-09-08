@@ -57,13 +57,71 @@ as $$
 $$;
 SQL
 
+target_migration="$repo_dir/supabase/migrations/20260906154329_persist_group_description_event_color.sql"
 group_migration="$repo_dir/supabase/migrations/20260907130001_group_management.sql"
 event_members_migration="$repo_dir/supabase/migrations/20260907130002_event_members.sql"
 
 for migration in "$repo_dir"/supabase/migrations/*.sql; do
-  [[ "$migration" == "$group_migration" ]] && break
+  [[ "$migration" == "$target_migration" ]] && break
   printf '%s 적용 중\n' "$(basename "$migration")"
   psql_test -f "$migration" >/dev/null
+done
+
+# 새 열 마이그레이션 전에 구형 스키마의 행을 시드한다. groups.description와
+# events.color_value가 아직 없으므로, 마이그레이션은 두 행의 표시 값을 백필하면서
+# 각 낙관적 잠금 버전을 정확히 한 단계 올려야 한다.
+psql_test <<'SQL'
+insert into auth.users (
+  id, instance_id, aud, role, email, encrypted_password,
+  email_confirmed_at, created_at, updated_at, raw_user_meta_data
+) values (
+  '00000000-0000-4000-8000-00000000aa11',
+  '00000000-0000-0000-0000-000000000000',
+  'authenticated', 'authenticated', 'persist-upgrade-owner@example.test', '',
+  now(), now(), now(), '{}'::jsonb
+);
+
+insert into public.groups (
+  id, owner_id, name, timezone, version, deleted_at, created_at, updated_at
+) values (
+  '00000000-0000-4000-8000-00000000bb11',
+  '00000000-0000-4000-8000-00000000aa11',
+  'Persist upgrade group', 'UTC', 7, null,
+  '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'
+);
+
+insert into public.events (
+  id, group_id, created_by, title, description, starts_at, ends_at,
+  timezone, is_all_day, version, deleted_at, created_at, updated_at
+) values (
+  '00000000-0000-4000-8000-00000000dd11',
+  '00000000-0000-4000-8000-00000000bb11',
+  '00000000-0000-4000-8000-00000000aa11',
+  'Persist upgrade event', 'legacy event description',
+  '2026-01-05T00:00:00Z', '2026-01-05T01:00:00Z',
+  'UTC', false, 1, null,
+  '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'
+);
+SQL
+
+printf '%s 적용 중\n' "$(basename "$target_migration")"
+psql_test -f "$target_migration" >/dev/null
+printf '%s 재적용 중\n' "$(basename "$target_migration")"
+psql_test -f "$target_migration" >/dev/null
+
+# 대상 마이그레이션 뒤의 이력은 그룹 관리 전에 계속 적용한다. 대상 파일은 위에서
+# 두 번 실행했으므로 여기서는 중복하지 않는다.
+target_applied=false
+for migration in "$repo_dir"/supabase/migrations/*.sql; do
+  if [[ "$migration" == "$target_migration" ]]; then
+    target_applied=true
+    continue
+  fi
+  [[ "$migration" == "$group_migration" ]] && break
+  if [[ "$target_applied" == true ]]; then
+    printf '%s 적용 중\n' "$(basename "$migration")"
+    psql_test -f "$migration" >/dev/null
+  fi
 done
 
 # 마이그레이션 9 뒤 사용자 둘과 그룹 하나를 시드한다. 소유자 멤버십을 의도적으로
@@ -266,6 +324,8 @@ psql_test -f "$event_members_migration" >/dev/null
 psql_test <<'SQL'
 do $$
 declare
+  v_persist_group public.groups;
+  v_persist_event public.events;
   v_group public.groups;
   v_member public.memberships;
   v_owner public.memberships;
@@ -273,6 +333,24 @@ declare
   v_event public.events;
   v_audit public.audit_logs;
 begin
+  select * into v_persist_group
+  from public.groups
+  where id = '00000000-0000-4000-8000-00000000bb11';
+  if not found
+     or v_persist_group.description <> ''
+     or v_persist_group.version <> 8 then
+    raise exception '그룹 표시 열 백필이 기존 버전을 정확히 한 단계 올리지 않았습니다';
+  end if;
+
+  select * into v_persist_event
+  from public.events
+  where id = '00000000-0000-4000-8000-00000000dd11';
+  if not found
+     or v_persist_event.color_value <> 4282874742
+     or v_persist_event.version <> 2 then
+    raise exception '일정 색상 백필이 기존 버전을 정확히 한 단계 올리지 않았습니다';
+  end if;
+
   select * into v_group
   from public.groups
   where id = '00000000-0000-4000-8000-00000000b001';
@@ -403,7 +481,7 @@ begin
   ) then
     raise exception '재적용 시 이전 직접 일정 작성자 할당을 잃었습니다';
   end if;
-  if (select count(*) from public.event_members) <> 4 then
+  if (select count(*) from public.event_members) <> 5 then
     raise exception '일정 멤버 데이터 채우기/재적용이 멱등적이지 않습니다';
   end if;
   if not exists (
