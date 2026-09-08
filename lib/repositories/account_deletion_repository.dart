@@ -32,8 +32,8 @@ class AccountDeletionException implements Exception {
     AccountDeletionErrorCode.sessionExpired =>
       '로그인이 만료되었습니다. 다시 로그인한 뒤 시도해 주세요.',
     AccountDeletionErrorCode.network => '네트워크를 확인한 뒤 다시 시도해 주세요.',
-    // Capability details can originate from a build/configuration adapter.
-    // Never echo raw provider, URL, or session diagnostics into the UI.
+    // 기능 세부 정보는 빌드/설정 어댑터에서 올 수 있다. 원시 공급자, URL, 세션 진단
+    // 정보를 UI에 절대 되풀이하지 않는다.
     AccountDeletionErrorCode.capability => '계정 삭제는 연결된 서버에서만 사용할 수 있어요.',
     AccountDeletionErrorCode.protocol => '서버 응답을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.',
     AccountDeletionErrorCode.generic => '계정을 삭제하지 못했어요. 잠시 후 다시 시도해 주세요.',
@@ -43,9 +43,8 @@ class AccountDeletionException implements Exception {
   String toString() => message;
 }
 
-/// The local/configuration adapter cannot truthfully provide this operation.
-/// Keeping this separate from a generic failure lets the UI explain what the
-/// current capability is without pretending that an account was deleted.
+/// 로컬/설정 어댑터는 이 작업을 실제로 제공할 수 없다. 일반 실패와 분리하면 계정이
+/// 삭제된 것처럼 가장하지 않고 UI에서 현재 기능을 설명할 수 있다.
 class AccountDeletionCapabilityException extends AccountDeletionException {
   const AccountDeletionCapabilityException([super.message = _defaultMessage])
     : super(code: AccountDeletionErrorCode.capability);
@@ -95,8 +94,8 @@ class AccountDeletionGroupImpact {
       if (deletedAt == null) _invalid();
     }
     if (status != 'active' && status != 'archived') _invalid();
-    // Status and the soft-delete marker are two views of the same lifecycle
-    // state. Reject contradictory payloads before displaying an impact.
+    // 상태와 소프트 삭제 표시는 같은 수명 주기 상태를 보는 두 관점이다. 서로
+    // 모순되는 페이로드는 영향을 표시하기 전에 거부한다.
     if ((status == 'active') != (deletedAt == null)) _invalid();
     if (memberCount > membershipCount) _invalid();
     return AccountDeletionGroupImpact(
@@ -134,7 +133,7 @@ class AccountDeletionImpact {
 
   bool get hasActiveOwnedGroups => activeOwnedGroups.isNotEmpty;
 
-  // Readable aliases used by UI integrations that prefer the adjective first.
+  // 형용사를 앞에 두는 UI 통합에서 사용하는 읽기 쉬운 별칭이다.
   List<AccountDeletionGroupImpact> get ownedActiveGroups => activeOwnedGroups;
   List<AccountDeletionGroupImpact> get ownedArchivedGroups =>
       archivedOwnedGroups;
@@ -143,9 +142,8 @@ class AccountDeletionImpact {
   int get inviteCount => invites;
   int get membershipCount => memberships;
 
-  /// A valid empty summary is used only by legacy test adapters that expose
-  /// the old `Future<void> deleteAccount` API. Remote Edge responses must
-  /// always carry a full summary (see [fromJson]).
+  /// 유효한 빈 요약은 이전 `Future<void> deleteAccount` API를 노출하는 레거시 테스트
+  /// 어댑터에서만 사용한다. 원격 Edge 응답은 항상 전체 요약을 담아야 한다([fromJson] 참고).
   static const empty = AccountDeletionImpact(
     ownedGroups: <AccountDeletionGroupImpact>[],
     activeOwnedGroups: <AccountDeletionGroupImpact>[],
@@ -166,8 +164,8 @@ class AccountDeletionImpact {
     final events = _requiredNonNegativeInt(map['events']);
     final invites = _requiredNonNegativeInt(map['invites']);
     final memberships = _requiredNonNegativeInt(map['memberships']);
-    // The server returns these three views of the same owned set. Rejecting a
-    // mismatch catches stale/malformed payloads before the user confirms.
+    // 서버는 같은 소유 집합을 세 가지 뷰로 반환한다. 불일치를 거부하면 사용자가
+    // 확인하기 전에 오래되었거나 잘못된 페이로드를 잡을 수 있다.
     if (owned.length != active.length + archived.length) _invalid();
     if (groups != owned.length) _invalid();
     final ownedIds = owned.map((group) => group.id).toSet();
@@ -187,11 +185,10 @@ class AccountDeletionImpact {
         archived.any((group) => !group.isArchived)) {
       _invalid();
     }
-    // Each partition is a repeated serialization of the same canonical row.
-    // Matching only IDs/lifecycle markers would allow a stale name, timezone,
-    // version, or count from one view to reach the confirmation UI.  Require
-    // every active/archived record to equal the corresponding owned record on
-    // all client-visible fields (including the normalized deleted timestamp).
+    // 각 파티션은 같은 표준 행을 반복해 직렬화한 것이다. ID/수명 주기 표시만 비교하면
+    // 한 뷰의 오래된 이름, 시간대, 버전, 개수가 확인 UI에 도달할 수 있다. 모든 활성/
+    // 보관 레코드는 정규화된 삭제 타임스탬프를 포함해 클라이언트에 보이는 모든 필드가
+    // 해당 소유 레코드와 같아야 한다.
     final ownedById = <String, AccountDeletionGroupImpact>{
       for (final group in owned) group.id: group,
     };
@@ -294,27 +291,25 @@ abstract class AccountDeletionRepository {
 
   bool get isRemote;
 
-  /// Returns the server-owned groups and cascade counts before confirmation.
-  /// The legacy default is intentionally a capability error. Production and
-  /// new adapters must override this method with the typed RPC preflight.
+  /// 확인 전에 서버 소유 그룹과 연쇄 삭제 개수를 반환한다. 레거시 기본값은 의도적으로
+  /// 기능 오류다. 프로덕션 및 새 어댑터는 형식이 지정된 RPC 사전 점검으로 이 메서드를
+  /// 재정의해야 한다.
   Future<AccountDeletionImpact> preflight() async {
     throw const AccountDeletionCapabilityException();
   }
 
   Future<AccountDeletionImpact> accountDeletionPreflight() => preflight();
 
-  /// Legacy operation retained for source compatibility with existing fakes.
-  /// Implementations may return `void` (the original API) or an
-  /// [AccountDeletionResult]. The base type is dynamic so both remain source
-  /// compatible while new callers can use the typed result from the Supabase
-  /// adapter directly.
+  /// 기존 테스트 대역과의 소스 호환성을 위해 유지한 이전 작업이다. 구현은 원래 API인
+  /// `void` 또는 [AccountDeletionResult]를 반환할 수 있다. 기본 타입을 `dynamic`으로
+  /// 두어 둘 다 소스 호환성을 유지하면서 새 호출자가 Supabase 어댑터의 형식 지정
+  /// 결과를 직접 사용할 수 있게 한다.
   Future<dynamic> deleteAccount({required String confirmation});
 
-  /// Typed result contract for the Edge `{deleted: true, summary}` response.
-  /// A legacy `Future<void>` adapter cannot truthfully establish that the
-  /// account was deleted, so this bridge fails closed instead of fabricating
-  /// success. A map is accepted only when parsed by the strict result
-  /// contract.
+  /// Edge `{deleted: true, summary}` 응답의 형식 지정 결과 계약이다. 레거시
+  /// `Future<void>` 어댑터는 계정 삭제를 사실대로 확인할 수 없으므로 이 연결부는
+  /// 성공을 꾸며 내지 않고 실패 시 차단한다. 맵은 엄격한 결과 계약으로 파싱된
+  /// 경우에만 허용한다.
   Future<AccountDeletionResult> deleteAccountWithResult({
     required String confirmation,
   }) async {
@@ -445,9 +440,8 @@ Object? _decodeRpcValue(Object? value) {
   return value;
 }
 
-/// No local adapter can delete an Auth account or produce a truthful cascade
-/// summary. It therefore exposes an explicit capability error instead of a
-/// fake success.
+/// 어떤 로컬 어댑터도 Auth 계정을 삭제하거나 사실에 맞는 연쇄 삭제 요약을 만들 수 없다.
+/// 따라서 거짓 성공 대신 명시적인 기능 오류를 노출한다.
 class LocalAccountDeletionRepository extends AccountDeletionRepository {
   LocalAccountDeletionRepository();
 
@@ -473,8 +467,8 @@ class LocalAccountDeletionRepository extends AccountDeletionRepository {
   }
 }
 
-/// Used by release/configuration-blocked builds. It never creates local data
-/// and never claims that an account deletion succeeded.
+/// 릴리스/설정 차단 빌드에서 사용한다. 로컬 데이터를 만들지 않으며 계정 삭제가
+/// 성공했다고 절대 주장하지 않는다.
 class ConfigurationBlockedAccountDeletionRepository
     extends AccountDeletionRepository {
   ConfigurationBlockedAccountDeletionRepository(this.message);

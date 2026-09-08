@@ -91,46 +91,38 @@ Future<GoRouter> _pumpRoutedApp(WidgetTester tester, _RouterAuth auth) async {
 }
 
 void main() {
-  testWidgets(
-    'auth callback waits for the typed event before choosing a flow',
-    (tester) async {
-      final auth = _RouterAuth();
-      addTearDown(auth.dispose);
-      final router = await _pumpRoutedApp(tester, auth);
+  testWidgets('인증 콜백이 흐름을 선택하기 전에 타입이 있는 이벤트를 기다린다', (tester) async {
+    final auth = _RouterAuth();
+    addTearDown(auth.dispose);
+    final router = await _pumpRoutedApp(tester, auth);
 
-      router.go('/auth-callback');
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(find.text('인증 링크를 확인하는 중이에요'), findsOneWidget);
+    router.go('/auth-callback');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('인증 링크를 확인하는 중이에요'), findsOneWidget);
 
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.signedIn,
-          user: _routeUser,
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('어디서 함께할까요?'), findsOneWidget);
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _routeUser),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('어디서 함께할까요?'), findsOneWidget);
 
-      auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
-      await tester.pumpAndSettle();
-      router.go('/auth-callback');
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 500));
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.passwordRecovery,
-          user: _routeUser,
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('새 비밀번호 만들기'), findsOneWidget);
-    },
-  );
+    auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
+    await tester.pumpAndSettle();
+    router.go('/auth-callback');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.passwordRecovery,
+        user: _routeUser,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('새 비밀번호 만들기'), findsOneWidget);
+  });
 
-  testWidgets('OAuth callback maps cancellation to safe Korean copy', (
-    tester,
-  ) async {
+  testWidgets('OAuth 콜백이 취소를 안전한 한국어 문구로 변환한다', (tester) async {
     final auth = _RouterAuth();
     addTearDown(auth.dispose);
     final router = await _pumpRoutedApp(tester, auth);
@@ -148,9 +140,7 @@ void main() {
     expect(find.textContaining('provider_secret'), findsNothing);
   });
 
-  testWidgets('OAuth callback maps unknown errors without exposing details', (
-    tester,
-  ) async {
+  testWidgets('OAuth 콜백이 세부 정보 노출 없이 알 수 없는 오류를 변환한다', (tester) async {
     final auth = _RouterAuth();
     addTearDown(auth.dispose);
     final router = await _pumpRoutedApp(tester, auth);
@@ -168,9 +158,7 @@ void main() {
     expect(find.textContaining('details'), findsNothing);
   });
 
-  testWidgets('OAuth callback hides a description even without an error code', (
-    tester,
-  ) async {
+  testWidgets('OAuth 콜백이 오류 코드가 없어도 설명을 숨긴다', (tester) async {
     final auth = _RouterAuth();
     addTearDown(auth.dispose);
     final router = await _pumpRoutedApp(tester, auth);
@@ -182,9 +170,7 @@ void main() {
     expect(find.textContaining('account secret'), findsNothing);
   });
 
-  testWidgets('custom-scheme callback keeps its query while routing', (
-    tester,
-  ) async {
+  testWidgets('사용자 지정 스킴 콜백이 라우팅 중 검색어를 유지한다', (tester) async {
     final auth = _RouterAuth();
     addTearDown(auth.dispose);
     final router = await _pumpRoutedApp(tester, auth);
@@ -197,9 +183,7 @@ void main() {
     expect(find.text(socialAuthCancelledMessage), findsOneWidget);
   });
 
-  testWidgets('signed-in confirmation and stale reset routes go to groups', (
-    tester,
-  ) async {
+  testWidgets('로그인 확인 및 오래된 재설정 라우트가 그룹으로 이동한다', (tester) async {
     final auth = _RouterAuth();
     addTearDown(auth.dispose);
     final router = await _pumpRoutedApp(tester, auth);
@@ -219,9 +203,7 @@ void main() {
     expect(find.text('어디서 함께할까요?'), findsOneWidget);
   });
 
-  testWidgets('group logout keeps a safe login route when sign-out fails', (
-    tester,
-  ) async {
+  testWidgets('로그아웃 실패 시 그룹 로그아웃이 안전한 로그인 라우트를 유지한다', (tester) async {
     final auth = _RouterAuth()..signOutError = StateError('provider secret');
     addTearDown(auth.dispose);
     await _pumpRoutedApp(tester, auth);
@@ -240,9 +222,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('settings logout keeps a safe login route when sign-out fails', (
-    tester,
-  ) async {
+  testWidgets('로그아웃 실패 시 설정 로그아웃이 안전한 로그인 라우트를 유지한다', (tester) async {
     final auth = _RouterAuth()..signOutError = StateError('provider secret');
     addTearDown(auth.dispose);
     await _pumpRoutedApp(tester, auth);
@@ -269,68 +249,60 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'password reset remains visible long enough to show successful update',
-    (tester) async {
-      final auth = _RouterAuth();
-      addTearDown(auth.dispose);
-      final router = await _pumpRoutedApp(tester, auth);
+  testWidgets('비밀번호 재설정이 갱신 성공을 보여 줄 만큼 오래 표시된다', (tester) async {
+    final auth = _RouterAuth();
+    addTearDown(auth.dispose);
+    final router = await _pumpRoutedApp(tester, auth);
 
-      router.go('/auth-callback');
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.passwordRecovery,
-          user: _routeUser,
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('새 비밀번호 만들기'), findsOneWidget);
+    router.go('/auth-callback');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.passwordRecovery,
+        user: _routeUser,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('새 비밀번호 만들기'), findsOneWidget);
 
-      final fields = find.byType(TextFormField);
-      await tester.enterText(fields.at(0), 'new-password');
-      await tester.enterText(fields.at(1), 'new-password');
-      await tester.tap(find.text('비밀번호 변경하기'));
-      await tester.pumpAndSettle();
+    final fields = find.byType(TextFormField);
+    await tester.enterText(fields.at(0), 'new-password');
+    await tester.enterText(fields.at(1), 'new-password');
+    await tester.tap(find.text('비밀번호 변경하기'));
+    await tester.pumpAndSettle();
 
-      expect(find.text('비밀번호를 변경했어요. 새 비밀번호로 로그인해 주세요.'), findsOneWidget);
-      expect(find.text('로그인하러 가기'), findsOneWidget);
-      expect(find.text('어디서 함께할까요?'), findsNothing);
-    },
-  );
+    expect(find.text('비밀번호를 변경했어요. 새 비밀번호로 로그인해 주세요.'), findsOneWidget);
+    expect(find.text('로그인하러 가기'), findsOneWidget);
+    expect(find.text('어디서 함께할까요?'), findsNothing);
+  });
 
-  testWidgets(
-    'demo login navigates through group and bottom-navigation routes',
-    (tester) async {
-      await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
-      await tester.pumpAndSettle();
-      expect(find.text('로그인'), findsOneWidget);
+  testWidgets('데모 로그인이 그룹 및 하단 탐색 라우트로 이동한다', (tester) async {
+    await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
+    await tester.pumpAndSettle();
+    expect(find.text('로그인'), findsOneWidget);
 
-      await tester.tap(find.text('데모 값 채우기'));
-      await tester.tap(find.text('로그인'));
-      await tester.pumpAndSettle();
-      expect(find.text('어디서 함께할까요?'), findsOneWidget);
-      expect(find.text('우리 가족'), findsOneWidget);
+    await tester.tap(find.text('데모 값 채우기'));
+    await tester.tap(find.text('로그인'));
+    await tester.pumpAndSettle();
+    expect(find.text('어디서 함께할까요?'), findsOneWidget);
+    expect(find.text('우리 가족'), findsOneWidget);
 
-      await tester.tap(find.text('우리 가족'));
-      await tester.pumpAndSettle();
-      expect(find.text('캘린더'), findsWidgets);
+    await tester.tap(find.text('우리 가족'));
+    await tester.pumpAndSettle();
+    expect(find.text('캘린더'), findsWidgets);
 
-      await tester.tap(find.text('멤버').last);
-      await tester.pumpAndSettle();
-      expect(find.text('동현'), findsOneWidget);
-      expect(find.text('진우'), findsOneWidget);
+    await tester.tap(find.text('멤버').last);
+    await tester.pumpAndSettle();
+    expect(find.text('동현'), findsOneWidget);
+    expect(find.text('진우'), findsOneWidget);
 
-      await tester.tap(find.text('설정').last);
-      await tester.pumpAndSettle();
-      expect(find.text('어두운 화면'), findsOneWidget);
-    },
-  );
+    await tester.tap(find.text('설정').last);
+    await tester.pumpAndSettle();
+    expect(find.text('어두운 화면'), findsOneWidget);
+  });
 
-  testWidgets('cancelling invite dialogs disposes their fields safely', (
-    tester,
-  ) async {
+  testWidgets('초대 대화상자 취소가 필드를 안전하게 해제한다', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
     await tester.pumpAndSettle();
 
@@ -366,9 +338,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('group dialogs validate blank and malformed input inline', (
-    tester,
-  ) async {
+  testWidgets('그룹 대화상자가 빈 입력과 잘못된 입력을 인라인 검증한다', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
     await tester.pumpAndSettle();
     await tester.tap(find.text('데모 값 채우기'));
@@ -399,9 +369,7 @@ void main() {
     expect(find.byType(AlertDialog), findsOneWidget);
   });
 
-  testWidgets('horizontal swipes move the selected schedule day', (
-    tester,
-  ) async {
+  testWidgets('가로 스와이프로 선택한 일정 날짜를 이동한다', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
     await tester.pumpAndSettle();
     await tester.tap(find.text('데모 값 채우기'));
@@ -428,9 +396,7 @@ void main() {
     expect(controller.selectedDay, initialDay);
   });
 
-  testWidgets('settings lets the signed-in user change their display name', (
-    tester,
-  ) async {
+  testWidgets('설정에서 로그인 사용자가 표시 이름을 바꿀 수 있다', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
     await tester.pumpAndSettle();
     await tester.tap(find.text('데모 값 채우기'));
@@ -452,30 +418,27 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'saving an event returns home after controller notifications in the same turn',
-    (tester) async {
-      await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
-      await tester.pumpAndSettle();
+  testWidgets('일정 저장이 같은 실행 차례의 컨트롤러 알림 후 홈으로 돌아간다', (tester) async {
+    await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
+    await tester.pumpAndSettle();
 
-      await tester.tap(find.text('데모 값 채우기'));
-      await tester.tap(find.text('로그인'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('우리 가족'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('일정 추가'));
-      await tester.pumpAndSettle();
-      expect(find.byType(EventEditorScreen), findsOneWidget);
+    await tester.tap(find.text('데모 값 채우기'));
+    await tester.tap(find.text('로그인'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('우리 가족'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('일정 추가'));
+    await tester.pumpAndSettle();
+    expect(find.byType(EventEditorScreen), findsOneWidget);
 
-      await tester.enterText(find.byType(TextFormField).first, '회귀 테스트 일정');
-      // LocalScheduleRepository는 이벤트를 내보내고, _save가 이동하기 전에
-      // 같은 저장 작업의 시작과 끝에서 saveEvent를 알린다.
-      await tester.tap(find.text('저장'));
-      await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).first, '회귀 테스트 일정');
+    // LocalScheduleRepository는 이벤트를 내보내고, _save가 이동하기 전에
+    // 같은 저장 작업의 시작과 끝에서 saveEvent를 알린다.
+    await tester.tap(find.text('저장'));
+    await tester.pumpAndSettle();
 
-      expect(find.byType(EventEditorScreen), findsNothing);
-      expect(find.byType(HomeScreen), findsOneWidget);
-      expect(find.text('회귀 테스트 일정'), findsOneWidget);
-    },
-  );
+    expect(find.byType(EventEditorScreen), findsNothing);
+    expect(find.byType(HomeScreen), findsOneWidget);
+    expect(find.text('회귀 테스트 일정'), findsOneWidget);
+  });
 }

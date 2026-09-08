@@ -1,17 +1,16 @@
--- Bounded calendar reads for monthly and agenda views.
+-- 월간 및 일정 목록 보기를 위한 범위 제한 캘린더 조회다.
 --
--- This migration is additive.  It keeps the Feature 5 event/member row shape,
--- leaves the legacy events table grants and realtime publication intact, and
--- exposes one authenticated RPC so range reads never need an unbounded group
--- snapshot.  Cursor pagination is deliberately opaque to clients; a later
--- occurrence/search API can introduce a new cursor version without changing
--- this event-only contract.
+-- 이 마이그레이션은 기존 기능에 추가만 한다. 기능 5의 일정/멤버 행 형태와
+-- 기존 events 테이블 권한 및 Realtime publication을 그대로 유지하고, 범위
+-- 조회에 제한 없는 그룹 스냅샷이 필요하지 않도록 인증된 RPC 하나를 노출한다.
+-- 커서 페이지네이션은 의도적으로 클라이언트에 불투명하다. 이후 발생/검색
+-- API는 이 일정 전용 계약을 바꾸지 않고 새 커서 버전을 도입할 수 있다.
 
 begin;
 
--- The existing index is useful for a starts_at predicate, but the event id is
--- required to make ties deterministic for keyset pagination.  The all-day
--- branch uses date columns and gets its own small partial index.
+-- 기존 인덱스는 starts_at 조건에 유용하지만, 키셋 페이지네이션에서 동률 순서를
+-- 결정하려면 일정 ID가 필요하다. 종일 일정 분기는 날짜 열을 사용하므로 작은
+-- 부분 인덱스를 별도로 둔다.
 create index if not exists events_group_start_id_live_idx
   on public.events (group_id, starts_at, id)
   where deleted_at is null;
@@ -21,13 +20,13 @@ create index if not exists events_group_allday_dates_live_idx
   where deleted_at is null and is_all_day;
 
 comment on index public.events_group_start_id_live_idx is
-  'Deterministic live-event order for bounded (starts_at, id) keyset pages.';
+  '범위 제한 (starts_at, id) 키셋 페이지를 위한 결정적인 운영 일정 순서다.';
 comment on index public.events_group_allday_dates_live_idx is
-  'Live all-day date overlap support for bounded calendar range reads.';
+  '범위 제한 캘린더 조회에서 운영 중인 종일 일정의 날짜 겹침을 지원한다.';
 
--- The function returns a JSON envelope rather than a SETOF row so an empty
--- page can still carry an explicit next_cursor/has_more contract.  Every event
--- object intentionally mirrors the Feature 5 RPC row, including member_ids.
+-- 빈 페이지도 명시적인 next_cursor/has_more 계약을 전달할 수 있도록 함수는
+-- SETOF 행 대신 JSON 봉투를 반환한다. 각 일정 객체는 member_ids를 포함해
+-- 의도적으로 기능 5 RPC 행과 같은 형태를 사용한다.
 create or replace function public.events_for_range(
   p_group_id uuid,
   p_range_start timestamptz,
@@ -97,8 +96,8 @@ begin
   end if;
   v_limit := p_limit;
 
-  -- Lock the group before membership state.  Archive/ownership/membership
-  -- RPCs use the same group-first order, making lifecycle races deterministic.
+  -- 멤버십 상태보다 그룹을 먼저 잠근다. 보관/소유권/멤버십 RPC도 같은 그룹
+  -- 우선 순서를 사용하므로 수명 주기 경합 결과가 결정적이다.
   select g.*
     into v_group
   from public.groups g
@@ -121,8 +120,8 @@ begin
      ) then
     raise exception using
       errcode = '42501',
-      -- Keep this identical to the not-found/archived branch so callers
-      -- cannot distinguish group existence or lifecycle from membership.
+      -- 호출자가 그룹 존재 여부나 수명 주기를 멤버십과 구분하지 못하도록
+      -- 찾을 수 없음/보관됨 분기와 동일하게 유지한다.
       message = 'group is unavailable';
   end if;
 
@@ -138,10 +137,9 @@ begin
       message = 'view timezone must be an exact IANA timezone name';
   end if;
 
-  -- Calendar callers send UTC instants corresponding to local midnight in the
-  -- view timezone.  Requiring that shape keeps all-day date boundaries
-  -- unambiguous and prevents a partial-day request from silently changing the
-  -- date-only semantics.
+  -- 캘린더 호출자는 보기 시간대의 현지 자정에 해당하는 UTC 시각을 보낸다.
+  -- 이 형태를 강제하면 종일 일정의 날짜 경계가 명확해지고, 일부 날짜 요청이
+  -- 날짜 전용 의미를 조용히 바꾸는 것을 막을 수 있다.
   v_local_start := p_range_start at time zone v_view_timezone;
   v_local_end := p_range_end at time zone v_view_timezone;
   if v_local_start <> pg_catalog.date_trunc('day', v_local_start)
@@ -163,13 +161,12 @@ begin
       message = 'range must not exceed 366 calendar days';
   end if;
 
-  -- Cursor format v1 is an unpadded URL-safe base64-encoded JSON object with
-  -- exactly {v, starts_at, event_id}.  It is intentionally strict: unknown
-  -- keys, another version, invalid UUID/timestamp, or a non-finite tuple
-  -- fails closed instead of producing an attacker-controlled skip.  A cursor
-  -- below range_start is valid because a spanning event may begin before the
-  -- requested window; a tuple after range_end is also valid because an
-  -- all-day event's stored starts_at uses its own timezone.
+  -- 커서 형식 v1은 정확히 {v, starts_at, event_id}를 담은 패딩 없는 URL 안전
+  -- Base64 인코딩 JSON 객체다. 알 수 없는 키, 다른 버전, 잘못된 UUID/타임스탬프,
+  -- 유한하지 않은 튜플은 공격자가 제어하는 건너뛰기를 만들지 않고 실패 시
+  -- 차단하도록 의도적으로 엄격하게 검사한다. 기간에 걸친 일정은 요청 창보다
+  -- 먼저 시작할 수 있으므로 range_start보다 앞선 커서가 유효하다. 종일 일정에
+  -- 저장된 starts_at은 자체 시간대를 사용하므로 range_end 뒤의 튜플도 유효하다.
   if p_cursor is not null then
     if pg_catalog.length(p_cursor) > 4096
        or pg_catalog.btrim(p_cursor) = ''
@@ -190,9 +187,8 @@ begin
         ),
         'UTF8'
       );
-      -- Keep the original JSON token as well as its JSONB view.  JSONB
-      -- canonicalizes numeric spellings (for example 1e0 -> 1), while the
-      -- Dart wire contract requires the version to be the JSON integer 1.
+      -- 원본 JSON 토큰과 JSONB 표현을 모두 유지한다. JSONB는 숫자 표기(예:
+      -- 1e0 -> 1)를 정규화하지만 Dart 전송 계약에서는 버전이 JSON 정수 1이어야 한다.
       v_cursor_wire := v_cursor_text::json;
       v_cursor := v_cursor_text::jsonb;
     exception when others then
@@ -215,11 +211,10 @@ begin
         message = 'cursor has an invalid shape';
     end if;
 
-    -- Dart's EventRangeCursor decoder requires the JSON number 1 (not the
-    -- string "1" or a floating-point spelling such as 1.0), the exact three
-    -- keys above, and an ISO-8601 timestamp carrying an explicit Z/offset.
-    -- Validate the wire text before casting: PostgreSQL would otherwise parse
-    -- a timezone-less timestamp in the session timezone.
+    -- Dart의 EventRangeCursor 디코더에는 문자열 "1"이나 1.0 같은 부동 소수점
+    -- 표기가 아닌 JSON 숫자 1, 위의 정확한 키 세 개, 명시적인 Z/오프셋을 포함한
+    -- ISO-8601 타임스탬프가 필요하다. 그렇지 않으면 PostgreSQL이 시간대 없는
+    -- 타임스탬프를 세션 시간대로 파싱하므로 변환 전에 전송 문자열을 검증한다.
     if pg_catalog.json_typeof(v_cursor_wire -> 'v') <> 'number'
        or pg_catalog.jsonb_typeof(v_cursor -> 'v') <> 'number'
        or (v_cursor_wire -> 'v')::text !~ '^-?[0-9]+$' then
@@ -234,10 +229,10 @@ begin
         message = 'cursor has an invalid shape';
     end if;
 
-    -- Match the Dart parser exactly: four-digit year/month/day, mandatory
-    -- seconds, optional one-to-six fractional digits, and an uppercase Z or
-    -- signed HH:MM offset.  The captures are validated below before the
-    -- timestamptz cast so PostgreSQL cannot normalize impossible components.
+    -- Dart 파서와 정확히 맞춘다. 연/월/일은 네 자리, 초는 필수, 소수점 이하는
+    -- 한 자리에서 여섯 자리까지 선택 사항이며, 대문자 Z 또는 부호 있는 HH:MM
+    -- 오프셋이 필요하다. PostgreSQL이 불가능한 구성 요소를 정규화하지 못하도록
+    -- 아래에서 캡처 값을 검증한 뒤 timestamptz로 변환한다.
     v_cursor_start_text := v_cursor ->> 'starts_at';
     v_cursor_parts := pg_catalog.regexp_match(
       v_cursor_start_text,
@@ -345,8 +340,8 @@ begin
          and target.is_active
          and target.removed_at is null
      ) then
-    -- Do not distinguish an outsider from an inactive target.  Both are
-    -- outside the caller's active-group scope.
+    -- 외부 사용자와 비활성 대상을 구분하지 않는다. 둘 다 호출자의 활성 그룹
+    -- 범위 밖에 있다.
     raise exception using
       errcode = '42501',
       message = 'participant is not an active member of this group';
@@ -468,8 +463,8 @@ begin
 end;
 $$;
 
--- Public functions receive EXECUTE from PUBLIC by default.  Remove inherited
--- access explicitly, then expose only the authenticated Data API role.
+-- 공개 함수는 기본적으로 PUBLIC에서 EXECUTE 권한을 받는다. 상속된 접근 권한을
+-- 명시적으로 제거한 뒤 인증된 Data API 역할에만 노출한다.
 revoke execute on function public.events_for_range(
   uuid, timestamptz, timestamptz, text, integer, text, uuid
 ) from public, anon, authenticated;

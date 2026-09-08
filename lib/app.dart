@@ -95,25 +95,24 @@ final routerProvider = Provider<GoRouter>((ref) {
   final config = ref.read(appConfigProvider);
   final browserLocationSource = ref.read(browserLocationSourceProvider);
   // 비밀번호 복구 화면은 비밀번호 업데이트가 완료되면 성공 상태를
-  // 잠시 보여줘야 한다. 컨트롤러가 세션을 signed-in으로 바꾸는 알림과
+  // 잠시 보여줘야 한다. 컨트롤러가 세션을 로그인 상태로 바꾸는 알림과
   // 화면이 성공 상태를 그리는 사이에 라우터가 /groups로 이동하지 않도록
   // 현재 복구 화면의 한 번성 허용 플래그를 둔다.
   var allowPasswordResetSuccess = false;
   return GoRouter(
     initialLocation: '/login',
     refreshListenable: controller,
-    // GoRouter's default error page includes the unmatched location.  A
-    // malformed invite path could therefore echo a bearer token back into the
-    // widget tree. Keep all routing failures token-free and actionable.
+    // GoRouter의 기본 오류 페이지에는 일치하지 않은 위치가 포함된다. 따라서 잘못된
+    // 초대 경로가 Bearer 토큰을 위젯 트리에 다시 노출할 수 있다. 모든 라우팅 실패는
+    // 토큰을 포함하지 않으며 사용자가 조치할 수 있게 유지한다.
     errorBuilder: (context, state) => const _SafeRouteErrorScreen(),
     redirect: (context, state) {
       final location = state.uri.path;
-      // A browser path strategy strips an application's deployment prefix
-      // before GoRouter sees it.  The source below preserves the complete
-      // address-bar URI so the strict parser can check the configured origin
-      // and *full* base path.  Every invite-shaped candidate is scrubbed in
-      // this same branch, even when parsing fails, so an opaque value cannot
-      // reach GoRouter's error page or widget tree.
+      // 브라우저 경로 전략은 GoRouter에 전달하기 전에 앱의 배포 접두사를 제거한다.
+      // 아래 소스는 주소 표시줄의 전체 URI를 보존해 엄격한 파서가 설정된 출처와
+      // *전체* 기본 경로를 확인할 수 있게 한다. 파싱이 실패해도 초대 형태의 후보는
+      // 모두 이 분기에서 제거하므로 불투명한 값이 GoRouter 오류 페이지나 위젯 트리에
+      // 도달할 수 없다.
       final inviteCandidate = _inviteRouteCandidate(
         route: state.uri,
         browserLocation: browserLocationSource.currentLocation,
@@ -131,10 +130,10 @@ final routerProvider = Provider<GoRouter>((ref) {
         if (captured) {
           return controller.isAuthenticated ? '/invite' : '/login';
         }
-        // Invalid, unconfigured, wrong-origin, encoded, query-bearing,
-        // repeated-base, and trailing-slash invite paths all leave through a
-        // token-free route.  The signed-in destination is deliberately
-        // groups rather than the preview, because no pending token exists.
+        // 잘못되었거나 설정되지 않은 초대 경로, 출처가 다르거나 인코딩된 경로,
+        // 쿼리가 있거나 기본 경로가 반복되거나 끝에 슬래시가 있는 경로는 모두 토큰이
+        // 없는 경로로 빠져나간다. 대기 중인 토큰이 없으므로 로그인 상태의 목적지는
+        // 의도적으로 미리보기가 아닌 그룹 화면이다.
         return controller.isAuthenticated ? '/groups' : '/login';
       }
       final isAuthCallback =
@@ -161,11 +160,10 @@ final routerProvider = Provider<GoRouter>((ref) {
           location == '/terms-of-service' ||
           location == '/auth-callback' ||
           isInviteRoute;
-      // Keep the pending invite in the controller while a signed-out user
-      // authenticates. Login/signup submitters traditionally navigate to
-      // /groups; the pending invite wins that intermediate destination once
-      // the session is established. A warm link also moves an already signed
-      // in user to the token-free preview route.
+      // 로그아웃 사용자가 인증하는 동안 대기 초대를 컨트롤러에 유지한다. 로그인/
+      // 가입 제출자는 일반적으로 /groups로 이동하지만, 세션이 설정되면 대기 초대가
+      // 그 중간 목적지보다 우선한다. 웜 링크도 이미 로그인한 사용자를 토큰이 없는
+      // 미리보기 경로로 이동시킨다.
       if (!controller.isAuthenticated && isInviteRoute) return '/login';
       if (!controller.isAuthenticated && !publicAuthRoute) return '/login';
       if (location != '/reset-password' && !controller.isInPasswordRecovery) {
@@ -258,8 +256,8 @@ final routerProvider = Provider<GoRouter>((ref) {
                 try {
                   await controller.signOut();
                 } catch (_) {
-                  // The recovery session may already have expired; the
-                  // success screen should still return to login.
+                  // 복구 세션이 이미 만료되었을 수 있지만 성공 화면에서는 그래도
+                  // 로그인으로 돌아가야 한다.
                 }
               },
             );
@@ -333,7 +331,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
     ],
   );
-});
+}, dependencies: <ProviderOrFamily>[plannerControllerProvider]);
 
 @immutable
 class _InviteRouteCandidate {
@@ -350,14 +348,13 @@ class _InviteRouteCandidate {
   final Uri? currentOrigin;
 }
 
-/// Chooses the exact URI to hand to the strict invite parser.
+/// 엄격한 초대 파서에 전달할 정확한 URI를 선택한다.
 ///
-/// On web, [browserLocation] is authoritative: it includes `/app` when a
-/// PathUrlStrategy deployment uses `<base href="/app/">`, while [route] is
-/// only `/invite/<token>`.  Native and test routers can still provide an
-/// absolute route directly.  A path-only route can be synthesized only for a
-/// root configured base; synthesizing a nested base without the browser seam
-/// would silently broaden acceptance of a wrong deployment root.
+/// 웹에서는 [browserLocation]을 기준으로 삼는다. PathUrlStrategy 배포가
+/// `<base href="/app/">`를 사용하면 이 값에는 `/app`이 포함되지만 [route]에는
+/// `/invite/<token>`만 있다. 네이티브와 테스트 라우터는 여전히 절대 경로를 직접
+/// 제공할 수 있다. 경로 전용 [route]는 루트로 설정된 기본 경로에만 합성할 수 있다.
+/// 브라우저 접점 없이 중첩 기본 경로를 합성하면 잘못된 배포 루트까지 암묵적으로 허용한다.
 _InviteRouteCandidate _inviteRouteCandidate({
   required Uri route,
   required Uri? browserLocation,
@@ -386,9 +383,9 @@ _InviteRouteCandidate _inviteRouteCandidate({
   );
 }
 
-/// Returns true when [uri] contains an invite marker followed by any raw
-/// candidate, including malformed/encoded values and a trailing slash.  A
-/// bare token-free `/invite` route remains available for the preview screen.
+/// [uri]에 초대 표시와 그 뒤의 원시 후보가 있으면 `true`를 반환한다. 잘못되었거나
+/// 인코딩된 값과 끝의 슬래시도 포함한다. 토큰이 없는 순수 `/invite` 경로는
+/// 미리보기 화면에서 계속 사용할 수 있다.
 bool _hasInviteCandidate(Uri uri) {
   if (uri.scheme.toLowerCase() == 'moduly' &&
       uri.host.toLowerCase() == 'invite') {
@@ -406,10 +403,9 @@ bool _hasInviteCandidate(Uri uri) {
     }
   }
 
-  // `Uri.pathSegments` usually decodes percent escapes, but retain a raw-path
-  // scan for malformed or partially encoded forms that Dart cannot decode
-  // into the literal marker.  They must be scrubbed just like any other
-  // invite-shaped value, never passed through a fallback route.
+  // `Uri.pathSegments`는 보통 퍼센트 이스케이프를 디코딩하지만 Dart가 리터럴 표시로
+  // 디코딩할 수 없는 잘못되었거나 부분적으로 인코딩된 형식을 위해 원시 경로 탐색을
+  // 유지한다. 다른 초대 형태의 값처럼 제거해야 하며 대체 경로로 넘겨서는 안 된다.
   final rawSegments = uri.path.split('/');
   for (var index = 0; index < rawSegments.length; index++) {
     final raw = rawSegments[index].toLowerCase();
@@ -431,15 +427,14 @@ bool _hasInviteCandidate(Uri uri) {
   return false;
 }
 
-/// Converts a path-only GoRouter location into the absolute URI expected by
-/// the strict invite parser.  Browser routing supplies an absolute seam for
-/// nested deployments; this fallback is intentionally limited to a root
-/// configured base and to routes that already carry the configured prefix.
-/// Native custom-scheme URIs are left untouched when supplied directly.
+/// 경로 전용 GoRouter 위치를 엄격한 초대 파서가 기대하는 절대 URI로 변환한다.
+/// 브라우저 라우팅은 중첩 배포를 위한 절대 접점을 제공한다. 이 대체 방식은
+/// 의도적으로 루트로 설정된 기본 경로와 설정된 접두사가 이미 있는 경로로 제한한다.
+/// 네이티브 사용자 정의 스킴 URI가 직접 제공되면 그대로 둔다.
 Uri? _inviteUriForRoute(Uri route, AppConfig config) {
   if (route.scheme.isNotEmpty || route.host.isNotEmpty) return route;
-  // A percent escape may be decoded when rebuilding a Uri from path
-  // segments.  Preserve the parser's fail-closed encoded-form policy.
+  // 경로 조각에서 Uri를 다시 만들 때 퍼센트 이스케이프가 디코딩될 수 있다.
+  // 파서의 실패 시 차단 인코딩 형식 정책을 유지한다.
   if (route.toString().contains('%')) return null;
   final base = validateInviteBaseUrl(
     config.inviteBaseUrl,
@@ -613,10 +608,9 @@ String initials(String name) {
 
 Color colorFromValue(int value) => Color(value);
 
-/// Applies the in-app text-size preference on top of the platform text
-/// scaler. A user preference below 100% must never reduce an OS large-text
-/// setting; at the default platform scale it can still make the app a little
-/// smaller as intended by the settings slider.
+/// 플랫폼 텍스트 크기 조절기에 앱 내 글자 크기 설정을 더해 적용한다. 사용자 설정이 100%
+/// 미만이어도 OS 큰 글자 설정을 줄여서는 안 된다. 플랫폼 기본 크기에서는 설정
+/// 슬라이더의 의도대로 앱을 조금 작게 만들 수 있다.
 final class _AppTextScaler extends TextScaler {
   const _AppTextScaler(this.platformScaler, this.appScale);
 
@@ -634,9 +628,7 @@ final class _AppTextScaler extends TextScaler {
   }
 
   @override
-  @Deprecated(
-    'Use of textScaleFactor was deprecated in preparation for nonlinear text scaling.',
-  )
+  @Deprecated('비선형 텍스트 크기 조정을 준비하면서 textScaleFactor가 지원 중단되었습니다.')
   double get textScaleFactor {
     final platformScale = platformScaler.scale(1);
     if (appScale < 1 && platformScale > 1) return platformScale;
@@ -653,8 +645,8 @@ final class _AppTextScaler extends TextScaler {
   int get hashCode => Object.hash(platformScaler, appScale);
 }
 
-/// Chooses a foreground that remains legible over [background]. This is used
-/// for initials and other small labels drawn on user-selected colors.
+/// [background] 위에서도 읽기 쉬운 전경색을 선택한다. 사용자가 고른 색상 위에
+/// 표시하는 이니셜과 기타 작은 레이블에 사용한다.
 Color contrastingForeground(Color background) {
   final luminance = background.computeLuminance();
   final whiteContrast = 1.05 / (luminance + 0.05);
@@ -664,9 +656,9 @@ Color contrastingForeground(Color background) {
   return blackContrast > whiteContrast ? const Color(0xff1b1b1b) : Colors.white;
 }
 
-/// Returns [foreground] when it is readable on [background], otherwise uses
-/// an accessible neutral while the original color can remain as a visual
-/// category marker elsewhere (for example the event color rail).
+/// [foreground]가 [background] 위에서 읽기 쉬우면 그대로 반환하고, 그렇지 않으면
+/// 접근성 있는 중립색을 사용한다. 원래 색은 다른 곳에서 시각적 범주 표시
+/// (예: 일정 색상 막대)로 유지할 수 있다.
 Color readableForegroundOn(Color foreground, Color background) {
   final foregroundLuminance = foreground.computeLuminance();
   final backgroundLuminance = background.computeLuminance();

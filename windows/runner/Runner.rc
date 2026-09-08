@@ -1,4 +1,4 @@
-// Microsoft Visual C++ generated resource script.
+// Microsoft Visual C++가 생성한 리소스 스크립트다.
 //
 #pragma code_page(65001)
 #include "resource.h"
@@ -6,7 +6,7 @@
 #define APSTUDIO_READONLY_SYMBOLS
 /////////////////////////////////////////////////////////////////////////////
 //
-// Generated from the TEXTINCLUDE 2 resource.
+// TEXTINCLUDE 2 리소스에서 생성했다.
 //
 #include "winres.h"
 
@@ -14,7 +14,7 @@
 #undef APSTUDIO_READONLY_SYMBOLS
 
 /////////////////////////////////////////////////////////////////////////////
-// English (United States) resources
+// 영어(미국) 리소스
 
 #if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
@@ -47,17 +47,17 @@ END
 
 /////////////////////////////////////////////////////////////////////////////
 //
-// Icon
+// 아이콘
 //
 
-// Icon with lowest ID value placed first to ensure application icon
-// remains consistent on all systems.
+// 모든 시스템에서 애플리케이션 아이콘을 일관되게 유지하도록 ID 값이 가장 낮은
+// 아이콘을 맨 앞에 둔다.
 IDI_APP_ICON            ICON                    "resources\\app_icon.ico"
 
 
 /////////////////////////////////////////////////////////////////////////////
 //
-// Version
+// 버전
 //
 
 #if defined(FLUTTER_VERSION_MAJOR) && defined(FLUTTER_VERSION_MINOR) && defined(FLUTTER_VERSION_PATCH) && defined(FLUTTER_VERSION_BUILD)
@@ -105,7 +105,7 @@ BEGIN
     END
 END
 
-#endif    // English (United States) resources
+#endif    // 영어(미국) 리소스
 /////////////////////////////////////////////////////////////////////////////
 
 
@@ -113,9 +113,9 @@ END
 #ifndef APSTUDIO_INVOKED
 /////////////////////////////////////////////////////////////////////////////
 //
-// Generated from the TEXTINCLUDE 3 resource.
+// TEXTINCLUDE 3 리소스에서 생성했다.
 //
 
 
 /////////////////////////////////////////////////////////////////////////////
-#endif    // not APSTUDIO_INVOKED
+#endif    // APSTUDIO_INVOKED가 아닐 때

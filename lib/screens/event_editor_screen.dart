@@ -18,8 +18,8 @@ class EventEditorScreen extends ConsumerStatefulWidget {
   const EventEditorScreen({this.eventId, this.occurrenceKey, super.key});
   final String? eventId;
 
-  /// Opaque, stable occurrence key from a calendar-card deep link.  Null and
-  /// `single` preserve the legacy `/event/:id` route semantics.
+  /// 캘린더 카드 딥 링크에서 온 불투명하고 안정적인 발생 키다. null과 `single`은
+  /// 기존 `/event/:id` 경로 의미를 유지한다.
   final String? occurrenceKey;
 
   @override
@@ -61,19 +61,17 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
   bool _notificationDraftDirty = false;
   String? _notificationDraftIdentity;
   int? _notificationDraftVersion;
-  // Remote event reminder preferences are loaded lazily because the remote
-  // account projection intentionally does not expose every event's settings.
-  // Keep one attempt per authenticated session/logical event and never start
-  // the request from build itself; a post-frame callback avoids mutating the
-  // controller while Flutter is walking the widget tree.
+  // 원격 계정 프로젝션은 의도적으로 모든 일정의 설정을 노출하지 않으므로 원격 일정
+  // 알림 설정은 지연해서 불러온다. 인증 세션/논리 일정마다 한 번만 시도하며 빌드
+  // 안에서 요청을 시작하지 않는다. 프레임 이후 콜백을 사용하면 Flutter가 위젯
+  // 트리를 순회하는 동안 컨트롤러를 변경하지 않을 수 있다.
   String? _notificationPreferenceLoadKey;
   String? _notificationPreferenceLoadedKey;
   String? _notificationPreferenceFailedKey;
   bool _notificationPreferenceLoadInFlight = false;
   int _notificationPreferenceLoadGeneration = 0;
-  // Incremented whenever the route identity changes or a new detail request
-  // starts.  A completed lookup must match this generation as well as the
-  // event/occurrence identity before it may seed the editor.
+  // 경로 식별자가 바뀌거나 새 상세 요청을 시작할 때마다 증가한다. 완료된 조회는 이
+  // 세대와 일정/발생 식별자가 모두 일치해야 편집기의 초기값으로 쓸 수 있다.
   int _eventLookupGeneration = 0;
 
   final _colors = const <int>[
@@ -155,8 +153,8 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       controller
           .loadEventById(requestEventId, occurrenceKey: requestOccurrenceKey)
           .then((event) {
-            // Route A may complete after the same editor state has been
-            // reused for route B.  Do not even touch B's state in that case.
+            // 같은 편집기 상태를 경로 B에 재사용한 뒤 경로 A가 완료될 수 있다.
+            // 이 경우에는 B의 상태를 전혀 건드리지 않는다.
             if (!_isCurrentLookupRoute(
               requestGeneration,
               requestEventId,
@@ -167,8 +165,8 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
             final latest = ref.read(plannerControllerProvider);
             if (latest.user?.id != userId ||
                 latest.selectedGroup?.id != groupId) {
-              // The result belongs to a stale identity/group.  Clear the local
-              // detail cache and let the next build retry under the new context.
+              // 결과가 오래된 식별자/그룹에 속한다. 로컬 상세 캐시를 지우고 다음
+              // 빌드가 새 문맥에서 재시도하게 한다.
               setState(() {
                 _deepLinkedEvent = null;
                 _deepLinkedUserId = null;
@@ -250,9 +248,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     final wallStart = utcToWallTime(event.startAt, event.timezone);
     final wallEnd = utcToWallTime(event.endAt, event.timezone);
     if (event.allDay) {
-      // All-day endAt is an exclusive wall-time boundary. Legacy rows may
-      // lack the date metadata, so derive the inclusive editor date from
-      // that boundary just as we do when metadata is present.
+      // 종일 일정의 endAt은 포함되지 않는 현지 시각 경계다. 레거시 행에는 날짜
+      // 메타데이터가 없을 수 있으므로 메타데이터가 있을 때와 마찬가지로 이 경계에서
+      // 편집기에 표시할 포함 날짜를 계산한다.
       _start =
           event.allDayStartDate?.toLocal() ??
           DateTime(wallStart.year, wallStart.month, wallStart.day);
@@ -270,9 +268,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     _allDay = event.allDay;
     _colorValue = event.colorValue;
     _recurrenceRule = event.recurrenceRule;
-    // Occurrence routes start participant controls locked until the user
-    // explicitly chooses an all-scope mutation. The same gate applies to a
-    // series anchor so an accidental this/future choice cannot leak members.
+    // 발생분 경로에서는 사용자가 전체 범위 변경을 명시적으로 선택할 때까지 참여자
+    // 컨트롤을 잠근다. 같은 게이트를 시리즈 기준점에도 적용하여 실수로 이번/향후 범위를
+    // 선택해 멤버 정보가 새어 나오지 않게 한다.
     _recurrenceScope = null;
   }
 
@@ -305,9 +303,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     NotificationController notifications,
     PlannerEvent event,
   ) {
-    // A cached row can outlive membership changes made by another actor. Do
-    // not surface (or save against) that stale row while the active account
-    // is no longer a member of the authoritative event projection.
+    // 캐시된 행은 다른 행위자가 멤버십을 바꾼 뒤에도 남아 있을 수 있다. 활성 계정이
+    // 신뢰할 수 있는 일정 프로젝션의 멤버가 아니라면 그 오래된 행을 표시하거나
+    // 이를 기준으로 저장하지 않는다.
     final activeUserId = notifications.userId;
     if (activeUserId == null ||
         activeUserId.isEmpty ||
@@ -379,11 +377,10 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     _notificationPreferenceLoadInFlight = false;
   }
 
-  /// Starts a single authenticated read for the logical event's series-wide
-  /// reminder settings. The controller updates its event preference snapshot
-  /// and notifies listeners when the read completes; the normal build pass
-  /// then syncs the clean draft. Dirty controls are intentionally left alone,
-  /// while the loaded row remains available to the save path for its version.
+  /// 논리 일정의 시리즈 전체 알림 설정을 인증된 읽기로 한 번 불러온다. 읽기가 끝나면
+  /// 컨트롤러가 일정 설정 스냅샷을 갱신하고 리스너에 알리며, 이후 일반 빌드
+  /// 과정에서 변경되지 않은 초안을 동기화한다. 수정된 컨트롤은 의도적으로 그대로
+  /// 두며, 불러온 행은 버전 확인을 위해 저장 경로에서 계속 사용할 수 있다.
   void _maybeLoadNotificationPreferences(
     PlannerEvent event,
     NotificationController notifications,
@@ -439,8 +436,8 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
               _notificationPreferenceLoadInFlight = false;
               _notificationPreferenceLoadedKey = key;
               _notificationPreferenceFailedKey = null;
-              // loadEventPreferences notifies on success. This setState also
-              // covers adapters that return an unchanged empty snapshot.
+              // loadEventPreferences는 성공 시 알림을 보낸다. 이 setState는 변경되지
+              // 않은 빈 스냅샷을 반환하는 어댑터도 처리한다.
               if (mounted) setState(() {});
             })
             .catchError((Object _) {
@@ -450,9 +447,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
                 return;
               }
               _notificationPreferenceLoadInFlight = false;
-              // Treat a failed read as an attempted one so a rebuild cannot spin
-              // an unbounded request loop. Core keeps the generic error message;
-              // no local draft or cached preference is cleared here.
+              // 읽기 실패도 시도한 것으로 간주해 재빌드가 제한 없는 요청 반복을
+              // 돌지 않게 한다. Core는 일반 오류 메시지를 유지하며 여기서는 로컬
+              // 초안이나 캐시된 설정을 지우지 않는다.
               _notificationPreferenceFailedKey = key;
               if (mounted) setState(() {});
             }),
@@ -511,10 +508,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     _memberSelectionDirty = false;
   }
 
-  /// Fully reseeds every route-dependent field when GoRouter reuses this
-  /// state object for a different event or occurrence.  In particular, a
-  /// recurrence child/form key is replaced so its own touched fields cannot
-  /// survive an A→B route update.
+  /// GoRouter가 이 상태 객체를 다른 일정이나 발생분에 재사용할 때 경로에 의존하는
+  /// 모든 필드를 완전히 다시 초기화한다. 특히 반복 하위 요소/양식 키를 교체하여 자체적으로
+  /// 수정한 필드가 A→B 경로 갱신 뒤에도 남지 않게 한다.
   void _resetForRouteIdentity(PlannerController controller) {
     _eventLookupGeneration++;
     _titleController.clear();
@@ -550,9 +546,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     } else if (widget.eventId == null) {
       _seedCreateDraft(controller);
     }
-    // Mark the route as seeded even when its detail must be loaded.  The
-    // eventual authoritative response is merged by _syncIncomingEventDraft;
-    // this prevents didChangeDependencies from reseeding the new route.
+    // 상세 내용을 불러와야 할 때도 경로를 초기화된 것으로 표시한다. 나중에 도착한
+    // 신뢰할 수 있는 응답은 _syncIncomingEventDraft가 병합한다. 그러면
+    // didChangeDependencies가 새 경로를 다시 초기화하지 않는다.
     _didSeed = true;
   }
 
@@ -610,13 +606,19 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
 
   Future<void> _pickDate({required bool start}) async {
     final current = start ? _start : _end;
+    final minimumEndDate = CalendarDateBounds.clamp(_start);
+    var initialDate = CalendarDateBounds.clamp(current);
+    if (!start && _allDay && initialDate.isBefore(minimumEndDate)) {
+      initialDate = minimumEndDate;
+    }
     final picked = await showDatePicker(
       context: context,
-      initialDate: current,
-      firstDate: start || !_allDay
-          ? DateTime(2020)
-          : DateTime(_start.year, _start.month, _start.day),
-      lastDate: DateTime(2100),
+      initialDate: initialDate,
+      firstDate: CalendarDateBounds.firstDate,
+      lastDate: CalendarDateBounds.lastDate,
+      selectableDayPredicate: !start && _allDay
+          ? (date) => !date.isBefore(minimumEndDate)
+          : null,
       helpText: start ? '시작 날짜' : '종료 날짜',
       cancelText: '취소',
       confirmText: '선택',
@@ -696,10 +698,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
         ? canManageParticipants
         : canManageParticipants &&
               (!recurringEvent || _recurrenceScope == EventEditScope.all);
-    // Recurring series assignments always retain the event creator.  Keep the
-    // check at the save boundary as well as on the protected checkbox: a
-    // stale detail payload may omit the creator, and silently adding it here
-    // would hide the invalid external state instead of asking for a refresh.
+    // 반복 시리즈의 배정에는 항상 일정 작성자를 유지한다. 보호된 체크박스뿐 아니라
+    // 저장 경계에서도 검사한다. 오래된 상세 페이로드에는 작성자가 빠질 수 있으며,
+    // 여기서 조용히 추가하면 새로고침을 요구하지 않고 잘못된 외부 상태를 숨기게 된다.
     final protectedCreatorId =
         existing?.ownerId ??
         (existing == null && _recurrenceRule != null ? currentUserId : null);
@@ -763,20 +764,17 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
           _selectedMemberIds.toList(growable: false),
         );
         participantCommitted = true;
-        // Replacing participants increments the event optimistic-lock version
-        // (unless it is an idempotent no-op). Resolve the controller's
-        // authoritative projection after the await; sending the pre-write
-        // [existing.version] to the reminder RPC would deterministically
-        // trigger a stale-version conflict or, with a permissive adapter,
-        // attach a reminder to an obsolete event revision.
+        // 참여자를 교체하면 멱등인 무동작이 아닌 한 일정의 낙관적 잠금 버전이
+        // 증가한다. `await` 후 컨트롤러의 신뢰할 수 있는 프로젝션을 확인한다. 쓰기 전
+        // [existing.version]을 알림 RPC로 보내면 오래된 버전 충돌이 반드시 발생하거나,
+        // 관대한 어댑터에서는 폐기된 일정 리비전에 알림이 연결될 수 있다.
         final refreshed = _findUpdatedEvent(controller, existing);
         if (refreshed != null &&
             currentUserId != null &&
             !refreshed.memberIds.contains(currentUserId)) {
-          // Membership commits can remove the actor while this screen still
-          // holds a dirty reminder draft.  The database trigger owns remote
-          // cancellation; never follow the membership write with a reminder
-          // RPC that would now fail authorization.
+          // 이 화면에 수정된 알림 초안이 남아 있는 동안 멤버십 커밋이 행위자를 제거할
+          // 수 있다. 원격 취소는 데이터베이스 트리거가 담당한다. 이제 권한 확인에 실패할
+          // 알림 RPC를 멤버십 쓰기 뒤에 호출하지 않는다.
           await _clearNotificationAfterMembershipRemoval(
             notifications,
             refreshed,
@@ -877,9 +875,8 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     if (recurringOccurrence &&
         scope != EventEditScope.all &&
         _memberSelectionDirty) {
-      // A stale all-scope participant draft must never leak into a this/future
-      // mutation. Revert it and ask the user to choose all before editing
-      // participants again.
+      // 오래된 전체 범위 참여자 초안이 이번/향후 범위 변경으로 새어 들어가서는 안 된다.
+      // 이를 되돌리고 참여자를 다시 편집하기 전에 전체 범위를 선택하도록 안내한다.
       final recurringTarget = existing;
       if (recurringTarget == null) return;
       setState(() {
@@ -908,9 +905,8 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
         draft: draft,
         scope: scope,
       );
-      // Authentication or group selection may change while the mutation is
-      // in flight. Do not report success or write a reminder for a stale
-      // result that the controller intentionally discarded.
+      // 인증이나 선택 그룹이 쓰기 도중 바뀌면 컨트롤러는 오래된 결과를 적용하지
+      // 않는다. 이를 저장 성공처럼 표시하거나 알림 쓰기로 이어 가지 않는다.
       if (saveResult == null) return;
       final savedEvent = _eventForSaveResult(controller, saveResult);
       if (savedEvent != null) {
@@ -938,10 +934,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
           }
         }
       } else if (_notificationDraftDirty) {
-        // The event write committed, but the refreshed projection is not
-        // authoritative enough to carry an event-version-bound reminder RPC.
-        // Keep the notification draft unsaved and explain the partial result
-        // without exposing transport details.
+        // 일정 쓰기는 커밋되었지만 갱신된 프로젝션은 일정 버전에 묶인 알림 RPC를
+        // 수행할 만큼 신뢰할 수 없다. 알림 초안은 저장하지 않은 채 유지하고 전송
+        // 세부 정보를 노출하지 않으면서 부분 성공 결과를 설명한다.
         _showPartialNotificationWarning();
       }
       if (mounted) {
@@ -1085,9 +1080,9 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     PlannerEvent event,
   ) async {
     final eventId = event.seriesId;
-    // The membership mutation already notifies NotificationController and its
-    // server-side trigger owns deletion/cancellation. Only clear this route's
-    // private draft/cache so a later rebuild cannot offer a stale save.
+    // 멤버십 변경은 이미 NotificationController에 알리며 서버 측 트리거가 삭제/취소를
+    // 담당한다. 나중에 재빌드가 오래된 저장을 제안하지 않도록 이 경로의 비공개
+    // 초안/캐시만 지운다.
     _notificationEnabled = false;
     _notificationChannel = NotificationChannel.local;
     _timedLeadSeconds = 900;
@@ -1099,13 +1094,12 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     _notificationPreferenceLoadedKey = null;
     _notificationPreferenceFailedKey = null;
     try {
-      // Evict this event from the controller's local snapshot after the
-      // membership commit. Remote deletion/cancellation remains owned by the
-      // membership trigger and the normal controller reconciliation.
+      // 멤버십 커밋 후 컨트롤러의 로컬 스냅샷에서 이 일정을 제거한다. 원격
+      // 삭제/취소는 계속 멤버십 트리거와 일반 컨트롤러 조정이 담당한다.
       await notifications.forgetEventPreferences(eventId);
     } catch (_) {
-      // The draft has already been cleared. Keep the user-facing membership
-      // result generic even if an in-memory eviction unexpectedly fails.
+      // 초안은 이미 지웠다. 메모리에서 제거하는 작업이 예기치 않게 실패해도 사용자에게
+      // 표시하는 멤버십 결과는 일반적인 문구로 유지한다.
     }
   }
 
@@ -1299,9 +1293,8 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       }
     }
     final scheme = Theme.of(context).colorScheme;
-    // Notification reads share the editor's generic error surface. Keep the
-    // planner mutation error first when both operations fail, and never expose
-    // transport/provider details from the notification controller.
+    // 알림 읽기는 편집기의 일반 오류 화면을 공유한다. 두 작업이 모두 실패하면 플래너
+    // 변경 오류를 우선하고 알림 컨트롤러의 전송/공급자 세부 정보는 노출하지 않는다.
     final editorErrorMessage =
         controller.errorMessage ?? notifications.errorMessage;
     final notificationLoadKey = existing == null
@@ -1338,9 +1331,8 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
       body: Form(
         key: _formKey,
         child: ListView(
-          // The editor is a bounded form rather than a feed. Keep the small
-          // color/participant controls in the semantics tree even when the
-          // repeat section grows on a compact viewport.
+          // 편집기는 피드가 아니라 범위가 제한된 양식이다. 작은 표시 영역에서 반복
+          // 섹션이 커져도 작은 색상/참여자 컨트롤을 시맨틱 트리에 유지한다.
           scrollCacheExtent: ScrollCacheExtent.pixels(1200),
           padding: const EdgeInsets.fromLTRB(20, 6, 20, 40),
           children: <Widget>[
@@ -1830,9 +1822,9 @@ class _ParticipantTile extends StatelessWidget {
         : '참여자 ${member.name}';
     return Semantics(
       container: true,
-      // CheckboxListTile contributes its own merged semantics node.  For the
-      // protected creator, expose the explicit invariant/copy above that
-      // node so assistive technologies announce why the control is locked.
+      // CheckboxListTile은 자체적으로 병합된 시맨틱 노드를 제공한다. 보호된 작성자에
+      // 대해서는 보조 기술이 컨트롤이 잠긴 이유를 안내하도록 그 노드 위에 명시적인
+      // 불변 조건과 문구를 노출한다.
       excludeSemantics: protected,
       label: semanticsLabel,
       selected: selected,

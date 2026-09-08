@@ -1,7 +1,7 @@
-// Pure, runtime-neutral validator for account_deletion_preflight().  Keep this
-// module free of Edge/runtime imports so it can be exercised with Node in CI.
-// Its accepted shape intentionally mirrors AccountDeletionImpact.fromJson in
-// lib/repositories/account_deletion_repository.dart.
+// account_deletion_preflight()용 순수 런타임 중립 검증기다. CI에서 Node로 실행할
+// 수 있도록 이 모듈에는 Edge/런타임 import를 넣지 않는다. 허용하는 형태는
+// lib/repositories/account_deletion_repository.dart의
+// AccountDeletionImpact.fromJson과 의도적으로 동일하게 맞춘다.
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -19,8 +19,8 @@ function parseNonNegativeInteger(value) {
   if (typeof value === 'number') {
     return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : null
   }
-  // Dart's int.tryParse (used by the client parser) accepts integer strings;
-  // BigInt avoids silently accepting a rounded unsafe JavaScript number.
+  // 클라이언트 파서에서 사용하는 Dart의 int.tryParse는 정수 문자열을 허용한다.
+  // BigInt를 사용하면 반올림된 안전하지 않은 JavaScript 숫자를 조용히 허용하지 않는다.
   if (typeof value !== 'string' || !/^[+-]?\d+$/.test(value)) return null
   try {
     const parsed = BigInt(value)
@@ -36,8 +36,8 @@ function isRequiredNonNegativeInteger(value) {
 
 function isDateTimeString(value) {
   if (typeof value !== 'string' || value.trim().length === 0) return false
-  // Date.parse alone accepts arbitrary short strings (for example "0").
-  // DateTime.tryParse on the client expects an ISO-like calendar prefix.
+  // Date.parse만 사용하면 "0" 같은 임의의 짧은 문자열도 허용한다.
+  // 클라이언트의 DateTime.tryParse는 ISO 형식과 비슷한 날짜 접두사를 기대한다.
   if (!/^\d{4}-\d{2}-\d{2}(?:$|[Tt ])/.test(value.trim())) return false
   return Number.isFinite(Date.parse(value))
 }
@@ -80,8 +80,8 @@ function isValidGroup(value) {
     return false
   }
   const hasDeletedAt = deletedAt !== undefined && deletedAt !== null
-  // Active iff the soft-delete marker is absent/null, exactly as the Dart
-  // parser's `(status == 'active') != (deletedAt == null)` guard requires.
+  // Dart 파서의 `(status == 'active') != (deletedAt == null)` 가드가 요구하는
+  // 그대로, 소프트 삭제 표시가 없거나 null일 때만 활성 상태다.
   return (value.status === 'active') === !hasDeletedAt
 }
 
@@ -111,10 +111,10 @@ function canonicalGroup(value) {
 }
 
 /**
- * Return true only for a complete, internally consistent preflight summary.
- * This function never throws and never logs payload contents (which may carry
- * user-provided PII).  Callers must not invoke Auth admin deletion unless it
- * returns true.
+ * 완전하고 내부적으로 일관된 사전 검사 요약에만 true를 반환한다.
+ * 이 함수는 예외를 던지거나 사용자 제공 개인정보가 포함될 수 있는 페이로드
+ * 내용을 기록하지 않는다. true를 반환하지 않으면 호출자는 Auth 관리자 삭제를
+ * 실행해서는 안 된다.
  */
 export function isValidDeletionSummary(value) {
   try {
@@ -174,9 +174,9 @@ export function isValidDeletionSummary(value) {
     if (active.some((group) => group.status !== 'active')) return false
     if (archived.some((group) => group.status !== 'archived')) return false
 
-    // The same group is serialized three times by the RPC.  Compare all
-    // client-visible fields for each partition entry, not just IDs/status, so
-    // a contradictory name/count/version cannot pass the preflight boundary.
+    // RPC는 같은 그룹을 세 번 직렬화한다. 모순된 이름/개수/버전이 사전 검사
+    // 경계를 통과하지 못하도록 각 분할 항목의 ID/상태뿐 아니라 클라이언트에
+    // 보이는 모든 필드를 비교한다.
     const ownedCanonical = new Map(
       owned.map((group) => [group.id, canonicalGroup(group)]),
     )
@@ -185,13 +185,13 @@ export function isValidDeletionSummary(value) {
     }
     return true
   } catch (_) {
-    // An unexpected object/proxy/getter must be treated as protocol failure,
-    // never allowed to reach the privileged deletion call.
+    // 예상하지 못한 객체/프록시/getter는 프로토콜 실패로 취급하며, 권한 있는
+    // 삭제 호출에 절대 도달하게 해서는 안 된다.
     return false
   }
 }
 
-// Named aliases make the pure contract easy to discover without changing the
-// single predicate used by the Edge handler.
+// 이름 있는 별칭을 두어 Edge 핸들러가 사용하는 단일 조건자를 바꾸지 않고도
+// 순수 계약을 쉽게 찾을 수 있게 한다.
 export const validateDeletionSummary = isValidDeletionSummary
 export const validatePreflightSummary = isValidDeletionSummary

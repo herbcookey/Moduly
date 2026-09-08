@@ -11,38 +11,35 @@ import 'package:moduly/state/app_state.dart';
 import 'package:moduly/models/app_models.dart';
 
 void main() {
-  testWidgets(
-    'platform large text is never reduced by the in-app text preference',
-    (tester) async {
-      final auth = AuthRepository();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      )..textScale = 0.9;
-      addTearDown(() {
-        auth.dispose();
-      });
+  testWidgets('앱 내 텍스트 설정이 플랫폼의 큰 텍스트를 줄이지 않는다', (tester) async {
+    final auth = AuthRepository();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    )..textScale = 0.9;
+    addTearDown(() {
+      auth.dispose();
+    });
 
-      await tester.pumpWidget(
-        MediaQuery(
-          data: const MediaQueryData(textScaler: TextScaler.linear(2)),
-          child: ProviderScope(
-            overrides: <Override>[
-              plannerControllerProvider.overrideWith((ref) => controller),
-            ],
-            child: const ModulyApp(),
-          ),
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+        child: ProviderScope(
+          overrides: <Override>[
+            plannerControllerProvider.overrideWith((ref) => controller),
+          ],
+          child: const ModulyApp(),
         ),
-      );
-      await tester.pump();
+      ),
+    );
+    await tester.pump();
 
-      final loginContext = tester.element(find.byType(LoginScreen));
-      final effectiveScaler = MediaQuery.of(loginContext).textScaler;
-      expect(effectiveScaler.scale(14), greaterThanOrEqualTo(28));
-    },
-  );
+    final loginContext = tester.element(find.byType(LoginScreen));
+    final effectiveScaler = MediaQuery.of(loginContext).textScaler;
+    expect(effectiveScaler.scale(14), greaterThanOrEqualTo(28));
+  });
 
-  testWidgets('long group names stay within the Home app bar', (tester) async {
+  testWidgets('긴 그룹 이름이 홈 앱 바 안에 표시된다', (tester) async {
     final auth = AuthRepository();
     final controller = PlannerController(
       auth: auth,

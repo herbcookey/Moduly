@@ -89,146 +89,137 @@ Future<void> _scrollIntoBodyViewport(WidgetTester tester, Finder target) async {
     await tester.drag(list, const Offset(0, -200));
     await tester.pumpAndSettle();
   }
-  fail('Target did not become visible in the constrained body viewport.');
+  fail('제한된 본문 뷰포트에 대상이 표시되지 않았다.');
 }
 
 void main() {
-  testWidgets(
-    'create-invite dialog keeps actions reachable with large text and keyboard',
-    (tester) async {
-      _useConstrainedViewport(tester);
-      final insets = ValueNotifier<EdgeInsets>(
-        const EdgeInsets.only(bottom: 300),
-      );
-      addTearDown(insets.dispose);
-      final auth = _DialogAuth();
-      addTearDown(auth.dispose);
-      final user = const PlannerUser(
-        id: 'owner-dialog',
-        email: 'owner@example.com',
-        displayName: '소유자',
-      );
-      final group = const PlannerGroup(
-        id: 'dialog-group',
-        name: '그룹',
-        description: '',
-        timezone: 'Asia/Seoul',
-        ownerId: 'owner-dialog',
-      );
-      final controller = _controllerWith(auth: auth, user: user, group: group);
-      controller.members = <PlannerMember>[
-        PlannerMember(
-          id: user.id,
-          name: user.displayName!,
-          email: user.email,
-          isOwner: true,
-        ),
-      ];
+  testWidgets('큰 텍스트와 키보드에서도 초대 생성 대화상자 동작에 접근할 수 있다', (tester) async {
+    _useConstrainedViewport(tester);
+    final insets = ValueNotifier<EdgeInsets>(
+      const EdgeInsets.only(bottom: 300),
+    );
+    addTearDown(insets.dispose);
+    final auth = _DialogAuth();
+    addTearDown(auth.dispose);
+    final user = const PlannerUser(
+      id: 'owner-dialog',
+      email: 'owner@example.com',
+      displayName: '소유자',
+    );
+    final group = const PlannerGroup(
+      id: 'dialog-group',
+      name: '그룹',
+      description: '',
+      timezone: 'Asia/Seoul',
+      ownerId: 'owner-dialog',
+    );
+    final controller = _controllerWith(auth: auth, user: user, group: group);
+    controller.members = <PlannerMember>[
+      PlannerMember(
+        id: user.id,
+        name: user.displayName!,
+        email: user.email,
+        isOwner: true,
+      ),
+    ];
 
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: <Override>[
-            plannerControllerProvider.overrideWith((ref) => controller),
-          ],
-          child: _largeTextApp(const MembersScreen(), insets),
-        ),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('새 코드'));
-      await tester.pumpAndSettle();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: <Override>[
+          plannerControllerProvider.overrideWith((ref) => controller),
+        ],
+        child: _largeTextApp(const MembersScreen(), insets),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('새 코드'));
+    await tester.pumpAndSettle();
 
-      expect(find.text('초대 코드 만들기'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      final create = find.widgetWithText(FilledButton, '만들기');
-      _expectVisible(tester, create);
-      await tester.tap(create);
-      await tester.pumpAndSettle();
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(find.text('초대 코드 만들기'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    final create = find.widgetWithText(FilledButton, '만들기');
+    _expectVisible(tester, create);
+    await tester.tap(create);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets(
-    'join-group dialog keeps validation action reachable with large text and keyboard',
-    (tester) async {
-      _useConstrainedViewport(tester);
-      final insets = ValueNotifier<EdgeInsets>(
-        const EdgeInsets.only(bottom: 300),
-      );
-      addTearDown(insets.dispose);
-      final auth = _DialogAuth();
-      addTearDown(auth.dispose);
-      final controller = _controllerWith(auth: auth);
+  testWidgets('큰 텍스트와 키보드에서도 그룹 참여 대화상자 검증 동작에 접근할 수 있다', (tester) async {
+    _useConstrainedViewport(tester);
+    final insets = ValueNotifier<EdgeInsets>(
+      const EdgeInsets.only(bottom: 300),
+    );
+    addTearDown(insets.dispose);
+    final auth = _DialogAuth();
+    addTearDown(auth.dispose);
+    final controller = _controllerWith(auth: auth);
 
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: <Override>[
-            plannerControllerProvider.overrideWith((ref) => controller),
-          ],
-          child: _largeTextApp(const GroupPickerScreen(), insets),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final joinEntry = find.widgetWithText(OutlinedButton, '초대 코드로 참여');
-      await _scrollIntoBodyViewport(tester, joinEntry);
-      await tester.tap(joinEntry);
-      await tester.pumpAndSettle();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: <Override>[
+          plannerControllerProvider.overrideWith((ref) => controller),
+        ],
+        child: _largeTextApp(const GroupPickerScreen(), insets),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final joinEntry = find.widgetWithText(OutlinedButton, '초대 코드로 참여');
+    await _scrollIntoBodyViewport(tester, joinEntry);
+    await tester.tap(joinEntry);
+    await tester.pumpAndSettle();
 
-      expect(find.byType(AlertDialog), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      final join = find.widgetWithText(FilledButton, '참여');
-      _expectVisible(tester, join);
-      await tester.tap(join);
-      await tester.pump();
-      expect(find.text('초대 코드를 입력해 주세요.'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      _expectVisible(tester, join);
-    },
-  );
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    final join = find.widgetWithText(FilledButton, '참여');
+    _expectVisible(tester, join);
+    await tester.tap(join);
+    await tester.pump();
+    expect(find.text('초대 코드를 입력해 주세요.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    _expectVisible(tester, join);
+  });
 
-  testWidgets(
-    'edit-display-name dialog keeps max-length counter and actions reachable',
-    (tester) async {
-      _useConstrainedViewport(tester);
-      final insets = ValueNotifier<EdgeInsets>(
-        const EdgeInsets.only(bottom: 300),
-      );
-      addTearDown(insets.dispose);
-      final auth = _DialogAuth();
-      addTearDown(auth.dispose);
-      final user = const PlannerUser(
-        id: 'settings-dialog',
-        email: 'settings@example.com',
-        displayName: '기존 이름',
-      );
-      final controller = _controllerWith(auth: auth, user: user);
+  testWidgets('표시 이름 편집 대화상자의 최대 길이 표시와 동작에 접근할 수 있다', (tester) async {
+    _useConstrainedViewport(tester);
+    final insets = ValueNotifier<EdgeInsets>(
+      const EdgeInsets.only(bottom: 300),
+    );
+    addTearDown(insets.dispose);
+    final auth = _DialogAuth();
+    addTearDown(auth.dispose);
+    final user = const PlannerUser(
+      id: 'settings-dialog',
+      email: 'settings@example.com',
+      displayName: '기존 이름',
+    );
+    final controller = _controllerWith(auth: auth, user: user);
 
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: <Override>[
-            plannerControllerProvider.overrideWith((ref) => controller),
-          ],
-          child: _largeTextApp(const SettingsScreen(), insets),
-        ),
-      );
-      await tester.pumpAndSettle();
-      await _scrollIntoBodyViewport(tester, find.byIcon(Icons.edit_outlined));
-      await tester.tap(find.byIcon(Icons.edit_outlined));
-      await tester.pumpAndSettle();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: <Override>[
+          plannerControllerProvider.overrideWith((ref) => controller),
+        ],
+        child: _largeTextApp(const SettingsScreen(), insets),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _scrollIntoBodyViewport(tester, find.byIcon(Icons.edit_outlined));
+    await tester.tap(find.byIcon(Icons.edit_outlined));
+    await tester.pumpAndSettle();
 
-      expect(find.text('이름 변경'), findsOneWidget);
-      final field = find.byType(TextField);
-      expect(tester.widget<TextField>(field).maxLength, 120);
-      expect(find.textContaining('/120'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      final save = find.widgetWithText(FilledButton, '저장');
-      _expectVisible(tester, save);
+    expect(find.text('이름 변경'), findsOneWidget);
+    final field = find.byType(TextField);
+    expect(tester.widget<TextField>(field).maxLength, 120);
+    expect(find.textContaining('/120'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    final save = find.widgetWithText(FilledButton, '저장');
+    _expectVisible(tester, save);
 
-      await tester.enterText(field, '');
-      await tester.tap(save);
-      await tester.pump();
-      expect(find.text('1자 이상 120자 이하로 입력해 주세요.'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      _expectVisible(tester, save);
-    },
-  );
+    await tester.enterText(field, '');
+    await tester.tap(save);
+    await tester.pump();
+    expect(find.text('1자 이상 120자 이하로 입력해 주세요.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    _expectVisible(tester, save);
+  });
 }

@@ -175,10 +175,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 }
 
-/// A signed-out invite recipient must be able to leave the forced invite
-/// flow without seeing or copying the bearer token.  Clearing the controller
-/// intent is enough to let ordinary login navigation proceed; the router's
-/// pending-invite guard no longer redirects the user back to the preview.
+/// 로그아웃 상태의 초대 수신자는 Bearer 토큰을 보거나 복사하지 않고 강제 초대
+/// 흐름에서 나갈 수 있어야 한다. 컨트롤러 의도를 지우는 것만으로 일반 로그인
+/// 탐색을 진행할 수 있으며, 라우터의 대기 초대 가드가 사용자를 미리 보기로
+/// 다시 보내지 않는다.
 class _PendingInviteLoginNotice extends ConsumerWidget {
   const _PendingInviteLoginNotice();
 
@@ -607,9 +607,9 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
         return message;
       }
     }
-    // Callbacks can be supplied by a low-level adapter or a test double. Never
-    // render its toString(), because provider responses may contain account or
-    // server details. Only repository-owned Korean copy is allowed through.
+    // 낮은 수준의 어댑터나 테스트 대역이 콜백을 제공할 수 있다. 공급자 응답에는
+    // 계정이나 서버 세부 정보가 포함될 수 있으므로 toString()을 절대 렌더링하지 않는다.
+    // 저장소가 소유한 한국어 문구만 통과시킨다.
     return authResendSignupErrorMessage;
   }
 
@@ -857,8 +857,8 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
         return message;
       }
     }
-    // Keep raw provider/session responses out of the reset form. The fallback
-    // tells the user how to recover without revealing account state.
+    // 원시 공급자/세션 응답은 재설정 양식에 표시하지 않는다. 대체 문구는 계정
+    // 상태를 노출하지 않으면서 사용자에게 복구 방법을 안내한다.
     return authRecoveredPasswordErrorMessage;
   }
 
@@ -936,8 +936,8 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
                       try {
                         await widget.onCompleted?.call();
                       } catch (_) {
-                        // Returning to the login screen is still safe when
-                        // the short-lived recovery session has expired.
+                        // 수명이 짧은 복구 세션이 만료되었어도 로그인 화면으로
+                        // 돌아가는 것은 안전하다.
                       }
                       if (!context.mounted) return;
                       context.go('/login');

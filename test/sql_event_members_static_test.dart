@@ -2,9 +2,9 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// Contract-level checks for the event participant migration.  The companion
-/// pgTAP fixture and local upgrade script exercise the database; these checks
-/// keep the migration reviewable when CI does not have a Supabase instance.
+/// 일정 참여자 마이그레이션의 계약 수준 검사다. 함께 제공되는 pgTAP 픽스처와
+/// 로컬 업그레이드 스크립트는 데이터베이스를 검사하며, 이 검사는 CI에 Supabase
+/// 인스턴스가 없어도 마이그레이션을 검토할 수 있게 한다.
 void main() {
   late String migration;
   late String upgrade;
@@ -17,7 +17,7 @@ void main() {
     expect(
       migrationFile.existsSync(),
       isTrue,
-      reason: 'The event_members migration must be present',
+      reason: 'event_members 마이그레이션이 있어야 한다',
     );
     migration = migrationFile.readAsStringSync().toLowerCase().replaceAll(
       RegExp(r'\s+'),
@@ -25,11 +25,7 @@ void main() {
     );
 
     final upgradeFile = File('supabase/tests/run_group_management_upgrade.sh');
-    expect(
-      upgradeFile.existsSync(),
-      isTrue,
-      reason: 'The local upgrade proof must be present',
-    );
+    expect(upgradeFile.existsSync(), isTrue, reason: '로컬 업그레이드 증거가 있어야 한다');
     upgrade = upgradeFile.readAsStringSync().toLowerCase().replaceAll(
       RegExp(r'\s+'),
       ' ',
@@ -39,7 +35,7 @@ void main() {
     expect(
       fixtureFile.existsSync(),
       isTrue,
-      reason: 'The event_members pgTAP fixture must be present',
+      reason: 'event_members pgTAP 픽스처가 있어야 한다',
     );
     fixture = fixtureFile.readAsStringSync().toLowerCase().replaceAll(
       RegExp(r'\s+'),
@@ -47,7 +43,7 @@ void main() {
     );
   });
 
-  test('table, keys, timestamps, and migration backfill are additive', () {
+  test('테이블, 키, 타임스탬프, 마이그레이션 채우기가 추가형이다', () {
     expect(
       migration,
       contains('create table if not exists public.event_members'),
@@ -81,11 +77,8 @@ void main() {
         'insert into public.event_members (event_id, user_id, created_at) select e.id, e.created_by, e.created_at from public.events e where not exists ( select 1 from public.event_members existing where existing.event_id = e.id and existing.user_id = e.created_by )',
       ),
     );
-    expect(
-      migration,
-      contains('backfill before adding integrity/transition triggers'),
-    );
-    expect(migration, contains('installation-complete sentinel'));
+    expect(migration, contains('무결성/전환 트리거를 추가하기 전에 기존 데이터를 채운다'));
+    expect(migration, contains('설치 완료 표식'));
     expect(migration, contains('pg_catalog.pg_trigger'));
     expect(migration, contains('v_feature_installed'));
     expect(migration, contains('if not v_feature_installed then'));
@@ -94,15 +87,12 @@ void main() {
       contains('pg_catalog.pg_get_triggerdef(trigger_row.oid)'),
     );
     expect(upgrade, contains('20260907130002_event_members.sql'));
-    expect(upgrade, contains('reapplying'));
-    expect(upgrade, contains('after creator deactivation'));
-    expect(
-      upgrade,
-      contains('creator prune/reapply sentinel regression passed'),
-    );
+    expect(upgrade, contains('재적용 중'));
+    expect(upgrade, contains('작성자 비활성화 뒤'));
+    expect(upgrade, contains('작성자 정리/재적용 표식 회귀 검사를 통과'));
   });
 
-  test('RLS and ACLs expose only safe reads and deny child writes', () {
+  test('RLS와 ACL이 안전한 읽기만 허용하고 하위 쓰기를 거부한다', () {
     expect(
       migration,
       contains('alter table public.event_members enable row level security'),
@@ -149,13 +139,8 @@ void main() {
     );
   });
 
-  test('the child is not published; parent events are the realtime signal', () {
-    expect(
-      migration,
-      contains(
-        'the child table is deliberately not added to supabase_realtime',
-      ),
-    );
+  test('하위 테이블은 게시하지 않고 부모 일정이 Realtime 신호가 된다', () {
+    expect(migration, contains('하위 테이블은 의도적으로 supabase_realtime에 추가하지 않는다'));
     expect(
       migration,
       isNot(
@@ -168,7 +153,7 @@ void main() {
     expect(upgrade, contains('event_members'));
   });
 
-  test('trigger-only functions are hardened and transition bumps are privacy-safe', () {
+  test('트리거 전용 함수가 강화되고 전환 버전 증가가 개인정보에 안전하다', () {
     for (final functionName in <String>[
       'bump_events_from_event_members_insert()',
       'bump_events_from_event_members_delete()',
@@ -230,34 +215,27 @@ void main() {
     expect(triggerText, isNot(contains('user_id::text')));
   });
 
-  test(
-    'fixture proves legacy trigger, explicit empty/custom lists, and failures',
-    () {
-      for (final marker in <String>[
-        'legacy direct insert keeps the initial event version at one',
-        'legacy direct insert seeds one creator assignment without duplicates',
-        'create with an explicit empty array leaves no participants',
-        'create custom list excludes the creator when requested',
-        'rls rejects an outsider direct event insert',
-        'existing event checks reject malformed direct insert',
-        'unauthorized direct insert leaves no participant row',
-        'malformed direct insert leaves no participant row',
-        'authenticated cannot call the legacy event seed trigger function directly',
-        'deactivation retains the soft-deleted assignment row',
-        'deactivation leaves the soft-deleted event version unchanged',
-        'leave_group retains soft-deleted assignment history',
-        'leave_group leaves archived-group assignment history intact',
-      ]) {
-        expect(
-          fixture,
-          contains(marker),
-          reason: 'fixture should assert $marker',
-        );
-      }
-    },
-  );
+  test('픽스처가 기존 트리거, 명시적 빈/사용자 지정 목록, 실패를 입증한다', () {
+    for (final marker in <String>[
+      '레거시 직접 insert는 이벤트의 초기 버전을 1로 유지한다',
+      '레거시 직접 insert는 중복 없이 생성자 할당 하나를 만든다',
+      '명시적인 빈 배열로 생성하면 참여자가 남지 않는다',
+      '사용자 지정 목록 생성은 요청에 따라 생성자를 제외한다',
+      'rls는 외부 사용자의 직접 이벤트 insert를 거부한다',
+      '기존 이벤트 검사는 잘못된 직접 insert를 거부한다',
+      '권한 없는 직접 insert는 참여자 행을 남기지 않는다',
+      '잘못된 직접 insert는 참여자 행을 남기지 않는다',
+      'authenticated 역할은 레거시 이벤트 초기화 트리거 함수를 직접 호출할 수 없다',
+      '비활성화해도 소프트 삭제된 할당 행은 보존된다',
+      '비활성화해도 소프트 삭제된 이벤트 버전은 변경되지 않는다',
+      'leave_group은 소프트 삭제된 할당 이력을 보존한다',
+      'leave_group은 보관된 그룹의 할당 이력을 그대로 보존한다',
+    ]) {
+      expect(fixture, contains(marker), reason: '픽스처가 $marker 항목을 검증해야 한다');
+    }
+  });
 
-  test('RPC signatures and canonical return shape are stable', () {
+  test('RPC 시그니처와 정규 반환 형태가 안정적이다', () {
     expect(
       migration,
       contains(
@@ -311,7 +289,7 @@ void main() {
     expect(migration, contains('p_expected_version'));
     expect(migration, contains('on conflict (event_id, user_id) do nothing'));
     expect(migration, contains('member_ids cannot contain null'));
-    expect(migration, contains('empty list'));
+    expect(migration, contains('명시적인 빈 배열은 실제 빈 할당'));
     for (final signature in <String>[
       'public.create_event_with_members',
       'public.update_event_with_members_if_version',
@@ -330,7 +308,7 @@ void main() {
     }
   });
 
-  test('membership lifecycle prunes assignments but never restores them', () {
+  test('멤버십 수명 주기가 할당을 정리하지만 복원하지 않는다', () {
     expect(
       migration,
       contains(
@@ -344,10 +322,7 @@ void main() {
     expect(migration, contains('if not p_is_active then'));
     expect(migration, contains('delete from public.event_members em'));
     expect(migration, contains('select distinct event_id from removed'));
-    expect(
-      migration,
-      contains('reactivation never restores removed assignments'),
-    );
+    expect(migration, contains('재활성화해도 제거된'));
     expect(migration, contains('removed_at = coalesce'));
     expect(migration, contains('e.deleted_at is null'));
     expect(migration, contains('g.deleted_at is null'));
@@ -359,7 +334,7 @@ void main() {
       'create or replace function public.set_member_active(',
     );
     final lifecycleEnd = migration.indexOf(
-      '-- keep direct child writes unavailable',
+      '-- 직접 하위 쓰기를 계속 허용하지 않으며',
       activeStart,
     );
     expect(leaveStart, greaterThanOrEqualTo(0));
@@ -377,34 +352,31 @@ void main() {
     }
   });
 
-  test(
-    'upgrade evidence covers backfill, cascades, permissions, races, and atomicity',
-    () {
-      for (final marker in <String>[
-        'backfilled',
-        'created_at',
-        'primary key',
-        'foreign key',
-        'rls',
-        'publication',
-        'account',
-        'cascade',
-        'event_members',
-        'replace_event_members_if_version',
-        'stale',
-        'lock timeout',
-        'version',
-        'atomic',
-        'terminal deactivation retention checks passed',
-        'terminal leave/archive retention checks passed',
-        'reapplying %s after terminal deactivation',
-      ]) {
-        expect(
-          upgrade,
-          contains(marker),
-          reason: 'upgrade script should assert $marker',
-        );
-      }
-    },
-  );
+  test('업그레이드 증거가 데이터 채우기, 연쇄 처리, 권한, 경합, 원자성을 다룬다', () {
+    for (final marker in <String>[
+      '데이터 채우기',
+      'created_at',
+      'primary key',
+      '외래 키',
+      'rls',
+      'publication',
+      '계정',
+      '연쇄',
+      'event_members',
+      'replace_event_members_if_version',
+      'stale',
+      'lock timeout',
+      'version',
+      '원자적',
+      '종료 비활성화 보존 검사를 통과',
+      '종료 탈퇴/보관 보존 검사를 통과',
+      '종료 비활성화 뒤 %s 재적용 중',
+    ]) {
+      expect(
+        upgrade,
+        contains(marker),
+        reason: '업그레이드 스크립트가 $marker 항목을 검증해야 한다',
+      );
+    }
+  });
 }

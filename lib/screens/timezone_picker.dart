@@ -4,9 +4,8 @@ import 'package:timezone/timezone.dart' as tz;
 
 import '../core/timezone_utils.dart';
 
-/// A compact, keyboard- and screen-reader-friendly field for selecting an
-/// exact IANA zone.  The value itself is always sent to the backend; no
-/// offset or abbreviation is substituted.
+/// 정확한 IANA 시간대를 선택할 수 있는 간결하고 키보드 및 화면 읽기 프로그램 친화적인
+/// 필드다. 값 자체를 항상 백엔드로 보내며 간격이나 약어로 대체하지 않는다.
 class IanaTimezoneField extends StatelessWidget {
   const IanaTimezoneField({
     required this.value,
@@ -67,7 +66,7 @@ class IanaTimezoneField extends StatelessWidget {
   }
 }
 
-/// Opens a searchable list of exact names from the bundled timezone database.
+/// 번들 시간대 데이터베이스에 있는 정확한 이름의 검색 가능 목록을 연다.
 Future<String?> showIanaTimezonePicker(
   BuildContext context, {
   String? initialValue,
@@ -86,9 +85,9 @@ List<String> ianaTimezoneNames() {
   _ensureTimezoneData();
   final names = tz.timeZoneDatabase.locations.keys
       .where((name) {
-        // The bundled database also exposes generated aliases under these
-        // namespaces. They are valid IANA names, but filtering them keeps the
-        // search list useful on a small screen while retaining UTC and Etc.
+        // 번들 데이터베이스는 이 네임스페이스 아래에 생성된 별칭도 노출한다. 유효한
+        // IANA 이름이지만 UTC와 Etc는 유지한 채 걸러 내면 작은 화면에서도 검색
+        // 목록을 유용하게 쓸 수 있다.
         return !name.startsWith('posix/') && !name.startsWith('right/');
       })
       .toSet()
@@ -143,12 +142,12 @@ class _TimezonePickerDialogState extends State<_TimezonePickerDialog> {
         .where((zone) => query.isEmpty || zone.toLowerCase().contains(query))
         .toList(growable: false);
     final media = MediaQuery.of(context);
-    // Reserve room for the dialog title/actions and keyboard-safe inset. The
-    // list remains scrollable when this leaves only a compact viewport.
+    // 대화상자 제목/동작과 키보드 안전 여백을 위한 공간을 확보한다. 그 결과 작은
+    // 표시 영역만 남아도 목록은 계속 스크롤할 수 있다.
     final availableHeight = media.size.height - media.viewInsets.bottom - 240;
-    // Keep the search field usable even when the keyboard leaves a very short
-    // viewport.  AlertDialog will further constrain this box to the available
-    // height; 128px fits the scaled search field and a sliver of list.
+    // 키보드 때문에 표시 영역이 매우 짧아져도 검색 필드를 사용할 수 있게 한다.
+    // AlertDialog가 이 상자를 사용 가능한 높이로 더 제한하며, 128px이면 크기가 조정된
+    // 검색 필드와 목록 일부가 들어간다.
     final maxHeight = availableHeight.clamp(128.0, 520.0).toDouble();
     final maxWidth = (media.size.width - media.viewInsets.horizontal - 32)
         .clamp(200.0, 520.0)

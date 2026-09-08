@@ -10,7 +10,7 @@ import 'package:moduly/screens/runtime_configuration_error_screen.dart';
 import 'package:moduly/state/app_state.dart';
 
 void main() {
-  test('debug and profile policy allows the local preview without config', () {
+  test('디버그 및 프로필 정책이 설정 없는 로컬 미리보기를 허용한다', () {
     const config = AppConfig(supabaseUrl: '', supabasePublishableKey: '');
 
     expect(config.hasSupabase, isFalse);
@@ -20,7 +20,7 @@ void main() {
     );
   });
 
-  test('release policy reports every missing public Supabase value', () {
+  test('릴리스 정책이 누락된 모든 공개 Supabase 값을 보고한다', () {
     const config = AppConfig(supabaseUrl: '', supabasePublishableKey: '');
 
     final message = AppConfigPolicy.releaseConfigurationError(
@@ -33,7 +33,7 @@ void main() {
     expect(message, isNot(contains('service_role')));
   });
 
-  test('release policy accepts a complete public configuration', () {
+  test('릴리스 정책이 완전한 공개 설정을 허용한다', () {
     const config = AppConfig(
       supabaseUrl: 'https://example.supabase.co',
       supabasePublishableKey: 'sb_publishable_test',
@@ -46,7 +46,7 @@ void main() {
     );
   });
 
-  test('release provider graph never selects demo repositories', () {
+  test('릴리스 공급자 그래프가 데모 저장소를 선택하지 않는다', () {
     final container = ProviderContainer(
       overrides: <Override>[
         appConfigProvider.overrideWithValue(
@@ -81,9 +81,7 @@ void main() {
     );
   });
 
-  testWidgets('release configuration gate hides the demo child', (
-    tester,
-  ) async {
+  testWidgets('릴리스 설정 게이트가 데모 하위 위젯을 숨긴다', (tester) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: <Override>[

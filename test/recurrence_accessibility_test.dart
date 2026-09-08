@@ -33,9 +33,7 @@ void _useSmallViewport(WidgetTester tester) {
 }
 
 void main() {
-  testWidgets('repeat controls keep semantics and 48px targets at 2x text', (
-    tester,
-  ) async {
+  testWidgets('2배 텍스트에서도 반복 컨트롤이 의미 정보와 48px 영역을 유지한다', (tester) async {
     _useSmallViewport(tester);
     final semantics = tester.ensureSemantics();
     await tester.pumpWidget(
@@ -67,8 +65,8 @@ void main() {
       );
     }
 
-    // Hardware keyboard input remains possible without relying on a pointer
-    // target that may be below the keyboard inset.
+    // 키보드 인셋 아래에 있을 수 있는 포인터 대상을 사용하지 않아도 하드웨어
+    // 키보드 입력은 계속 가능하다.
     final fields = find.byType(TextFormField);
     expect(fields, findsNWidgets(2));
     await tester.tap(fields.first);
@@ -79,9 +77,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('scope dialog is scrollable and has accessible radio choices', (
-    tester,
-  ) async {
+  testWidgets('범위 대화상자를 스크롤할 수 있고 접근 가능한 라디오 선택지가 있다', (tester) async {
     _useSmallViewport(tester);
     EventEditScope? selected;
     await tester.pumpWidget(

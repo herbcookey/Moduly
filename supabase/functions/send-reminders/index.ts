@@ -3,9 +3,9 @@ import {
   type SupabaseClient,
 } from "npm:@supabase/supabase-js@2.50.0";
 
-// The endpoint is intentionally internal. Supabase's JWT gate is disabled in
-// config.toml because this worker is called by a scheduler, not by a browser;
-// every request must carry the deployment-only worker secret below.
+// 이 엔드포인트는 의도적으로 내부 전용이다. 이 작업자는 브라우저가 아니라
+// 스케줄러가 호출하므로 config.toml에서 Supabase JWT 게이트를 비활성화했다.
+// 모든 요청에는 아래의 배포 전용 작업자 비밀 값이 있어야 한다.
 const jsonHeaders = { "Content-Type": "application/json" };
 
 function json(body: Record<string, unknown>, status = 200): Response {
@@ -38,7 +38,7 @@ function serviceKey(): string {
         }
       }
     } catch (_) {
-      // A malformed key set is not a reason to guess at a provider or log it.
+      // 잘못된 키 집합을 근거로 제공자를 추측하거나 이를 로그에 남기지 않는다.
     }
   }
   return candidates.find((value) => value.length > 0) ?? "";
@@ -71,10 +71,10 @@ function capabilityConfigured(value: unknown): value is Capability {
   );
 }
 
-// Provider SDK/I/O is deliberately kept behind this adapter. There are no
-// APNs/FCM credentials or provider client in this repository, so an apparently
-// configured capability cannot be turned into a false "sent" receipt. The
-// worker claims/leases jobs and reports a retryable adapter error instead.
+// 제공자 SDK/I/O는 의도적으로 이 어댑터 뒤에 둔다. 이 저장소에는 APNs/FCM
+// 자격 증명이나 제공자 클라이언트가 없으므로, 기능이 구성된 것처럼 보여도
+// 거짓 "전송 완료" 응답으로 바꿀 수 없다. 대신 작업자가 작업을 가져오고
+// 임대한 뒤 재시도 가능한 어댑터 오류를 보고한다.
 async function sendProvider(_payload: unknown, _provider: string): Promise<
   { outcome: "retryable"; errorCode: string }
 > {
@@ -95,10 +95,9 @@ async function internalSecret(request: Request): Promise<boolean> {
   const expected = configuredSecret("REMINDER_WORKER_SECRET");
   const supplied = request.headers.get("x-reminder-worker-secret")?.trim() ??
     "";
-  // Hash both values to a fixed-size digest and compare every byte.  This keeps
-  // the worker boundary from using an early-exit string comparison, while the
-  // non-empty checks ensure an unconfigured deployment or empty header can
-  // never authenticate an internal endpoint.
+  // 두 값을 고정 크기 다이제스트로 해시하고 모든 바이트를 비교한다. 작업자
+  // 경계에서 조기 종료 문자열 비교를 사용하지 않으며, 비어 있지 않은지도
+  // 검사하므로 구성되지 않은 배포나 빈 헤더로 내부 엔드포인트를 인증할 수 없다.
   const encoder = new TextEncoder();
   const [expectedDigest, suppliedDigest] = await Promise.all([
     crypto.subtle.digest("SHA-256", encoder.encode(expected)),
@@ -153,7 +152,7 @@ export async function handleRequest(request: Request): Promise<Response> {
       body = parsed as Record<string, unknown>;
     }
   } catch (_) {
-    // Empty JSON is equivalent to a default bounded worker pass.
+    // 빈 JSON은 기본 제한 범위의 작업자 실행과 같다.
   }
   const requestedLimit = body.limit;
   const limit =
@@ -165,9 +164,9 @@ export async function handleRequest(request: Request): Promise<Response> {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
-  // Capability and provider secrets are checked before either claim RPC. This
-  // makes the unconfigured state honest and leaves leases untouched for a
-  // future deployment that has credentials.
+  // 작업 가져오기 RPC를 호출하기 전에 기능과 제공자 비밀 값을 확인한다. 따라서
+  // 미구성 상태를 정확히 알리고, 향후 자격 증명을 갖춘 배포를 위해 임대 상태를
+  // 변경하지 않는다.
   let capability: Capability;
   try {
     const raw = await rpc<unknown>(client, "worker_push_capability");
@@ -239,7 +238,7 @@ export async function handleRequest(request: Request): Promise<Response> {
               p_error_code: "reconcile_failed",
             });
           } catch (_) {
-            // The lease/retry RPC is itself best effort; no payload is logged.
+            // 임대/재시도 RPC 자체는 최선형 처리이며 페이로드를 로그에 남기지 않는다.
           }
         }
       }
@@ -293,9 +292,9 @@ export async function handleRequest(request: Request): Promise<Response> {
             });
             continue;
           }
-          // This call is outside all database transactions. Its implementation
-          // is intentionally a retryable no-op until an approved provider
-          // adapter and credentials are added to the deployment.
+          // 이 호출은 모든 데이터베이스 트랜잭션 밖에서 수행한다. 승인된 제공자
+          // 어댑터와 자격 증명이 배포에 추가될 때까지 의도적으로 재시도 가능한
+          // 무동작으로 구현한다.
           const result = await sendProvider(payload, capability.provider);
           await rpc(client, "worker_complete_event_reminder_job", {
             p_job_id: jobId,
@@ -313,7 +312,7 @@ export async function handleRequest(request: Request): Promise<Response> {
               p_error_code: "worker_failed",
             });
           } catch (_) {
-            // A lease can expire/reclaim safely; never emit the job payload.
+            // 임대는 안전하게 만료되거나 다시 가져올 수 있으며 작업 페이로드는 절대 출력하지 않는다.
           }
         }
       }

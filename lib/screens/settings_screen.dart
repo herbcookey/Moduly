@@ -315,7 +315,7 @@ class SettingsScreen extends ConsumerWidget {
           const SizedBox(height: 18),
           Center(
             child: Text(
-              'Moduly · MVP',
+              'Moduly · 초기 버전',
               style: Theme.of(
                 context,
               ).textTheme.labelSmall?.copyWith(color: scheme.outline),
@@ -369,8 +369,8 @@ class SettingsScreen extends ConsumerWidget {
   }
 }
 
-/// Route adapter kept next to settings so the app shell does not need to
-/// expose notification internals to the rest of the navigation tree.
+/// 앱 셸이 나머지 탐색 트리에 알림 내부 구조를 노출할 필요가 없도록 설정
+/// 화면 옆에 두는 경로 어댑터다.
 class NotificationSettingsRoute extends ConsumerWidget {
   const NotificationSettingsRoute({super.key});
 
@@ -387,8 +387,8 @@ class NotificationSettingsRoute extends ConsumerWidget {
       onAccountChanged: controller.isLoading
           ? null
           : (value) => controller.setAccountEnabled(value),
-      // The server provider is intentionally unconfigured in this stage.
-      // Keep the callback absent even if a persisted push flag is true.
+      // 이 단계에서는 서버 공급자를 의도적으로 설정하지 않는다. 저장된 푸시 플래그가
+      // `true`여도 콜백을 제공하지 않는다.
       onPushChanged:
           controller.pushCapability == NotificationCapabilityState.available
           ? (value) => controller.saveSettings(
@@ -436,9 +436,8 @@ class _EditDisplayNameDialogState extends State<_EditDisplayNameDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    // The maxLength counter increases the field's intrinsic height at large
-    // text scales.  AlertDialog's scrollable viewport prevents that content
-    // from overflowing when the keyboard consumes most of the screen.
+    // 글자 크기가 크면 maxLength 카운터가 필드의 고유 높이를 늘린다. 키보드가 화면
+    // 대부분을 차지할 때 AlertDialog의 스크롤 표시 영역이 내용이 넘치는 것을 막는다.
     scrollable: true,
     insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
     title: const Text('이름 변경'),

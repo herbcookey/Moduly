@@ -2,11 +2,11 @@ import { createClient } from 'npm:@supabase/supabase-js@2.50.0'
 import { isValidDeletionSummary } from './preflight_validator.mjs'
 
 const confirmationPhrase = '계정 삭제'
-// Flutter web sends a non-simple POST with these four headers. Keep the
-// allow-list scoped to this function's actual endpoint rather than inheriting
-// a broad project-wide policy. The endpoint authenticates every POST with an
-// explicit bearer token, so wildcard origin is safe here without credentials;
-// credentialed cross-origin requests are intentionally not enabled.
+// Flutter 웹은 이 네 헤더와 함께 단순 요청이 아닌 POST를 보낸다. 광범위한
+// 프로젝트 전체 정책을 상속하지 않고 허용 목록을 이 함수의 실제 엔드포인트로
+// 한정한다. 엔드포인트가 모든 POST를 명시적인 Bearer 토큰으로 인증하므로 자격
+// 증명 없는 와일드카드 출처는 여기에서 안전하다. 자격 증명을 포함한 교차 출처
+// 요청은 의도적으로 허용하지 않는다.
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers':
@@ -53,9 +53,9 @@ function defaultKey(setName: string): string {
 
 Deno.serve(async (request: Request) => {
   try {
-    // Browsers send this unauthenticated preflight before the actual POST.
-    // Handle it before bearer validation; the POST path below still requires a
-    // verified token and never treats OPTIONS as an account-deletion request.
+    // 브라우저는 실제 POST 전에 인증되지 않은 이 사전 요청을 보낸다. Bearer
+    // 검증 전에 처리하되, 아래 POST 경로에는 여전히 검증된 토큰이 필요하며
+    // OPTIONS를 계정 삭제 요청으로 취급하지 않는다.
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders })
     }
@@ -111,20 +111,20 @@ Deno.serve(async (request: Request) => {
     const { data, error: authError } = await authClient.auth.getUser(token)
     if (authError || data.user == null) return json({ error: 'unauthorized' }, 401)
 
-    // Fetch the caller-scoped, display-only deletion summary before invoking the
-    // privileged Auth admin API.  The RPC runs with the verified caller JWT and
-    // never accepts a user ID from the request body.
+    // 권한 있는 Auth 관리자 API를 호출하기 전에 호출자 범위의 표시 전용 삭제
+    // 요약을 가져온다. RPC는 검증된 호출자 JWT로 실행하며 요청 본문에서 사용자
+    // ID를 받지 않는다.
     const { data: summary, error: preflightError } = await authClient.rpc(
       'account_deletion_preflight',
     )
-    // Treat the RPC result as an untrusted protocol boundary.  The same
-    // fail-closed shape is parsed by Flutter before rendering: every count is
-    // a non-negative integer, every group has the required display/lifecycle
-    // fields, and the three group lists are a disjoint, complete partition.
-    // Never call the privileged Auth API for malformed or contradictory data.
+    // RPC 결과를 신뢰할 수 없는 프로토콜 경계로 취급한다. Flutter도 렌더링 전에
+    // 동일한 실패 시 차단 형태를 파싱한다. 모든 개수는 음이 아닌 정수여야 하고,
+    // 모든 그룹에는 필수 표시/수명 주기 필드가 있어야 하며, 세 그룹 목록은 서로
+    // 겹치지 않는 완전한 분할이어야 한다. 형식이 잘못되었거나 모순된 데이터에는
+    // 권한 있는 Auth API를 절대 호출하지 않는다.
     if (preflightError || !isValidDeletionSummary(summary)) {
-      // Do not claim success when the preflight could not be evaluated.  The
-      // provider error is intentionally kept out of the response.
+      // 사전 검사를 평가하지 못했을 때 성공으로 알리지 않는다. 제공자 오류는
+      // 의도적으로 응답에 포함하지 않는다.
       return json({ error: 'preflight_failed' }, 500)
     }
 
@@ -141,8 +141,8 @@ Deno.serve(async (request: Request) => {
 
     return json({ deleted: true, summary })
   } catch (_) {
-    // Provider/network failures must never leak details or masquerade as a
-    // successful deletion.  Keep the generic response CORS-compatible.
+    // 제공자/네트워크 실패는 세부 정보를 노출하거나 삭제 성공으로 가장해서는
+    // 안 된다. 일반 응답이 CORS와 호환되도록 유지한다.
     return json({ error: 'internal_error' }, 500)
   }
 })

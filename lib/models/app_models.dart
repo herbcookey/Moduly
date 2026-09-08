@@ -2,20 +2,18 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-/// Bounds enforced by the server-backed event search contract.  Search terms
-/// are counted as Unicode scalar values (`String.runes`) rather than UTF-16
-/// code units so emoji and supplementary-plane characters have the same
-/// semantics on local and remote adapters.
+/// 서버 기반 일정 검색 계약이 강제하는 범위다. 검색어는 UTF-16 코드 단위가 아니라
+/// Unicode 스칼라 값(`String.runes`)으로 세어 이모지와 보조 평면 문자가
+/// 로컬 및 원격 어댑터에서 같은 의미를 갖게 한다.
 const int eventSearchMinScalars = 2;
 const int eventSearchMaxScalars = 100;
 const int eventSearchMaxUtf8Bytes = 400;
 const int eventSearchDefaultPageSize = 50;
 
-/// Trims and validates one event-search query.  Empty input is intentional:
-/// it represents a period/filter-only search and is therefore valid.  A
-/// non-empty query must contain 2..100 Unicode scalar values and at most 400
-/// UTF-8 bytes.  Repositories call this helper before any local work or RPC so
-/// malformed input never becomes a network request.
+/// 일정 검색어 하나의 공백을 정리하고 검증한다. 빈 입력은 의도적으로 허용하며
+/// 기간/필터 전용 검색을 뜻한다. 비어 있지 않은 검색어는 Unicode 스칼라 값 2~100개,
+/// UTF-8 기준 최대 400바이트여야 한다. 잘못된 입력이 네트워크 요청으로 이어지지 않도록
+/// 저장소는 로컬 작업이나 RPC 전에 이 도우미를 호출한다.
 String normalizeEventSearchQuery(String query) {
   final normalized = query.trim();
   if (normalized.isEmpty) return normalized;
@@ -28,8 +26,8 @@ String normalizeEventSearchQuery(String query) {
   return normalized;
 }
 
-/// Public predicate useful to text-field validation without exposing the
-/// exception text used by repositories/controllers.
+/// 저장소/컨트롤러가 사용하는 예외 문구를 노출하지 않고 텍스트 필드를 검증할 때
+/// 유용한 공개 조건 함수다.
 bool isValidEventSearchQuery(String query) {
   try {
     normalizeEventSearchQuery(query);
@@ -39,12 +37,11 @@ bool isValidEventSearchQuery(String query) {
   }
 }
 
-/// Parses the explicit-offset ISO-8601 timestamp shape used by Supabase
-/// event rows and v1 range cursors.  Dart's [DateTime.parse] normalizes
-/// impossible calendar/time components (for example February 30), so wire
-/// values are validated component-by-component before constructing the UTC
-/// instant.  Postgres emits `Z` or `+/-HH:MM` offsets with up to six fractional
-/// second digits; those forms remain supported.
+/// Supabase 일정 행과 v1 범위 커서가 사용하는 명시적 오프셋 포함 ISO-8601
+/// 타임스탬프 형식을 파싱한다. Dart의 [DateTime.parse]는 존재할 수 없는 캘린더/시각
+/// 구성 요소(예: 2월 30일)를 정규화하므로 UTC 시각을 만들기 전에 전송 값을 구성
+/// 요소별로 검증한다. Postgres는 소수점 이하 최대 6자리와 함께 `Z` 또는
+/// `+/-HH:MM` 오프셋을 출력하며 이 형식들을 계속 지원한다.
 DateTime? parseStrictExplicitOffsetTimestamp(Object? value) {
   if (value is DateTime) return value.toUtc();
   if (value is! String) return null;
@@ -99,11 +96,10 @@ DateTime? parseStrictExplicitOffsetTimestamp(Object? value) {
   );
 }
 
-/// Returns a defensive, duplicate-free participant list in one canonical
-/// lexicographic order. Repositories perform the authorization check that
-/// every id belongs to an active membership in the event's group. Sorting at
-/// the model boundary keeps local, RPC, and realtime child projections equal
-/// even when a caller or transport returns a different row order.
+/// 방어적으로 중복을 제거한 참여자 목록을 하나의 표준 사전식 순서로 반환한다.
+/// 저장소는 모든 ID가 일정 그룹의 활성 멤버십에 속하는지 권한을 확인한다. 모델
+/// 경계에서 정렬하면 호출자나 전송 계층이 다른 행 순서를 반환해도 로컬, RPC,
+/// 실시간 하위 프로젝션이 같게 유지된다.
 List<String> canonicalEventMemberIds(Iterable<String> memberIds) {
   final result = <String>[];
   final seen = <String>{};
@@ -118,7 +114,7 @@ List<String> canonicalEventMemberIds(Iterable<String> memberIds) {
   return List<String>.unmodifiable(result);
 }
 
-/// The only recurrence frequencies persisted by the v2 wire contract.
+/// v2 전송 형식 계약이 저장하는 유일한 반복 주기다.
 enum RecurrenceFrequency { daily, weekly, monthly }
 
 extension RecurrenceFrequencyWire on RecurrenceFrequency {
@@ -153,9 +149,8 @@ extension RecurrenceEndWire on RecurrenceEnd {
   };
 }
 
-/// Scope used by recurring occurrence mutations.  `thisOccurrence` is named
-/// instead of `this` because the latter is a Dart keyword; its wire value is
-/// exactly `this`.
+/// 반복 발생 항목 변경에 사용하는 범위다. `this`는 Dart 키워드이므로 대신
+/// `thisOccurrence`라는 이름을 쓰며 전송 값은 정확히 `this`다.
 enum EventEditScope { thisOccurrence, future, all }
 
 extension EventEditScopeWire on EventEditScope {
@@ -192,9 +187,9 @@ int _strictIntegral(Object? value) {
   throw const FormatException('반복 규칙을 확인해 주세요.');
 }
 
-/// Immutable, validated recurrence rule.  The JSON representation is kept
-/// deliberately exact: adding an unknown field or using an end-specific field
-/// with the wrong end mode is rejected instead of being silently ignored.
+/// 검증된 불변 반복 규칙이다. JSON 표현은 의도적으로 엄격하게 유지한다. 알 수 없는
+/// 필드를 추가하거나 잘못된 종료 모드에서 종료 전용 필드를 사용하면 조용히 무시하지
+/// 않고 거부한다.
 @immutable
 class RecurrenceRule {
   RecurrenceRule({
@@ -379,8 +374,8 @@ class RecurrenceRule {
   );
 }
 
-/// Builder-friendly value object.  It deliberately does not bypass
-/// [RecurrenceRule]'s validation; [toRule] is the only conversion boundary.
+/// 빌더에서 사용하기 편한 값 객체다. 의도적으로 [RecurrenceRule]의 검증을
+/// 우회하지 않으며 [toRule]이 유일한 변환 경계다.
 @immutable
 class RecurrenceRuleDraft {
   RecurrenceRuleDraft({
@@ -415,9 +410,9 @@ class RecurrenceRuleDraft {
 String _dateOnlyString(DateTime value) =>
     '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
 
-/// PostgreSQL recurrence ordinals are signed `bigint`s.  Keep the wire key
-/// decimal and fixed width, but reject values above bigint's signed maximum
-/// instead of accepting a 20-digit key that the database cannot represent.
+/// PostgreSQL 반복 순번은 부호 있는 `bigint`다. 전송 키는 고정 너비의 10진수로
+/// 유지하되, 데이터베이스가 표현할 수 없는 20자리 키를 허용하지 않고 bigint의
+/// 부호 있는 최댓값을 넘는 값은 거부한다.
 final BigInt maxOccurrenceOrdinal = BigInt.parse('9223372036854775807');
 
 String occurrenceKeyForIndex(int index) {
@@ -436,8 +431,8 @@ int? occurrenceIndexFromKey(Object? key) {
   if (value == null || value < BigInt.zero || value > maxOccurrenceOrdinal) {
     return null;
   }
-  // Every accepted ordinal is within Dart's signed 64-bit int range on the
-  // supported Flutter VM, so this conversion cannot truncate or wrap.
+  // 허용된 모든 순번은 지원되는 Flutter VM의 Dart 부호 있는 64비트 정수 범위 안에
+  // 있으므로 이 변환에서 값이 잘리거나 래핑될 수 없다.
   return value.toInt();
 }
 
@@ -560,14 +555,13 @@ class PlannerGroup {
   final int version;
   final int colorValue;
 
-  /// The immutable owner recorded by the database. Older/local fixtures may
-  /// omit this field and derive ownership from the active member list.
+  /// 데이터베이스에 기록된 불변 소유자다. 이전/로컬 픽스처는 이 필드를 생략하고
+  /// 활성 멤버 목록에서 소유권을 유도할 수 있다.
   final String? ownerId;
 
-  /// Optional lifecycle markers. The production schema currently uses
-  /// `deleted_at` for an archived group, while some clients expose that state
-  /// as `archivedAt`; retaining both keeps the model additive and tolerant of
-  /// either payload shape.
+  /// 선택적인 수명 주기 표시다. 현재 프로덕션 스키마는 보관된 그룹에
+  /// `deleted_at`을 사용하지만 일부 클라이언트는 이 상태를 `archivedAt`으로 노출한다.
+  /// 둘 다 유지하면 모델을 확장 가능하게 두면서 어느 페이로드 형식도 허용할 수 있다.
   final DateTime? archivedAt;
   final DateTime? deletedAt;
 
@@ -702,19 +696,18 @@ class InviteCode {
 
   bool get isRevoked => revokedAt != null;
 
-  /// Expiry is inclusive: a token at exactly `now` is no longer usable.
-  /// Keeping this boundary equal to the database predicate avoids local
-  /// preview/accept races around the expiry instant.
+  /// 만료 시각을 포함한다. 정확히 `now`인 토큰은 더는 사용할 수 없다. 이 경계를
+  /// 데이터베이스 조건자와 같게 유지하면 만료 시점 주변의 로컬 미리보기/수락
+  /// 경합을 피할 수 있다.
   bool get isExpired => !expiresAt.isAfter(DateTime.now().toUtc());
   bool get isExhausted => usesCount >= maxUses;
 }
 
-/// Minimal, sanitized preview returned by `preview_invite(p_token)`.
+/// `preview_invite(p_token)`가 반환하는 최소한으로 정제된 미리보기다.
 ///
-/// The server intentionally omits usage counts, revocation flags, token
-/// material, and other invite metadata.  Invalid/expired/revoked/exhausted/
-/// archived responses are represented by repository exceptions instead of a
-/// partially populated model.
+/// 서버는 사용 횟수, 취소 플래그, 토큰 자료와 기타 초대 메타데이터를 의도적으로 생략한다.
+/// 잘못되었거나 만료, 취소, 소진, 보관된 응답은 일부만 채운 모델 대신 저장소
+/// 예외로 나타낸다.
 @immutable
 class InvitePreview {
   const InvitePreview({
@@ -776,8 +769,8 @@ class InvitePreview {
   );
 }
 
-/// UI-facing lifecycle for one pending invite intent.  The bearer token is
-/// never exposed by this enum/snapshot; it remains private to the controller.
+/// 대기 중인 초대 의도 하나의 UI용 수명 주기다. 이 열거형/스냅샷은 Bearer 토큰을
+/// 절대 노출하지 않으며 토큰은 컨트롤러 내부에만 둔다.
 enum PendingInviteState {
   none,
   captured,
@@ -876,15 +869,15 @@ class PlannerEvent {
   final DateTime endAt; // 종일 일정에서는 UTC 날짜 범위의 끝(미포함) 경계다.
   final bool allDay;
   final String ownerId;
-  // Keep a private immutable snapshot; callers cannot mutate event state by
-  // retaining and changing the list passed to the constructor.
+  // 비공개 불변 스냅샷을 유지한다. 호출자가 생성자에 전달한 목록을 보관하고
+  // 변경해도 일정 상태를 바꿀 수 없다.
   final List<String> _memberIds;
 
-  /// Assigned users in deterministic application order.
+  /// 결정론적인 앱 순서로 정렬된 배정 사용자다.
   ///
-  /// The returned view is intentionally unmodifiable.  This getter rather
-  /// than a mutable public field preserves the old constructor shape without
-  /// allowing event state to be changed behind ChangeNotifier guards.
+  /// 반환하는 뷰는 의도적으로 변경할 수 없다. 변경 가능한 공개 필드 대신 이 게터를
+  /// 사용하면 기존 생성자 형태를 유지하면서 ChangeNotifier 가드를 우회해 일정
+  /// 상태를 바꾸지 못하게 할 수 있다.
   List<String> get memberIds => List<String>.unmodifiable(_memberIds);
   final int colorValue;
   final String timezone;
@@ -894,13 +887,13 @@ class PlannerEvent {
   final DateTime updatedAt;
   final DateTime? deletedAt;
 
-  /// Series identity. Singleton events use their existing `id`, preserving
-  /// source compatibility while repeated projections share one anchor id.
+  /// 시리즈 식별자다. 단일 일정은 기존 `id`를 사용해 소스 호환성을 유지하고 반복
+  /// 프로젝션은 하나의 기준 ID를 공유한다.
   final String seriesId;
   final String occurrenceKey;
   final int occurrenceIndex;
 
-  /// The occurrence's pre-override scheduled instant (UTC).
+  /// 재정의 전 발생 항목의 예약 시각(UTC)이다.
   final DateTime? scheduledStartsAt;
   final DateTime? scheduledEndsAt;
   final int occurrenceVersion;
@@ -1037,11 +1030,11 @@ class PlannerEvent {
   ]);
 }
 
-/// Preserves the exact result committed by an event mutation.
+/// 일정 저장소가 커밋한 결과를 호출자에게 손실 없이 전달한다.
 ///
-/// Single-row writes return a validated event snapshot, while recurring scope
-/// writes return a commit receipt. Keeping them as distinct result types avoids
-/// reconstructing mutation identity from a refreshed projection.
+/// 단일 행 쓰기와 반복 범위 쓰기는 서버 계약 자체가 다르다. 전자는 검증된 일정
+/// 스냅샷을, 후자는 커밋 영수증을 반환하므로 하나를 nullable 필드로 뭉개지 않고
+/// 봉인된 두 결과로 표현한다.
 @immutable
 sealed class EventSaveResult {
   const EventSaveResult();
@@ -1084,10 +1077,9 @@ class EventDraft {
   final DateTime endAt;
   final bool allDay;
 
-  /// Whether the caller supplied a participant field at all.  The public
-  /// [memberIds] getter intentionally remains non-null and immutable; this
-  /// bit preserves the distinction between an omitted create field (the
-  /// repository defaults it to the creator) and an explicit empty assignment.
+  /// 호출자가 참여자 필드를 제공했는지 여부다. 공개 [memberIds] 게터는 의도적으로
+  /// `null`이 아니며 불변으로 유지된다. 이 비트는 생략된 생성 필드(저장소가 작성자를
+  /// 기본값으로 설정)와 명시적인 빈 배정을 구분한다.
   final bool hasExplicitMemberIds;
   final List<String> _memberIds;
   List<String> get memberIds => List<String>.unmodifiable(_memberIds);
@@ -1169,14 +1161,13 @@ class EventDraft {
   );
 }
 
-/// Calendar projections supported by the planner.  The model lives outside
-/// the widget layer so repository/state contracts can share the same mode
-/// vocabulary without importing Flutter screens.
+/// 플래너가 지원하는 캘린더 프로젝션이다. 모델을 위젯 계층 밖에 두어 저장소/상태
+/// 계약이 Flutter 화면을 가져오지 않고 같은 모드 용어를 공유할 수 있게 한다.
 enum CalendarViewMode { day, month, agenda }
 
-/// An inclusive-start, exclusive-end UTC interval used by bounded event
-/// reads.  Calendar callers construct it from local-midnight wall times and
-/// repositories validate the timezone against the IANA database before use.
+/// 제한된 일정 읽기에 사용하는 시작 포함, 종료 미포함 UTC 구간이다. 달력 호출자는
+/// 현지 자정 시각으로 이를 만들고 저장소는 사용 전에 IANA 데이터베이스를 기준으로
+/// 시간대를 검증한다.
 @immutable
 class EventRange {
   EventRange({
@@ -1216,9 +1207,9 @@ class EventRange {
       'EventRange($startUtc, $endUtc, timezone: $viewTimezone)';
 }
 
-/// A strict keyset tuple returned by the bounded range RPC.  Empty occurrence
-/// keys retain the legacy v1 payload; any materialized occurrence uses v2 and
-/// carries the complete `(starts_at,event_id,occurrence_key)` tuple.
+/// 제한된 범위 RPC가 반환하는 엄격한 키 집합 튜플이다. 빈 발생 키는 레거시 v1
+/// 페이로드를 유지한다. 구체화된 모든 발생분은 v2를 사용하며 완전한
+/// `(starts_at,event_id,occurrence_key)` 튜플을 포함한다.
 @immutable
 class EventRangeCursor {
   EventRangeCursor({
@@ -1332,7 +1323,7 @@ class EventRangeCursor {
       'EventRangeCursor($startsAtUtc, $eventId, $occurrenceKey)';
 }
 
-/// Immutable page returned by a bounded event range read.
+/// 제한된 일정 범위 읽기가 반환하는 불변 페이지다.
 @immutable
 class EventRangePage {
   EventRangePage({

@@ -386,8 +386,8 @@ class _JoinGroupDialogState extends State<_JoinGroupDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    // Let the title/form yield to a constrained keyboard viewport while the
-    // actions remain fixed and reachable.
+    // 동작은 고정되고 접근 가능한 상태로 유지하면서 제목/양식이 키보드로 제한된
+    // 표시 영역에 맞게 줄어들게 한다.
     scrollable: true,
     insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
     title: const Text('초대 코드로 참여'),
@@ -424,9 +424,8 @@ class _JoinGroupDialogState extends State<_JoinGroupDialog> {
 String? _inviteCodeValidator(String? value) {
   final compact = normalizeInviteCode(value ?? '');
   if (compact.isEmpty) return '초대 코드를 입력해 주세요.';
-  // The local preview keeps the documented demo token available while remote
-  // invites use either the current 12-character alphabet or legacy 48-char
-  // hexadecimal tokens.
+  // 로컬 미리보기에서는 문서에 명시된 데모 토큰을 계속 허용한다. 원격 초대는 현재의
+  // 12자 알파벳이나 레거시 48자 16진수 토큰 중 하나를 사용한다.
   final isDemoCode = compact == 'FAMILY';
   final isShortCode =
       compact.length == inviteCodeLength &&

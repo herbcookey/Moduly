@@ -120,37 +120,31 @@ Map<String, Object?> _impactJson({
 }
 
 void main() {
-  test(
-    'local deletion is capability blocked and never reports success',
-    () async {
-      final repository = LocalAccountDeletionRepository();
+  test('로컬 삭제는 기능이 차단되어 성공으로 보고하지 않는다', () async {
+    final repository = LocalAccountDeletionRepository();
 
-      expect(
-        repository.deleteAccount(confirmation: '삭제'),
-        throwsA(isA<AccountDeletionCapabilityException>()),
-      );
-      expect(
-        repository.deleteAccount(confirmation: accountDeletionConfirmation),
-        throwsA(isA<AccountDeletionCapabilityException>()),
-      );
+    expect(
+      repository.deleteAccount(confirmation: '삭제'),
+      throwsA(isA<AccountDeletionCapabilityException>()),
+    );
+    expect(
+      repository.deleteAccount(confirmation: accountDeletionConfirmation),
+      throwsA(isA<AccountDeletionCapabilityException>()),
+    );
 
-      expect(repository.deleted, isFalse);
-    },
-  );
+    expect(repository.deleted, isFalse);
+  });
 
-  test(
-    'legacy void result fails closed instead of fabricating success',
-    () async {
-      await expectLater(
-        _LegacyVoidAccountDeletionRepository().deleteAccountWithResult(
-          confirmation: accountDeletionConfirmation,
-        ),
-        throwsA(isA<AccountDeletionCapabilityException>()),
-      );
-    },
-  );
+  test('기존 void 결과가 성공을 가장하지 않고 안전하게 실패한다', () async {
+    await expectLater(
+      _LegacyVoidAccountDeletionRepository().deleteAccountWithResult(
+        confirmation: accountDeletionConfirmation,
+      ),
+      throwsA(isA<AccountDeletionCapabilityException>()),
+    );
+  });
 
-  test('impact parser validates owned partitions and lifecycle markers', () {
+  test('영향 파서가 소유 파티션과 수명 주기 표식을 검증한다', () {
     final archivedAt = DateTime.utc(2026, 1, 1);
     final active = <String, Object?>{
       'id': 'active',
@@ -248,9 +242,8 @@ void main() {
         ],
       ),
     );
-    // Partition rows must match the owned canonical record on every field,
-    // not just id/status.  A stale projection must fail closed before the
-    // destructive confirmation step.
+    // 분할된 행은 id/status뿐 아니라 모든 필드에서 소유한 정규 레코드와
+    // 일치해야 한다. 오래된 투영값은 파괴적 확인 단계 전에 안전하게 실패해야 한다.
     for (final mismatch in <String, Object?>{
       'name': 'renamed elsewhere',
       'timezone': 'UTC',
@@ -282,80 +275,69 @@ void main() {
     );
   });
 
-  testWidgets(
-    'capability-blocked repositories disable deletion with clear guidance',
-    (tester) async {
-      final repository = ConfigurationBlockedAccountDeletionRepository(
-        'raw configuration detail must stay hidden',
-      );
-      await tester.pumpWidget(
-        MaterialApp(home: AccountDeletionScreen(repository: repository)),
-      );
-      await tester.pumpAndSettle();
+  testWidgets('기능이 차단된 저장소가 명확한 안내와 함께 삭제를 비활성화한다', (tester) async {
+    final repository = ConfigurationBlockedAccountDeletionRepository(
+      'raw configuration detail must stay hidden',
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AccountDeletionScreen(repository: repository)),
+    );
+    await tester.pumpAndSettle();
 
-      expect(find.text('계정 삭제는 연결된 서버에서만 사용할 수 있어요.'), findsOneWidget);
-      expect(
-        find.text('raw configuration detail must stay hidden'),
-        findsNothing,
-      );
-      final deleteButton = tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, '계정 영구 삭제'),
-      );
-      expect(deleteButton.onPressed, isNull);
-    },
-  );
+    expect(find.text('계정 삭제는 연결된 서버에서만 사용할 수 있어요.'), findsOneWidget);
+    expect(
+      find.text('raw configuration detail must stay hidden'),
+      findsNothing,
+    );
+    final deleteButton = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, '계정 영구 삭제'),
+    );
+    expect(deleteButton.onPressed, isNull);
+  });
 
-  testWidgets(
-    'typed preflight renders active/archived impact and result summary',
-    (tester) async {
-      final archivedAt = DateTime.utc(2026, 1, 1);
-      final active = _group(id: 'active', status: 'active', memberCount: 2);
-      final archived = _group(
-        id: 'archived',
-        status: 'archived',
-        deletedAt: archivedAt,
-        memberCount: 0,
-      );
-      final impact = AccountDeletionImpact(
-        ownedGroups: <AccountDeletionGroupImpact>[active, archived],
-        activeOwnedGroups: <AccountDeletionGroupImpact>[active],
-        archivedOwnedGroups: <AccountDeletionGroupImpact>[archived],
-        groups: 2,
-        events: 4,
-        invites: 3,
-        memberships: 5,
-      );
-      final repository = _TypedAccountDeletionRepository(
-        impact: impact,
-        result: AccountDeletionResult(deleted: true, summary: impact),
-      );
-      await tester.pumpWidget(
-        MaterialApp(home: AccountDeletionScreen(repository: repository)),
-      );
-      await tester.pumpAndSettle();
+  testWidgets('타입이 있는 사전 검사가 활성/보관 영향과 결과 요약을 표시한다', (tester) async {
+    final archivedAt = DateTime.utc(2026, 1, 1);
+    final active = _group(id: 'active', status: 'active', memberCount: 2);
+    final archived = _group(
+      id: 'archived',
+      status: 'archived',
+      deletedAt: archivedAt,
+      memberCount: 0,
+    );
+    final impact = AccountDeletionImpact(
+      ownedGroups: <AccountDeletionGroupImpact>[active, archived],
+      activeOwnedGroups: <AccountDeletionGroupImpact>[active],
+      archivedOwnedGroups: <AccountDeletionGroupImpact>[archived],
+      groups: 2,
+      events: 4,
+      invites: 3,
+      memberships: 5,
+    );
+    final repository = _TypedAccountDeletionRepository(
+      impact: impact,
+      result: AccountDeletionResult(deleted: true, summary: impact),
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: AccountDeletionScreen(repository: repository)),
+    );
+    await tester.pumpAndSettle();
 
-      expect(find.textContaining('active'), findsOneWidget);
-      expect(find.text('보관된 소유 그룹 1개도 함께 삭제됩니다.'), findsOneWidget);
-      expect(find.text('그룹 2개 · 일정 4개 · 초대 코드 3개 · 멤버십 5개'), findsOneWidget);
+    expect(find.textContaining('active'), findsOneWidget);
+    expect(find.text('보관된 소유 그룹 1개도 함께 삭제됩니다.'), findsOneWidget);
+    expect(find.text('그룹 2개 · 일정 4개 · 초대 코드 3개 · 멤버십 5개'), findsOneWidget);
 
-      await tester.enterText(
-        find.byType(TextField),
-        accountDeletionConfirmation,
-      );
-      await tester.drag(find.byType(Scrollable).first, const Offset(0, -500));
-      await tester.pump();
-      await tester.tap(find.widgetWithText(FilledButton, '계정 영구 삭제'));
-      await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), accountDeletionConfirmation);
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, -500));
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, '계정 영구 삭제'));
+    await tester.pumpAndSettle();
 
-      expect(repository.calls, 1);
-      expect(find.text('계정이 삭제되었습니다. 안전하게 로그아웃했어요.'), findsOneWidget);
-      expect(find.text('연결된 데이터 2개 그룹도 모두 삭제했어요.'), findsOneWidget);
-    },
-  );
+    expect(repository.calls, 1);
+    expect(find.text('계정이 삭제되었습니다. 안전하게 로그아웃했어요.'), findsOneWidget);
+    expect(find.text('연결된 데이터 2개 그룹도 모두 삭제했어요.'), findsOneWidget);
+  });
 
-  testWidgets('malformed typed result is rejected without provider details', (
-    tester,
-  ) async {
+  testWidgets('잘못된 타입 결과를 공급자 세부 정보 없이 거부한다', (tester) async {
     final repository = _TypedAccountDeletionRepository(
       impact: AccountDeletionImpact.empty,
       resultFailure: const AccountDeletionException(
@@ -378,47 +360,39 @@ void main() {
     expect(find.text('계정이 삭제되었습니다. 안전하게 로그아웃했어요.'), findsNothing);
   });
 
-  testWidgets(
-    'confirmation prevents accidental deletion and duplicate submit',
-    (tester) async {
-      final repository = _FakeAccountDeletionRepository();
-      var deletedCallbacks = 0;
-      await tester.pumpWidget(
-        MaterialApp(
-          home: AccountDeletionScreen(
-            repository: repository,
-            onDeleted: () async => deletedCallbacks += 1,
-          ),
+  testWidgets('확인 단계가 실수로 인한 삭제와 중복 제출을 막는다', (tester) async {
+    final repository = _FakeAccountDeletionRepository();
+    var deletedCallbacks = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AccountDeletionScreen(
+          repository: repository,
+          onDeleted: () async => deletedCallbacks += 1,
         ),
-      );
+      ),
+    );
 
-      await tester.enterText(find.byType(TextField), '삭제');
-      await tester.drag(find.byType(Scrollable).first, const Offset(0, -500));
-      await tester.pump();
-      await tester.tap(find.widgetWithText(FilledButton, '계정 영구 삭제'));
-      await tester.pump();
-      expect(find.text('확인 문구를 정확히 입력해 주세요.'), findsOneWidget);
-      expect(repository.calls, 0);
+    await tester.enterText(find.byType(TextField), '삭제');
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, -500));
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, '계정 영구 삭제'));
+    await tester.pump();
+    expect(find.text('확인 문구를 정확히 입력해 주세요.'), findsOneWidget);
+    expect(repository.calls, 0);
 
-      await tester.enterText(
-        find.byType(TextField),
-        accountDeletionConfirmation,
-      );
-      await tester.drag(find.byType(Scrollable).first, const Offset(0, -500));
-      await tester.pump();
-      await tester.tap(find.widgetWithText(FilledButton, '계정 영구 삭제'));
-      await tester.tap(find.widgetWithText(FilledButton, '계정 영구 삭제'));
-      await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), accountDeletionConfirmation);
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, -500));
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, '계정 영구 삭제'));
+    await tester.tap(find.widgetWithText(FilledButton, '계정 영구 삭제'));
+    await tester.pumpAndSettle();
 
-      expect(repository.calls, 1);
-      expect(deletedCallbacks, 1);
-      expect(find.text('계정이 삭제되었습니다. 안전하게 로그아웃했어요.'), findsOneWidget);
-    },
-  );
+    expect(repository.calls, 1);
+    expect(deletedCallbacks, 1);
+    expect(find.text('계정이 삭제되었습니다. 안전하게 로그아웃했어요.'), findsOneWidget);
+  });
 
-  testWidgets('server errors are shown without exposing provider details', (
-    tester,
-  ) async {
+  testWidgets('공급자 세부 정보를 노출하지 않고 서버 오류를 표시한다', (tester) async {
     final repository = _FakeAccountDeletionRepository(
       failure: const AccountDeletionException('provider-internal-secret'),
     );

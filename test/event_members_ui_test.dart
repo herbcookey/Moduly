@@ -131,7 +131,7 @@ class _CaptureRepository extends LocalScheduleRepository {
     }
     final source = replacementSource;
     if (source == null || source.id != eventId) {
-      throw StateError('replacement source is missing');
+      throw StateError('교체 원본이 없습니다');
     }
     replacedEvent = source.copyWith(
       memberIds: memberIds.toList(growable: false),
@@ -277,7 +277,7 @@ Future<void> _scrollIntoEditorViewport(
     await tester.drag(list, const Offset(0, -180));
     await tester.pump();
   }
-  fail('Target did not become visible in the editor viewport.');
+  fail('편집기 뷰포트에 대상이 표시되지 않았다.');
 }
 
 Widget _largeText(Widget child) => MediaQuery(
@@ -289,9 +289,7 @@ Widget _largeText(Widget child) => MediaQuery(
 );
 
 void main() {
-  testWidgets('create editor selects participants and saves their IDs', (
-    tester,
-  ) async {
+  testWidgets('생성 편집기가 참여자를 선택하고 ID를 저장한다', (tester) async {
     final auth = _TestAuth();
     final repository = _CaptureRepository();
     final controller = _controller(
@@ -323,9 +321,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('creator edit preselects and saves changed participants', (
-    tester,
-  ) async {
+  testWidgets('생성자 편집이 참여자를 미리 선택하고 변경 내용을 저장한다', (tester) async {
     final auth = _TestAuth();
     final repository = _CaptureRepository();
     final existing = _event();
@@ -359,174 +355,160 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'creator body draft keeps its base version across a realtime update',
-    (tester) async {
-      final auth = _TestAuth();
-      final repository = _CaptureRepository();
-      final existing = _event(title: '처음 제목');
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        user: _creator,
-        group: _group,
-        members: <PlannerMember>[_member(_creator.id, '작성자', isOwner: true)],
-        events: <PlannerEvent>[existing],
-      );
-      addTearDown(auth.dispose);
+  testWidgets('생성자 본문 초안이 Realtime 갱신 중에도 기준 버전을 유지한다', (tester) async {
+    final auth = _TestAuth();
+    final repository = _CaptureRepository();
+    final existing = _event(title: '처음 제목');
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: _creator,
+      group: _group,
+      members: <PlannerMember>[_member(_creator.id, '작성자', isOwner: true)],
+      events: <PlannerEvent>[existing],
+    );
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(
-        _app(controller, const EventEditorScreen(eventId: 'event-1')),
-      );
-      await tester.pump();
-      final titleField = find.byType(TextField).first;
-      await tester.enterText(titleField, '내가 입력한 제목');
-      final titleController = tester.widget<TextField>(titleField).controller!;
+    await tester.pumpWidget(
+      _app(controller, const EventEditorScreen(eventId: 'event-1')),
+    );
+    await tester.pump();
+    final titleField = find.byType(TextField).first;
+    await tester.enterText(titleField, '내가 입력한 제목');
+    final titleController = tester.widget<TextField>(titleField).controller!;
 
-      final remote = existing.copyWith(title: '원격 제목', version: 2);
-      controller.events = <PlannerEvent>[remote];
-      controller.notifyListeners();
-      await tester.pump();
-      expect(
-        tester.widget<TextField>(titleField).controller?.text,
-        '내가 입력한 제목',
-      );
+    final remote = existing.copyWith(title: '원격 제목', version: 2);
+    controller.events = <PlannerEvent>[remote];
+    controller.notifyListeners();
+    await tester.pump();
+    expect(tester.widget<TextField>(titleField).controller?.text, '내가 입력한 제목');
 
-      repository
-        ..remoteVersion = remote.version
-        ..rejectStaleWrites = true;
-      await tester.tap(find.widgetWithText(TextButton, '저장'));
-      await tester.pumpAndSettle();
+    repository
+      ..remoteVersion = remote.version
+      ..rejectStaleWrites = true;
+    await tester.tap(find.widgetWithText(TextButton, '저장'));
+    await tester.pumpAndSettle();
 
-      expect(repository.lastUpdateExpectedVersion, existing.version);
-      expect(repository.updatedEvent, isNull);
-      expect(repository.updateCalls, 1);
-      expect(controller.errorMessage, '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.');
-      final conflictText = find.text(
-        '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
-        skipOffstage: false,
-      );
-      await _scrollIntoEditorViewport(tester, conflictText);
-      expect(conflictText, findsOneWidget);
-      expect(titleController.text, '내가 입력한 제목');
-      expect(controller.events.single.title, '원격 제목');
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(repository.lastUpdateExpectedVersion, existing.version);
+    expect(repository.updatedEvent, isNull);
+    expect(repository.updateCalls, 1);
+    expect(controller.errorMessage, '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.');
+    final conflictText = find.text(
+      '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
+      skipOffstage: false,
+    );
+    await _scrollIntoEditorViewport(tester, conflictText);
+    expect(conflictText, findsOneWidget);
+    expect(titleController.text, '내가 입력한 제목');
+    expect(controller.events.single.title, '원격 제목');
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets(
-    'group owner participant draft keeps its base version across a realtime update',
-    (tester) async {
-      final auth = _TestAuth();
-      final repository = _CaptureRepository();
-      final groupOwner = PlannerUser(
-        id: 'group-owner',
-        email: 'group-owner@example.com',
-        displayName: '그룹 소유자',
-      );
-      final group = _group.copyWith(ownerId: groupOwner.id);
-      final existing = _event(memberIds: const <String>['creator']);
-      repository.replacementSource = existing;
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        user: groupOwner,
-        group: group,
-        members: <PlannerMember>[
-          _member(groupOwner.id, '그룹 소유자', isOwner: true),
-          _member(_creator.id, '작성자'),
-          _member('member-b', '멤버 B'),
-          _member('member-c', '멤버 C'),
-        ],
-        events: <PlannerEvent>[existing],
-      );
-      addTearDown(auth.dispose);
+  testWidgets('그룹 소유자 참여자 초안이 Realtime 갱신 중에도 기준 버전을 유지한다', (tester) async {
+    final auth = _TestAuth();
+    final repository = _CaptureRepository();
+    final groupOwner = PlannerUser(
+      id: 'group-owner',
+      email: 'group-owner@example.com',
+      displayName: '그룹 소유자',
+    );
+    final group = _group.copyWith(ownerId: groupOwner.id);
+    final existing = _event(memberIds: const <String>['creator']);
+    repository.replacementSource = existing;
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: groupOwner,
+      group: group,
+      members: <PlannerMember>[
+        _member(groupOwner.id, '그룹 소유자', isOwner: true),
+        _member(_creator.id, '작성자'),
+        _member('member-b', '멤버 B'),
+        _member('member-c', '멤버 C'),
+      ],
+      events: <PlannerEvent>[existing],
+    );
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(
-        _app(controller, const EventEditorScreen(eventId: 'event-1')),
-      );
-      await tester.pump();
-      final memberTile = _memberTile('멤버 B');
-      await _scrollIntoEditorViewport(tester, memberTile);
-      await tester.tap(memberTile);
+    await tester.pumpWidget(
+      _app(controller, const EventEditorScreen(eventId: 'event-1')),
+    );
+    await tester.pump();
+    final memberTile = _memberTile('멤버 B');
+    await _scrollIntoEditorViewport(tester, memberTile);
+    await tester.tap(memberTile);
 
-      final remote = existing.copyWith(
-        memberIds: const <String>['creator', 'member-c'],
-        version: 2,
-      );
-      controller.events = <PlannerEvent>[remote];
-      controller.notifyListeners();
-      await tester.pump();
-      expect(tester.widget<CheckboxListTile>(memberTile).value, isTrue);
+    final remote = existing.copyWith(
+      memberIds: const <String>['creator', 'member-c'],
+      version: 2,
+    );
+    controller.events = <PlannerEvent>[remote];
+    controller.notifyListeners();
+    await tester.pump();
+    expect(tester.widget<CheckboxListTile>(memberTile).value, isTrue);
 
-      repository
-        ..remoteVersion = remote.version
-        ..rejectStaleWrites = true;
-      final ownerSave = find.widgetWithText(FilledButton, '참여자 저장하기');
-      await _scrollIntoEditorViewport(tester, ownerSave);
-      await tester.tap(ownerSave);
-      await tester.pumpAndSettle();
+    repository
+      ..remoteVersion = remote.version
+      ..rejectStaleWrites = true;
+    final ownerSave = find.widgetWithText(FilledButton, '참여자 저장하기');
+    await _scrollIntoEditorViewport(tester, ownerSave);
+    await tester.tap(ownerSave);
+    await tester.pumpAndSettle();
 
-      expect(repository.lastReplacementExpectedVersion, existing.version);
-      expect(repository.replacedEvent, isNull);
-      expect(repository.replaceCalls, 1);
-      final conflictText = find.text(
-        '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
-        skipOffstage: false,
-      );
-      await _scrollIntoEditorViewport(tester, conflictText);
-      expect(conflictText, findsOneWidget);
-      await _scrollIntoEditorViewport(tester, memberTile);
-      expect(tester.widget<CheckboxListTile>(memberTile).value, isTrue);
-      expect(controller.events.single.memberIds, remote.memberIds);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(repository.lastReplacementExpectedVersion, existing.version);
+    expect(repository.replacedEvent, isNull);
+    expect(repository.replaceCalls, 1);
+    final conflictText = find.text(
+      '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
+      skipOffstage: false,
+    );
+    await _scrollIntoEditorViewport(tester, conflictText);
+    expect(conflictText, findsOneWidget);
+    await _scrollIntoEditorViewport(tester, memberTile);
+    expect(tester.widget<CheckboxListTile>(memberTile).value, isTrue);
+    expect(controller.events.single.memberIds, remote.memberIds);
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets(
-    'missing edit target becomes a terminal view instead of a create form',
-    (tester) async {
-      final auth = _TestAuth();
-      final repository = _CaptureRepository();
-      final existing = _event(title: '기존 일정');
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        user: _creator,
-        group: _group,
-        members: <PlannerMember>[_member(_creator.id, '작성자', isOwner: true)],
-        events: <PlannerEvent>[existing],
-      );
-      addTearDown(auth.dispose);
+  testWidgets('편집 대상이 없으면 생성 폼 대신 종료 화면이 된다', (tester) async {
+    final auth = _TestAuth();
+    final repository = _CaptureRepository();
+    final existing = _event(title: '기존 일정');
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: _creator,
+      group: _group,
+      members: <PlannerMember>[_member(_creator.id, '작성자', isOwner: true)],
+      events: <PlannerEvent>[existing],
+    );
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(
-        _app(controller, const EventEditorScreen(eventId: 'event-1')),
-      );
-      await tester.pump();
-      await tester.enterText(find.byType(TextField).first, '내가 수정한 초안');
+    await tester.pumpWidget(
+      _app(controller, const EventEditorScreen(eventId: 'event-1')),
+    );
+    await tester.pump();
+    await tester.enterText(find.byType(TextField).first, '내가 수정한 초안');
 
-      controller.events = const <PlannerEvent>[];
-      controller.notifyListeners();
-      await tester.pump();
+    controller.events = const <PlannerEvent>[];
+    controller.notifyListeners();
+    await tester.pump();
 
-      expect(find.text('일정을 찾을 수 없어요.'), findsOneWidget);
-      expect(find.text('내가 수정한 초안', skipOffstage: false), findsNothing);
-      expect(find.widgetWithText(TextButton, '저장'), findsNothing);
-      expect(find.widgetWithText(FilledButton, '일정 저장하기'), findsNothing);
-      expect(find.widgetWithText(OutlinedButton, '돌아가기'), findsOneWidget);
-      expect(repository.createdDraft, isNull);
-      expect(repository.updatedEvent, isNull);
-      expect(repository.replacedEvent, isNull);
+    expect(find.text('일정을 찾을 수 없어요.'), findsOneWidget);
+    expect(find.text('내가 수정한 초안', skipOffstage: false), findsNothing);
+    expect(find.widgetWithText(TextButton, '저장'), findsNothing);
+    expect(find.widgetWithText(FilledButton, '일정 저장하기'), findsNothing);
+    expect(find.widgetWithText(OutlinedButton, '돌아가기'), findsOneWidget);
+    expect(repository.createdDraft, isNull);
+    expect(repository.updatedEvent, isNull);
+    expect(repository.replacedEvent, isNull);
 
-      await tester.tap(find.widgetWithText(OutlinedButton, '돌아가기'));
-      await tester.pump();
-      expect(tester.takeException(), isNull);
-    },
-  );
+    await tester.tap(find.widgetWithText(OutlinedButton, '돌아가기'));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets('initial missing edit deep link is terminal and accessible', (
-    tester,
-  ) async {
+  testWidgets('최초 편집 딥 링크 누락이 종료 상태이며 접근 가능하다', (tester) async {
     final auth = _TestAuth();
     final repository = _CaptureRepository();
     final controller = _controller(
@@ -562,9 +544,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('transient detail lookup offers retry and then opens the event', (
-    tester,
-  ) async {
+  testWidgets('일시적 상세 조회가 재시도를 제공한 뒤 일정을 연다', (tester) async {
     final auth = _TestAuth();
     final repository = _DeepLinkRepository()
       ..lookupError = StateError('temporary network failure');
@@ -606,9 +586,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('authoritative null detail lookup remains terminal', (
-    tester,
-  ) async {
+  testWidgets('권위 있는 null 상세 조회가 종료 상태로 유지된다', (tester) async {
     final auth = _TestAuth();
     final repository = _DeepLinkRepository();
     final controller = _controller(
@@ -634,7 +612,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('root missing edit deep link falls back to home', (tester) async {
+  testWidgets('루트의 편집 딥 링크 누락이 홈으로 대체된다', (tester) async {
     final auth = _TestAuth();
     final repository = _CaptureRepository();
     final controller = _controller(
@@ -672,7 +650,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('pushed missing edit route still pops normally', (tester) async {
+  testWidgets('푸시된 편집 라우트가 누락돼도 정상적으로 닫힌다', (tester) async {
     final auth = _TestAuth();
     final repository = _CaptureRepository();
     final controller = _controller(
@@ -702,55 +680,50 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'stale participant stays neutral until event refresh removes it',
-    (tester) async {
-      final auth = _TestAuth();
-      final repository = _CaptureRepository();
-      final existing = _event(memberIds: const <String>['member-b']);
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        user: _creator,
-        group: _group,
-        members: <PlannerMember>[
-          _member(_creator.id, '작성자', isOwner: true),
-          _member('member-b', '멤버 B'),
-        ],
-        events: <PlannerEvent>[existing],
-      );
-      addTearDown(auth.dispose);
-
-      await tester.pumpWidget(
-        _app(controller, const EventEditorScreen(eventId: 'event-1')),
-      );
-      await tester.pump();
-      await _scrollIntoEditorViewport(tester, _memberTile('멤버 B'));
-
-      controller.members = <PlannerMember>[
+  testWidgets('오래된 참여자는 일정 새로 고침으로 제거될 때까지 중립적으로 표시된다', (tester) async {
+    final auth = _TestAuth();
+    final repository = _CaptureRepository();
+    final existing = _event(memberIds: const <String>['member-b']);
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: _creator,
+      group: _group,
+      members: <PlannerMember>[
         _member(_creator.id, '작성자', isOwner: true),
-      ];
-      controller.notifyListeners();
-      await tester.pump();
-      await _scrollIntoEditorViewport(tester, _memberTile('이전 멤버'));
-      expect(find.widgetWithText(CheckboxListTile, '이전 멤버'), findsOneWidget);
+        _member('member-b', '멤버 B'),
+      ],
+      events: <PlannerEvent>[existing],
+    );
+    addTearDown(auth.dispose);
 
-      controller.events = <PlannerEvent>[
-        existing.copyWith(
-          memberIds: const <String>[],
-          version: existing.version + 1,
-        ),
-      ];
-      controller.notifyListeners();
-      await tester.pump();
-      expect(find.widgetWithText(CheckboxListTile, '이전 멤버'), findsNothing);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    await tester.pumpWidget(
+      _app(controller, const EventEditorScreen(eventId: 'event-1')),
+    );
+    await tester.pump();
+    await _scrollIntoEditorViewport(tester, _memberTile('멤버 B'));
 
-  testWidgets('group owner can save participants but not event body', (
-    tester,
-  ) async {
+    controller.members = <PlannerMember>[
+      _member(_creator.id, '작성자', isOwner: true),
+    ];
+    controller.notifyListeners();
+    await tester.pump();
+    await _scrollIntoEditorViewport(tester, _memberTile('이전 멤버'));
+    expect(find.widgetWithText(CheckboxListTile, '이전 멤버'), findsOneWidget);
+
+    controller.events = <PlannerEvent>[
+      existing.copyWith(
+        memberIds: const <String>[],
+        version: existing.version + 1,
+      ),
+    ];
+    controller.notifyListeners();
+    await tester.pump();
+    expect(find.widgetWithText(CheckboxListTile, '이전 멤버'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('그룹 소유자는 참여자만 저장하고 일정 본문은 저장할 수 없다', (tester) async {
     final auth = _TestAuth();
     final repository = _CaptureRepository();
     final groupOwner = PlannerUser(
@@ -798,7 +771,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('ordinary participant remains read-only', (tester) async {
+  testWidgets('일반 참여자는 읽기 전용으로 유지된다', (tester) async {
     final auth = _TestAuth();
     final repository = _CaptureRepository();
     final participant = PlannerUser(
@@ -840,9 +813,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('home filter and card use participant assignments', (
-    tester,
-  ) async {
+  testWidgets('홈 필터와 카드가 참여자 할당을 사용한다', (tester) async {
     final auth = _TestAuth();
     final repository = _CaptureRepository();
     final event = _event(
@@ -881,62 +852,57 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'card names active participants and uses neutral stale fallback',
-    (tester) async {
-      final auth = _TestAuth();
-      final repository = _CaptureRepository();
-      final event = _event(
-        memberIds: const <String>['member-a', 'member-b', 'member-c', 'stale'],
-        title: '참여자 카드',
-      );
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        user: _creator,
-        group: _group,
-        members: <PlannerMember>[
-          _member('member-a', '멤버 A'),
-          _member('member-b', '멤버 B'),
-          _member('member-c', '멤버 C'),
-        ],
-        events: <PlannerEvent>[event],
-      );
-      controller.selectedDay = DateTime(2026, 8, 10);
-      final semantics = tester.ensureSemantics();
-      addTearDown(auth.dispose);
+  testWidgets('카드가 활성 참여자 이름을 표시하고 중립적인 오래된 대체값을 사용한다', (tester) async {
+    final auth = _TestAuth();
+    final repository = _CaptureRepository();
+    final event = _event(
+      memberIds: const <String>['member-a', 'member-b', 'member-c', 'stale'],
+      title: '참여자 카드',
+    );
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: _creator,
+      group: _group,
+      members: <PlannerMember>[
+        _member('member-a', '멤버 A'),
+        _member('member-b', '멤버 B'),
+        _member('member-c', '멤버 C'),
+      ],
+      events: <PlannerEvent>[event],
+    );
+    controller.selectedDay = DateTime(2026, 8, 10);
+    final semantics = tester.ensureSemantics();
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(_app(controller, const HomeScreen()));
-      await tester.pump();
+    await tester.pumpWidget(_app(controller, const HomeScreen()));
+    await tester.pump();
 
-      expect(
-        find.byWidgetPredicate(
-          (widget) => widget is Text && widget.data?.contains('멤버 A') == true,
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.byWidgetPredicate(
-          (widget) => widget is Text && widget.data?.contains('이전 멤버') == true,
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget is Semantics &&
-              widget.properties.label == '참여자 멤버 A, 멤버 B 외 1명, 이전 멤버',
-        ),
-        findsOneWidget,
-      );
-      semantics.dispose();
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is Text && widget.data?.contains('멤버 A') == true,
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is Text && widget.data?.contains('이전 멤버') == true,
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == '참여자 멤버 A, 멤버 B 외 1명, 이전 멤버',
+      ),
+      findsOneWidget,
+    );
+    semantics.dispose();
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets('card hides inactive member identity behind neutral fallback', (
-    tester,
-  ) async {
+  testWidgets('카드가 비활성 멤버 정보를 중립 대체 문구로 숨긴다', (tester) async {
     final auth = _TestAuth();
     final repository = _CaptureRepository();
     final event = _event(
@@ -981,62 +947,56 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'participant controls and save remain reachable at 2x text with keyboard inset',
-    (tester) async {
-      _useConstrainedViewport(tester);
-      final semantics = tester.ensureSemantics();
-      final auth = _TestAuth();
-      final repository = _CaptureRepository();
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        user: _creator,
-        group: _group,
-        members: <PlannerMember>[
-          _member(_creator.id, '작성자', isOwner: true),
-          _member('member-b', '멤버 B'),
-        ],
-      );
-      addTearDown(auth.dispose);
+  testWidgets('2배 텍스트와 키보드 인셋에서도 참여자 컨트롤과 저장에 접근할 수 있다', (tester) async {
+    _useConstrainedViewport(tester);
+    final semantics = tester.ensureSemantics();
+    final auth = _TestAuth();
+    final repository = _CaptureRepository();
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: _creator,
+      group: _group,
+      members: <PlannerMember>[
+        _member(_creator.id, '작성자', isOwner: true),
+        _member('member-b', '멤버 B'),
+      ],
+    );
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(
-        _largeText(_app(controller, const EventEditorScreen())),
-      );
-      await tester.pump();
-      final participantTile = _memberTile('멤버 B');
-      await _scrollIntoEditorViewport(tester, participantTile);
-      final participantRect = tester.getRect(participantTile);
-      expect(participantRect.top, greaterThanOrEqualTo(0));
-      expect(
-        participantRect.bottom,
-        lessThanOrEqualTo(tester.view.physicalSize.height),
-      );
-      expect(tester.getSize(participantTile).height, greaterThanOrEqualTo(48));
-      expect(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget is Semantics && widget.properties.label == '참여자 멤버 B',
-        ),
-        findsOneWidget,
-      );
-      await tester.tap(participantTile);
+    await tester.pumpWidget(
+      _largeText(_app(controller, const EventEditorScreen())),
+    );
+    await tester.pump();
+    final participantTile = _memberTile('멤버 B');
+    await _scrollIntoEditorViewport(tester, participantTile);
+    final participantRect = tester.getRect(participantTile);
+    expect(participantRect.top, greaterThanOrEqualTo(0));
+    expect(
+      participantRect.bottom,
+      lessThanOrEqualTo(tester.view.physicalSize.height),
+    );
+    expect(tester.getSize(participantTile).height, greaterThanOrEqualTo(48));
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics && widget.properties.label == '참여자 멤버 B',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(participantTile);
 
-      final save = find.widgetWithText(FilledButton, '일정 저장하기');
-      await _scrollIntoEditorViewport(tester, save);
-      final saveRect = tester.getRect(save);
-      expect(saveRect.top, greaterThanOrEqualTo(0));
-      expect(
-        saveRect.bottom,
-        lessThanOrEqualTo(tester.view.physicalSize.height),
-      );
-      expect(tester.getSize(save).height, greaterThanOrEqualTo(48));
+    final save = find.widgetWithText(FilledButton, '일정 저장하기');
+    await _scrollIntoEditorViewport(tester, save);
+    final saveRect = tester.getRect(save);
+    expect(saveRect.top, greaterThanOrEqualTo(0));
+    expect(saveRect.bottom, lessThanOrEqualTo(tester.view.physicalSize.height));
+    expect(tester.getSize(save).height, greaterThanOrEqualTo(48));
 
-      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.pump();
-      semantics.dispose();
-      expect(tester.takeException(), isNull);
-    },
-  );
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    semantics.dispose();
+    expect(tester.takeException(), isNull);
+  });
 }

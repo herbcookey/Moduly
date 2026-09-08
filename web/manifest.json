@@ -5,7 +5,7 @@
     "display": "standalone",
     "background_color": "#FFF7E8",
     "theme_color": "#2D8C83",
-    "description": "Moduly is a collaborative planner for everyday schedules.",
+    "description": "Moduly는 일상 일정을 함께 관리하는 플래너입니다.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

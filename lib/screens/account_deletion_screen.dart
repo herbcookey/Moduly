@@ -18,8 +18,8 @@ class AccountDeletionScreen extends StatefulWidget {
   final AccountDeletionRepository repository;
   final AccountDeletedCallback? onDeleted;
 
-  /// Opens the group-management surface when owned active groups need an
-  /// ownership transfer or archive before the user continues.
+  /// 사용자가 계속하기 전에 소유 중인 활성 그룹의 소유권을 이전하거나 보관해야 할 때
+  /// 그룹 관리 화면을 연다.
   final VoidCallback? onManageGroups;
 
   @override
@@ -91,8 +91,8 @@ class _AccountDeletionScreenState extends State<AccountDeletionScreen> {
 
   Future<void> _deleteAccount() async {
     if (_isSubmitting || _completed || _isLoadingImpact) return;
-    // A typed preflight is mandatory.  Without it there is no trustworthy
-    // impact summary to present or confirmation state to execute.
+    // 형식이 지정된 사전 점검은 필수다. 이것이 없으면 표시할 영향 요약이나 실행할
+    // 확인 상태를 신뢰할 수 없다.
     if (_preflightUnsupported || _impact == null) return;
     final confirmation = _confirmationController.text.trim();
     if (confirmation != accountDeletionConfirmation) {

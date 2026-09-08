@@ -9,13 +9,12 @@ typedef EventNotificationIntCallback = FutureOr<void> Function(int value);
 typedef EventNotificationChannelCallback =
     FutureOr<void> Function(NotificationChannel channel);
 
-/// Reminder controls embedded in an event editor.
+/// 일정 편집기에 포함되는 알림 컨트롤이다.
 ///
-/// The widget is deliberately presentation-only. The event editor owns the
-/// draft and decides when the callbacks are persisted; this keeps a recurring
-/// event's reminder preference series-wide without silently writing an
-/// occurrence override.  All-day reminders are described in civil calendar
-/// days and fire at 09:00 in the event's IANA timezone.
+/// 이 위젯은 의도적으로 표시만 담당한다. 일정 편집기가 초안을 소유하고
+/// 콜백을 저장할 시점을 결정한다. 따라서 반복 일정의 알림 설정은 개별 발생분을
+/// 암묵적으로 덮어쓰지 않고 전체 시리즈에 동일하게 유지된다. 종일 일정 알림은
+/// 민간력 날짜 단위로 표현하며, 일정의 IANA 시간대 기준 09:00에 울린다.
 class EventNotificationControls extends StatefulWidget {
   const EventNotificationControls({
     required this.allDay,
@@ -90,9 +89,9 @@ class _EventNotificationControlsState extends State<EventNotificationControls> {
       await action();
       return true;
     } catch (_) {
-      // The editor owns persistence and may reject a draft asynchronously.
-      // Keep this presentation widget from leaking an unhandled future; the
-      // caller below restores the previous control value on failure.
+      // 저장은 편집기가 담당하며 초안을 비동기로 거부할 수 있다.
+      // 이 표시 위젯에서 처리되지 않은 Future가 새어 나오지 않게 한다. 실패하면
+      // 아래 호출자가 컨트롤 값을 이전 상태로 복원한다.
       return false;
     } finally {
       if (mounted) setState(() => _busy = false);

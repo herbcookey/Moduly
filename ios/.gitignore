@@ -27,10 +27,10 @@ Flutter/flutter_export_environment.sh
 ServiceDefinitions.json
 Runner/GeneratedPluginRegistrant.*
 
-# Local signing overrides must never be committed.
+# 로컬 서명 재정의 파일은 절대 커밋하지 않는다.
 Flutter/Signing.xcconfig
 
-# Exceptions to above rules.
+# 위 규칙의 예외다.
 !default.mode1v3
 !default.mode2v3
 !default.pbxuser

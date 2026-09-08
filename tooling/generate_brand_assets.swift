@@ -9,7 +9,7 @@ let sourceURL = root.appendingPathComponent("assets/brand/moduly_mark_source.png
 
 guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
       let sourceImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-    fatalError("Unable to read (sourceURL.path)")
+    fatalError("소스 이미지를 읽을 수 없습니다: \(sourceURL.path)")
 }
 
 let cream = CGColor(red: 1.0, green: 0.969, blue: 0.91, alpha: 1.0)
@@ -111,4 +111,4 @@ try renderNamed("ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage@3x.
 // 크림색 레이어 중앙에 배치하는 Android 시작 배경 비트맵이다.
 try renderNamed("android/app/src/main/res/drawable-nodpi/moduly_splash.png", width: 512, height: 512, background: cream, inset: 0.0, markScale: 0.50)
 
-print("Generated Moduly brand assets from " + sourceURL.path)
+print("다음 소스에서 Moduly 브랜드 에셋을 생성했습니다: " + sourceURL.path)

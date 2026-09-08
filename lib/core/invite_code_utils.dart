@@ -8,12 +8,11 @@ final RegExp _shortInviteCodePattern = RegExp(
 );
 final RegExp _legacyInviteCodePattern = RegExp(r'^[0-9a-fA-F]{48}$');
 
-/// Returns the canonical bearer-token form accepted by invite links.
+/// 초대 링크가 허용하는 표준 전달자 토큰 형식을 반환한다.
 ///
-/// Manual code entry remains intentionally more permissive through
-/// [normalizeInviteCode], which strips display separators.  Link parsing must
-/// call this strict helper instead so a path can never contain hidden
-/// separators, whitespace, or an unsupported token shape.
+/// 수동 코드 입력은 표시용 구분자를 제거하는 [normalizeInviteCode]를 통해
+/// 의도적으로 더 관대하게 처리한다. 링크를 파싱할 때는 경로에 숨은 구분자나
+/// 공백, 지원하지 않는 토큰 형식이 포함되지 않도록 이 엄격한 헬퍼를 사용해야 한다.
 String? normalizeStrictInviteToken(String value) {
   if (value.isEmpty || value.trim() != value) return null;
   if (value.contains(RegExp(r'[\s\u0000-\u001f\u007f]'))) return null;

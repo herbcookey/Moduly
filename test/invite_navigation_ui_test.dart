@@ -103,8 +103,8 @@ class _InviteRepository extends LocalScheduleRepository {
     if (invite == null || invite.groupId != groupId) {
       return const <InviteCode>[];
     }
-    // Listing never returns bearer material, even though the creation RPC
-    // returned it once to the one-shot dialog.
+    // 생성 RPC가 일회성 대화상자에 전달자 정보를 한 번 반환했더라도 목록 조회는
+    // 이를 절대 반환하지 않는다.
     return <InviteCode>[
       InviteCode(
         id: invite.id,
@@ -183,7 +183,7 @@ class _RecordingInviteShareService implements InviteShareService {
     Uri? link,
     Rect? sharePositionOrigin,
   }) async {
-    if (fail) throw StateError('share failed');
+    if (fail) throw StateError('공유에 실패했습니다');
     this.code = code;
     this.link = link;
     origin = sharePositionOrigin;
@@ -238,9 +238,7 @@ String _routerLocation(GoRouter router) =>
     router.routerDelegate.currentConfiguration.uri.toString();
 
 void main() {
-  testWidgets('direct invite captures then replaces the token route', (
-    tester,
-  ) async {
+  testWidgets('직접 초대가 토큰 라우트를 캡처한 뒤 교체한다', (tester) async {
     final (router, _) = await _pumpInviteApp(tester);
 
     router.go('/invite/2345ABCDEFGH');
@@ -255,9 +253,7 @@ void main() {
     expect(_routerLocation(router), '/login');
   });
 
-  testWidgets('malformed invite paths never become pending or visible', (
-    tester,
-  ) async {
+  testWidgets('잘못된 초대 경로가 대기 상태나 화면에 나타나지 않는다', (tester) async {
     final (router, _) = await _pumpInviteApp(tester);
     router.go('/invite/2345ABCDEFGH?source=untrusted');
     await tester.pumpAndSettle();
@@ -270,9 +266,7 @@ void main() {
     expect(_routerLocation(router), '/login');
   });
 
-  testWidgets('nested web base path uses the complete browser location', (
-    tester,
-  ) async {
+  testWidgets('중첩된 웹 기본 경로가 전체 브라우저 위치를 사용한다', (tester) async {
     final (router, _) = await _pumpInviteApp(
       tester,
       config: const AppConfig(
@@ -284,7 +278,7 @@ void main() {
         Uri.parse('https://planner.example.test/app/invite/2345ABCDEFGH'),
       ),
     );
-    // PathUrlStrategy presents the stripped path to GoRouter.
+    // PathUrlStrategy는 앞부분이 제거된 경로를 GoRouter에 제공한다.
     router.go('/invite/2345ABCDEFGH');
     await tester.pumpAndSettle();
 
@@ -295,9 +289,7 @@ void main() {
     expect(container.read(plannerControllerProvider).hasPendingInvite, isTrue);
   });
 
-  testWidgets('nested web base rejects wrong origin, root, and repetition', (
-    tester,
-  ) async {
+  testWidgets('중첩된 웹 기본 경로가 잘못된 출처, 루트, 반복을 거부한다', (tester) async {
     const nested = AppConfig(
       supabaseUrl: '',
       supabasePublishableKey: '',
@@ -326,9 +318,7 @@ void main() {
     }
   });
 
-  testWidgets('invite-shaped unmatched paths are scrubbed before error UI', (
-    tester,
-  ) async {
+  testWidgets('초대 형태의 불일치 경로를 오류 UI 전에 정제한다', (tester) async {
     final (router, _) = await _pumpInviteApp(tester);
     router.go('/wrong-root/invite/2345ABCDEFGH');
     await tester.pumpAndSettle();
@@ -341,9 +331,7 @@ void main() {
     expect(container.read(plannerControllerProvider).hasPendingInvite, isFalse);
   });
 
-  testWidgets('signed-out invite flow has a token-free cancel action', (
-    tester,
-  ) async {
+  testWidgets('로그아웃 초대 흐름에 토큰 없는 취소 동작이 있다', (tester) async {
     final (router, _) = await _pumpInviteApp(tester);
     router.go('/invite/2345ABCDEFGH');
     await tester.pumpAndSettle();
@@ -360,9 +348,7 @@ void main() {
     expect(container.read(plannerControllerProvider).hasPendingInvite, isFalse);
   });
 
-  testWidgets('logged-out invite resumes on the preview after auth', (
-    tester,
-  ) async {
+  testWidgets('로그아웃 초대가 인증 후 미리보기에서 재개된다', (tester) async {
     final (router, _) = await _pumpInviteApp(tester);
     router.go('/invite/2345ABCDEFGH');
     await tester.pumpAndSettle();
@@ -373,8 +359,8 @@ void main() {
     final controller = container.read(plannerControllerProvider);
     expect(controller.hasPendingInvite, isTrue);
 
-    // Model the auth repository's successful session event without exposing
-    // a bearer token through the route or widget API.
+    // 라우트나 위젯 API를 통해 전달자 토큰을 노출하지 않고 인증 저장소의 세션
+    // 성공 이벤트를 재현한다.
     controller
       ..user = _inviteUser
       ..authFlowState = AuthFlowState.signedIn
@@ -385,9 +371,7 @@ void main() {
     expect(find.text(_inviteGroup.name), findsOneWidget);
   });
 
-  testWidgets('authenticated invite previews before an explicit single join', (
-    tester,
-  ) async {
+  testWidgets('인증된 초대가 명시적 단일 참여 전에 미리보기를 표시한다', (tester) async {
     final (router, repository) = await _pumpInviteApp(
       tester,
       user: _inviteUser,
@@ -402,8 +386,8 @@ void main() {
     expect(repository.previewCalls, 1);
     expect(repository.joinCalls, 0);
 
-    // The first tap owns the operation; the second tap sees the disabled
-    // accepting state and cannot issue a duplicate repository call.
+    // 첫 번째 탭이 작업을 소유한다. 두 번째 탭에서는 수락 동작이 비활성화되어
+    // 저장소를 중복 호출할 수 없다.
     await tester.tap(find.text('이 그룹에 참여'));
     await tester.tap(find.text('이 그룹에 참여'), warnIfMissed: false);
     await tester.pumpAndSettle();
@@ -411,52 +395,44 @@ void main() {
     expect(_routerLocation(router), '/home');
   });
 
-  testWidgets(
-    'expired accept stays on safe invite error instead of navigating',
-    (tester) async {
-      final (router, repository) = await _pumpInviteApp(
-        tester,
-        user: _inviteUser,
-        expiredPreview: true,
-      );
-      router.go('/invite/2345ABCDEFGH');
-      await tester.pumpAndSettle();
+  testWidgets('만료된 수락이 이동하지 않고 안전한 초대 오류에 머문다', (tester) async {
+    final (router, repository) = await _pumpInviteApp(
+      tester,
+      user: _inviteUser,
+      expiredPreview: true,
+    );
+    router.go('/invite/2345ABCDEFGH');
+    await tester.pumpAndSettle();
 
-      expect(find.text('이 그룹에 참여'), findsOneWidget);
-      await tester.tap(find.text('이 그룹에 참여'));
-      await tester.pumpAndSettle();
+    expect(find.text('이 그룹에 참여'), findsOneWidget);
+    await tester.tap(find.text('이 그룹에 참여'));
+    await tester.pumpAndSettle();
 
-      expect(repository.joinCalls, 0);
-      expect(_routerLocation(router), '/invite');
-      expect(find.text('초대 링크가 만료되었거나 더 이상 유효하지 않아요.'), findsOneWidget);
-      expect(find.byType(GroupPickerScreen), findsNothing);
-    },
-  );
+    expect(repository.joinCalls, 0);
+    expect(_routerLocation(router), '/invite');
+    expect(find.text('초대 링크가 만료되었거나 더 이상 유효하지 않아요.'), findsOneWidget);
+    expect(find.byType(GroupPickerScreen), findsNothing);
+  });
 
-  testWidgets(
-    'accept exception stays on safe invite error instead of navigating',
-    (tester) async {
-      final (router, repository) = await _pumpInviteApp(
-        tester,
-        user: _inviteUser,
-        failJoin: true,
-      );
-      router.go('/invite/2345ABCDEFGH');
-      await tester.pumpAndSettle();
+  testWidgets('수락 예외가 이동하지 않고 안전한 초대 오류에 머문다', (tester) async {
+    final (router, repository) = await _pumpInviteApp(
+      tester,
+      user: _inviteUser,
+      failJoin: true,
+    );
+    router.go('/invite/2345ABCDEFGH');
+    await tester.pumpAndSettle();
 
-      await tester.tap(find.text('이 그룹에 참여'));
-      await tester.pumpAndSettle();
+    await tester.tap(find.text('이 그룹에 참여'));
+    await tester.pumpAndSettle();
 
-      expect(repository.joinCalls, 1);
-      expect(_routerLocation(router), '/invite');
-      expect(find.text('초대 링크가 만료되었거나 더 이상 유효하지 않아요.'), findsOneWidget);
-      expect(find.byType(GroupPickerScreen), findsNothing);
-    },
-  );
+    expect(repository.joinCalls, 1);
+    expect(_routerLocation(router), '/invite');
+    expect(find.text('초대 링크가 만료되었거나 더 이상 유효하지 않아요.'), findsOneWidget);
+    expect(find.byType(GroupPickerScreen), findsNothing);
+  });
 
-  testWidgets('already-member committed-safe failure does not navigate', (
-    tester,
-  ) async {
+  testWidgets('이미 멤버인 커밋 안전 실패는 이동하지 않는다', (tester) async {
     final (router, repository) = await _pumpInviteApp(
       tester,
       user: _inviteUser,
@@ -475,9 +451,7 @@ void main() {
     expect(find.byType(GroupPickerScreen), findsNothing);
   });
 
-  testWidgets('cancel clears the pending invite and returns to groups', (
-    tester,
-  ) async {
+  testWidgets('취소가 대기 초대를 지우고 그룹으로 돌아간다', (tester) async {
     final (router, _) = await _pumpInviteApp(tester, user: _inviteUser);
     router.go('/invite/2345ABCDEFGH');
     await tester.pumpAndSettle();
@@ -493,9 +467,7 @@ void main() {
     expect(container.read(plannerControllerProvider).hasPendingInvite, isFalse);
   });
 
-  testWidgets('unavailable preview has a safe retry and no token text', (
-    tester,
-  ) async {
+  testWidgets('사용 불가 미리보기에 안전한 재시도가 있고 토큰 문구는 없다', (tester) async {
     final (router, repository) = await _pumpInviteApp(
       tester,
       user: _inviteUser,
@@ -510,9 +482,7 @@ void main() {
     expect(repository.joinCalls, 0);
   });
 
-  testWidgets('rate limited preview keeps a distinct safe retry message', (
-    tester,
-  ) async {
+  testWidgets('속도 제한 미리보기가 구별되는 안전한 재시도 메시지를 유지한다', (tester) async {
     final (router, repository) = await _pumpInviteApp(
       tester,
       user: _inviteUser,
@@ -529,9 +499,7 @@ void main() {
     expect(find.text('요청이 너무 많아요. 잠시 후 다시 시도해 주세요.'), findsOneWidget);
   });
 
-  testWidgets('already-member invite clears pending before group navigation', (
-    tester,
-  ) async {
+  testWidgets('이미 멤버인 초대가 그룹 이동 전에 대기 상태를 지운다', (tester) async {
     final (router, repository) = await _pumpInviteApp(
       tester,
       user: _inviteUser,
@@ -549,16 +517,14 @@ void main() {
     await tester.tap(find.text('그룹 목록으로 이동'), warnIfMissed: false);
     await tester.pumpAndSettle();
 
-    // Already-member previews still use the authoritative idempotent join RPC
-    // once; the controller clears this exact pending generation afterward.
+    // 이미 멤버인 미리보기도 권위 있고 멱등인 참여 RPC를 한 번 사용한다.
+    // 이후 컨트롤러는 정확히 이 대기 세대를 지운다.
     expect(repository.joinCalls, 1);
     expect(container.read(plannerControllerProvider).hasPendingInvite, isFalse);
     expect(_routerLocation(router), '/groups');
   });
 
-  testWidgets('members show one-shot copy/share and listed token-free notice', (
-    tester,
-  ) async {
+  testWidgets('멤버 화면이 일회성 복사/공유와 토큰 없는 목록 안내를 표시한다', (tester) async {
     final share = _RecordingInviteShareService();
     await _pumpInviteApp(
       tester,
@@ -570,8 +536,8 @@ void main() {
       shareService: share,
     );
 
-    // Use the regular group-picker flow to reach Members without manufacturing
-    // token state in the widget test.
+    // 위젯 테스트에서 토큰 상태를 만들지 않고 일반 그룹 선택 흐름으로 멤버
+    // 화면에 진입한다.
     await tester.tap(find.text('초대 테스트 그룹'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('멤버').last);
@@ -586,8 +552,8 @@ void main() {
     expect(find.text('공유'), findsOneWidget);
     await tester.tap(find.text('코드 복사'));
     await tester.pump();
-    // Clipboard channels are unavailable in a pure widget test; the control
-    // must still remain mounted and usable when that platform call fails.
+    // 순수 위젯 테스트에서는 클립보드 채널을 사용할 수 없다. 해당 플랫폼
+    // 호출이 실패해도 컨트롤은 계속 마운트되어 사용할 수 있어야 한다.
     expect(find.text('코드 복사'), findsOneWidget);
 
     await tester.tap(find.text('공유'));
@@ -606,30 +572,27 @@ void main() {
     expect(find.text('복사와 공유는 생성 직후에만 가능해요.'), findsOneWidget);
   });
 
-  testWidgets(
-    'invite controls remain reachable at large text on a narrow view',
-    (tester) async {
-      tester.view
-        ..physicalSize = const Size(640, 1136)
-        ..devicePixelRatio = 2;
-      tester.platformDispatcher.textScaleFactorTestValue = 2;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-      final (router, _) = await _pumpInviteApp(tester, user: _inviteUser);
-      router.go('/invite/2345ABCDEFGH');
-      await tester.pumpAndSettle();
+  testWidgets('좁은 화면의 큰 텍스트에서도 초대 컨트롤에 접근할 수 있다', (tester) async {
+    tester.view
+      ..physicalSize = const Size(640, 1136)
+      ..devicePixelRatio = 2;
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final (router, _) = await _pumpInviteApp(tester, user: _inviteUser);
+    router.go('/invite/2345ABCDEFGH');
+    await tester.pumpAndSettle();
 
-      final semantics = tester.ensureSemantics();
-      expect(find.bySemanticsLabel(RegExp('그룹에 참여')), findsOneWidget);
-      final button = tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, '이 그룹에 참여'),
-      );
-      expect(
-        button.style?.minimumSize?.resolve(<WidgetState>{})?.height ?? 48,
-        greaterThanOrEqualTo(48),
-      );
-      semantics.dispose();
-    },
-  );
+    final semantics = tester.ensureSemantics();
+    expect(find.bySemanticsLabel(RegExp('그룹에 참여')), findsOneWidget);
+    final button = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, '이 그룹에 참여'),
+    );
+    expect(
+      button.style?.minimumSize?.resolve(<WidgetState>{})?.height ?? 48,
+      greaterThanOrEqualTo(48),
+    );
+    semantics.dispose();
+  });
 }

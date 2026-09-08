@@ -61,10 +61,9 @@ class _TestAuth extends AuthRepository {
   }
 }
 
-/// Captures the recurrence mutation emitted by the editor when a legacy
-/// singleton is converted to a recurring series.  The controller still owns
-/// the scope/defaulting logic; this double only avoids coupling the widget
-/// test to a backend.
+/// 레거시 단일 일정이 반복 시리즈로 변환될 때 편집기가 내보내는 반복 변경을
+/// 캡처한다. 범위와 기본값 로직은 여전히 컨트롤러가 소유하며, 이 테스트 대역은
+/// 위젯 테스트가 백엔드와 결합되는 것만 피한다.
 class _SingletonConversionRepository extends LocalScheduleRepository {
   EventDraft? recurrenceDraft;
   PlannerEvent? recurrenceEvent;
@@ -144,7 +143,7 @@ class _SingletonConversionRepository extends LocalScheduleRepository {
   }) async {
     final source = replacementSource;
     if (source == null || source.id != eventId) {
-      throw StateError('replacement source is missing');
+      throw StateError('교체 원본이 없습니다');
     }
     replacedEventId = eventId;
     replacedMemberIds = memberIds.toList(growable: false);
@@ -169,7 +168,7 @@ class _SingletonConversionRepository extends LocalScheduleRepository {
   }) async {
     final source = replacementSource;
     if (source == null || source.id != event.id) {
-      throw StateError('replacement source is missing');
+      throw StateError('교체 원본이 없습니다');
     }
     replacedEventId = event.id;
     replacedMemberIds = memberIds.toList(growable: false);
@@ -216,9 +215,8 @@ class _SingletonConversionRepository extends LocalScheduleRepository {
   }
 }
 
-/// A detail repository with a deliberately late A response.  This exercises
-/// the route-reuse path where GoRouter keeps the editor State alive while the
-/// route identity changes to B.
+/// A 응답을 의도적으로 늦게 보내는 상세 저장소다. 라우트 식별자가 B로 바뀌는
+/// 동안 GoRouter가 편집기 State를 유지하는 라우트 재사용 경로를 검사한다.
 class _RouteReuseRepository extends LocalScheduleRepository {
   _RouteReuseRepository({required this.pendingA, required this.eventB});
 
@@ -326,9 +324,7 @@ PlannerEvent _occurrence({RecurrenceRule? rule}) => PlannerEvent(
 );
 
 void main() {
-  testWidgets('repeat editor defaults to none and emits a weekly rule', (
-    tester,
-  ) async {
+  testWidgets('반복 편집기의 기본값이 없음이며 주간 규칙을 내보낸다', (tester) async {
     RecurrenceRule? emitted;
     final key = GlobalKey<RecurrenceEditorState>();
     await tester.pumpWidget(
@@ -364,9 +360,7 @@ void main() {
     expect(key.currentState?.validateRule(), emitted);
   });
 
-  testWidgets('repeat editor validates interval, count, and monthly clamp', (
-    tester,
-  ) async {
+  testWidgets('반복 편집기가 간격, 횟수, 월간 제한을 검증한다', (tester) async {
     final key = GlobalKey<RecurrenceEditorState>();
     await tester.pumpWidget(
       MaterialApp(
@@ -389,8 +383,8 @@ void main() {
     await tester.tap(find.text('횟수'));
     await tester.pumpAndSettle();
     final fields = find.byType(TextFormField);
-    // The monthly-day field is followed by the count field; all numeric
-    // fields remain keyboard-editable at narrow widths.
+    // 월간 날짜 필드 뒤에 횟수 필드가 오며, 좁은 너비에서도 모든 숫자 필드는
+    // 키보드로 편집할 수 있다.
     expect(fields, findsNWidgets(3));
     final count = fields.at(2);
     await tester.enterText(count, '0');
@@ -401,9 +395,7 @@ void main() {
     expect(key.currentState?.validateRule(), isNull);
   });
 
-  testWidgets('editing a singleton sends an all-scope recurring conversion', (
-    tester,
-  ) async {
+  testWidgets('단일 일정 편집이 전체 범위 반복 변환을 보낸다', (tester) async {
     final auth = _TestAuth(currentUser: null);
     final repository = _SingletonConversionRepository();
     final event = PlannerEvent(
@@ -462,9 +454,7 @@ void main() {
     expect(find.text('home'), findsOneWidget);
   });
 
-  testWidgets('all-scope edit can convert a recurring anchor back to single', (
-    tester,
-  ) async {
+  testWidgets('전체 범위 편집이 반복 기준 일정을 단일 일정으로 되돌릴 수 있다', (tester) async {
     final auth = _TestAuth(currentUser: null);
     final repository = _SingletonConversionRepository();
     final event = PlannerEvent(
@@ -520,9 +510,7 @@ void main() {
     expect(find.text('home'), findsOneWidget);
   });
 
-  testWidgets('reused editor discards stale lookup and saves only route B', (
-    tester,
-  ) async {
+  testWidgets('재사용 편집기가 오래된 조회를 버리고 라우트 B만 저장한다', (tester) async {
     final auth = _TestAuth(currentUser: null);
     final pendingA = Completer<PlannerEvent?>();
     final eventB = PlannerEvent(
@@ -566,7 +554,7 @@ void main() {
     );
     await tester.pump();
 
-    // Reuse the same editor State for B before A's detail request settles.
+    // A의 상세 요청이 완료되기 전에 같은 편집기 State를 B에 재사용한다.
     router.go('/event/route-B');
     await tester.pumpAndSettle();
     final titleField = tester.widget<TextFormField>(
@@ -608,9 +596,7 @@ void main() {
     expect(find.text('home'), findsOneWidget);
   });
 
-  testWidgets('reused editor reseeds a different occurrence before save', (
-    tester,
-  ) async {
+  testWidgets('재사용 편집기가 저장 전 다른 발생 일정으로 다시 시드한다', (tester) async {
     final auth = _TestAuth(currentUser: null);
     final first = _occurrence();
     const secondKey = 'o00000000000000000002';
@@ -711,9 +697,7 @@ void main() {
     expect(find.text('home'), findsOneWidget);
   });
 
-  testWidgets('scope dialog defaults to this and cancel is a no-op', (
-    tester,
-  ) async {
+  testWidgets('범위 대화상자의 기본값이 이번 일정이며 취소는 무동작이다', (tester) async {
     EventEditScope? result;
     await tester.pumpWidget(
       MaterialApp(
@@ -743,9 +727,7 @@ void main() {
     expect(result, isNull);
   });
 
-  testWidgets('edit and delete scope dialogs cover every choice', (
-    tester,
-  ) async {
+  testWidgets('편집 및 삭제 범위 대화상자가 모든 선택지를 제공한다', (tester) async {
     EventEditScope? result;
     var deleting = false;
     await tester.pumpWidget(
@@ -803,9 +785,7 @@ void main() {
     expect(result, isNull);
   });
 
-  testWidgets('repeated cards announce a badge and preserve occurrence route', (
-    tester,
-  ) async {
+  testWidgets('반복 카드가 배지를 알리고 발생 일정 라우트를 보존한다', (tester) async {
     final auth = _TestAuth();
     final event = _occurrence();
     final controller = _controller(auth: auth, events: <PlannerEvent>[event]);
@@ -841,9 +821,7 @@ void main() {
     );
   });
 
-  testWidgets('occurrence editor shows inherited fields and participant lock', (
-    tester,
-  ) async {
+  testWidgets('발생 일정 편집기가 상속 필드와 참여자 잠금을 표시한다', (tester) async {
     final auth = _TestAuth(currentUser: null);
     final event = _occurrence();
     final controller = _controller(auth: auth, events: <PlannerEvent>[event]);
@@ -887,212 +865,196 @@ void main() {
     await tester.tap(find.text('전체 일정'));
     await tester.tap(find.widgetWithText(FilledButton, '저장'));
     await tester.pumpAndSettle();
-    // The event creator is always retained in a recurring series, including
-    // an all-scope participant edit.
+    // 전체 범위 참여자 편집을 포함해 반복 시리즈에는 일정 생성자가 항상 유지된다.
     expect(tester.widget<CheckboxListTile>(memberTile).onChanged, isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(milliseconds: 300));
   });
 
-  testWidgets(
-    'this-occurrence scope cannot send participant changes outside all scope',
-    (tester) async {
-      final auth = _TestAuth(currentUser: null);
-      final repository = _SingletonConversionRepository();
-      final event = _occurrence();
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        events: <PlannerEvent>[event],
-      );
-      addTearDown(auth.dispose);
-      final router = GoRouter(
-        initialLocation: '/event/series-1?occurrence=${event.occurrenceKey}',
-        routes: <RouteBase>[
-          GoRoute(
-            path: '/event/:id',
-            builder: (context, state) => EventEditorScreen(
-              eventId: state.pathParameters['id'],
-              occurrenceKey: state.uri.queryParameters['occurrence'],
-            ),
+  testWidgets('이번 일정 범위는 전체 범위 밖의 참여자 변경을 보낼 수 없다', (tester) async {
+    final auth = _TestAuth(currentUser: null);
+    final repository = _SingletonConversionRepository();
+    final event = _occurrence();
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      events: <PlannerEvent>[event],
+    );
+    addTearDown(auth.dispose);
+    final router = GoRouter(
+      initialLocation: '/event/series-1?occurrence=${event.occurrenceKey}',
+      routes: <RouteBase>[
+        GoRoute(
+          path: '/event/:id',
+          builder: (context, state) => EventEditorScreen(
+            eventId: state.pathParameters['id'],
+            occurrenceKey: state.uri.queryParameters['occurrence'],
           ),
-          GoRoute(
-            path: '/home',
-            builder: (context, state) => const Text('home'),
-          ),
-        ],
-      );
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: <Override>[
-            plannerControllerProvider.overrideWith((ref) => controller),
-          ],
-          child: MaterialApp.router(routerConfig: router),
         ),
-      );
-      await tester.pumpAndSettle();
-
-      final scopeButton = find.widgetWithText(
-        OutlinedButton,
-        '참여자 변경 범위 선택',
-        skipOffstage: false,
-      );
-      await tester.drag(find.byType(ListView), const Offset(0, -500));
-      await tester.pumpAndSettle();
-      await tester.tap(scopeButton);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('이번 일정만'));
-      await tester.tap(find.widgetWithText(FilledButton, '저장'));
-      await tester.pumpAndSettle();
-      final memberTile = find.widgetWithText(
-        CheckboxListTile,
-        '반복 사용자',
-        skipOffstage: false,
-      );
-      expect(tester.widget<CheckboxListTile>(memberTile).onChanged, isNull);
-      await tester.tap(find.widgetWithText(TextButton, '저장'));
-      await tester.pumpAndSettle();
-
-      expect(repository.recurrenceScope, EventEditScope.thisOccurrence);
-      expect(repository.recurrenceDraft?.memberIds, event.memberIds);
-      expect(find.text('home'), findsOneWidget);
-    },
-  );
-
-  testWidgets(
-    'group owner can change recurring members without author body access',
-    (tester) async {
-      final auth = _TestAuth(currentUser: null);
-      final semantics = tester.ensureSemantics();
-      final repository = _SingletonConversionRepository();
-      final event = PlannerEvent(
-        id: 'owner-series',
-        seriesId: 'owner-series',
-        occurrenceKey: 'o00000000000000000001',
-        occurrenceIndex: 1,
-        isOccurrence: true,
-        recurrenceRule: _weeklyRule(),
-        groupId: _ownerGroup.id,
-        title: '소유자 관리 회의',
-        startAt: DateTime.utc(2026, 8, 10, 9),
-        endAt: DateTime.utc(2026, 8, 10, 10),
-        ownerId: _user.id,
-        memberIds: const <String>[_userId],
-      );
-      repository.replacementSource = event;
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        user: _groupOwner,
-        group: _ownerGroup,
-        members: const <PlannerMember>[
-          PlannerMember(
-            id: _groupOwnerId,
-            name: '그룹 소유자',
-            email: 'group-owner@example.com',
-            isOwner: true,
-          ),
-          PlannerMember(
-            id: _userId,
-            name: '반복 사용자',
-            email: 'recurrence@example.com',
-          ),
+        GoRoute(path: '/home', builder: (context, state) => const Text('home')),
+      ],
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: <Override>[
+          plannerControllerProvider.overrideWith((ref) => controller),
         ],
-        events: <PlannerEvent>[event],
-      );
-      addTearDown(auth.dispose);
-      final router = GoRouter(
-        initialLocation:
-            '/event/owner-series?occurrence=${event.occurrenceKey}',
-        routes: <RouteBase>[
-          GoRoute(
-            path: '/event/:id',
-            builder: (context, state) => EventEditorScreen(
-              eventId: state.pathParameters['id'],
-              occurrenceKey: state.uri.queryParameters['occurrence'],
-            ),
-          ),
-          GoRoute(
-            path: '/home',
-            builder: (context, state) => const Text('home'),
-          ),
-        ],
-      );
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: <Override>[
-            plannerControllerProvider.overrideWith((ref) => controller),
-          ],
-          child: MaterialApp.router(routerConfig: router),
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final scopeButton = find.widgetWithText(
+      OutlinedButton,
+      '참여자 변경 범위 선택',
+      skipOffstage: false,
+    );
+    await tester.drag(find.byType(ListView), const Offset(0, -500));
+    await tester.pumpAndSettle();
+    await tester.tap(scopeButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('이번 일정만'));
+    await tester.tap(find.widgetWithText(FilledButton, '저장'));
+    await tester.pumpAndSettle();
+    final memberTile = find.widgetWithText(
+      CheckboxListTile,
+      '반복 사용자',
+      skipOffstage: false,
+    );
+    expect(tester.widget<CheckboxListTile>(memberTile).onChanged, isNull);
+    await tester.tap(find.widgetWithText(TextButton, '저장'));
+    await tester.pumpAndSettle();
+
+    expect(repository.recurrenceScope, EventEditScope.thisOccurrence);
+    expect(repository.recurrenceDraft?.memberIds, event.memberIds);
+    expect(find.text('home'), findsOneWidget);
+  });
+
+  testWidgets('그룹 소유자가 작성자 본문 권한 없이 반복 일정 멤버를 바꿀 수 있다', (tester) async {
+    final auth = _TestAuth(currentUser: null);
+    final semantics = tester.ensureSemantics();
+    final repository = _SingletonConversionRepository();
+    final event = PlannerEvent(
+      id: 'owner-series',
+      seriesId: 'owner-series',
+      occurrenceKey: 'o00000000000000000001',
+      occurrenceIndex: 1,
+      isOccurrence: true,
+      recurrenceRule: _weeklyRule(),
+      groupId: _ownerGroup.id,
+      title: '소유자 관리 회의',
+      startAt: DateTime.utc(2026, 8, 10, 9),
+      endAt: DateTime.utc(2026, 8, 10, 10),
+      ownerId: _user.id,
+      memberIds: const <String>[_userId],
+    );
+    repository.replacementSource = event;
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: _groupOwner,
+      group: _ownerGroup,
+      members: const <PlannerMember>[
+        PlannerMember(
+          id: _groupOwnerId,
+          name: '그룹 소유자',
+          email: 'group-owner@example.com',
+          isOwner: true,
         ),
-      );
-      await tester.pumpAndSettle();
+        PlannerMember(
+          id: _userId,
+          name: '반복 사용자',
+          email: 'recurrence@example.com',
+        ),
+      ],
+      events: <PlannerEvent>[event],
+    );
+    addTearDown(auth.dispose);
+    final router = GoRouter(
+      initialLocation: '/event/owner-series?occurrence=${event.occurrenceKey}',
+      routes: <RouteBase>[
+        GoRoute(
+          path: '/event/:id',
+          builder: (context, state) => EventEditorScreen(
+            eventId: state.pathParameters['id'],
+            occurrenceKey: state.uri.queryParameters['occurrence'],
+          ),
+        ),
+        GoRoute(path: '/home', builder: (context, state) => const Text('home')),
+      ],
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: <Override>[
+          plannerControllerProvider.overrideWith((ref) => controller),
+        ],
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await tester.pumpAndSettle();
 
-      final scopeButton = find.widgetWithText(
-        OutlinedButton,
-        '참여자 변경 범위 선택',
-        skipOffstage: false,
-      );
-      expect(scopeButton, findsOneWidget);
-      await tester.drag(find.byType(ListView), const Offset(0, -500));
-      await tester.pumpAndSettle();
-      await tester.tap(scopeButton);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('전체 일정'));
-      await tester.tap(find.widgetWithText(FilledButton, '저장'));
-      await tester.pumpAndSettle();
+    final scopeButton = find.widgetWithText(
+      OutlinedButton,
+      '참여자 변경 범위 선택',
+      skipOffstage: false,
+    );
+    expect(scopeButton, findsOneWidget);
+    await tester.drag(find.byType(ListView), const Offset(0, -500));
+    await tester.pumpAndSettle();
+    await tester.tap(scopeButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('전체 일정'));
+    await tester.tap(find.widgetWithText(FilledButton, '저장'));
+    await tester.pumpAndSettle();
 
-      final creatorTile = find.widgetWithText(
-        CheckboxListTile,
-        '반복 사용자',
-        skipOffstage: false,
-      );
-      expect(creatorTile, findsOneWidget);
-      expect(tester.widget<CheckboxListTile>(creatorTile).value, isTrue);
-      expect(tester.widget<CheckboxListTile>(creatorTile).onChanged, isNull);
-      expect(
-        find.bySemanticsLabel(RegExp('작성자라서 항상 선택됨'), skipOffstage: false),
-        findsOneWidget,
-      );
-      // A disabled creator control must remain selected even when a test (or
-      // keyboard activation) attempts to toggle it.
-      await tester.ensureVisible(creatorTile);
-      await tester.tap(creatorTile, warnIfMissed: false);
-      await tester.pump();
-      expect(tester.widget<CheckboxListTile>(creatorTile).value, isTrue);
+    final creatorTile = find.widgetWithText(
+      CheckboxListTile,
+      '반복 사용자',
+      skipOffstage: false,
+    );
+    expect(creatorTile, findsOneWidget);
+    expect(tester.widget<CheckboxListTile>(creatorTile).value, isTrue);
+    expect(tester.widget<CheckboxListTile>(creatorTile).onChanged, isNull);
+    expect(
+      find.bySemanticsLabel(RegExp('작성자라서 항상 선택됨'), skipOffstage: false),
+      findsOneWidget,
+    );
+    // 테스트나 키보드 동작이 전환을 시도해도 비활성화된 생성자 컨트롤은 선택
+    // 상태를 유지해야 한다.
+    await tester.ensureVisible(creatorTile);
+    await tester.tap(creatorTile, warnIfMissed: false);
+    await tester.pump();
+    expect(tester.widget<CheckboxListTile>(creatorTile).value, isTrue);
 
-      final ownerTile = find.widgetWithText(
-        CheckboxListTile,
-        '그룹 소유자',
-        skipOffstage: false,
-      );
-      await tester.drag(find.byType(ListView), const Offset(0, -300));
-      await tester.pumpAndSettle();
-      await tester.tap(ownerTile);
-      await tester.pumpAndSettle();
-      final saveMembers = find.widgetWithText(
-        FilledButton,
-        '참여자 저장하기',
-        skipOffstage: false,
-      );
-      await tester.drag(find.byType(ListView), const Offset(0, -300));
-      await tester.pumpAndSettle();
-      await tester.tap(saveMembers);
-      await tester.pumpAndSettle();
+    final ownerTile = find.widgetWithText(
+      CheckboxListTile,
+      '그룹 소유자',
+      skipOffstage: false,
+    );
+    await tester.drag(find.byType(ListView), const Offset(0, -300));
+    await tester.pumpAndSettle();
+    await tester.tap(ownerTile);
+    await tester.pumpAndSettle();
+    final saveMembers = find.widgetWithText(
+      FilledButton,
+      '참여자 저장하기',
+      skipOffstage: false,
+    );
+    await tester.drag(find.byType(ListView), const Offset(0, -300));
+    await tester.pumpAndSettle();
+    await tester.tap(saveMembers);
+    await tester.pumpAndSettle();
 
-      expect(repository.replacedEventId, event.id);
-      expect(repository.replacedMemberIds, contains(_groupOwnerId));
-      expect(repository.replacedMemberIds, contains(_userId));
-      expect(repository.recurrenceDraft, isNull);
-      expect(repository.recurrenceScope, isNull);
-      expect(find.text('home'), findsOneWidget);
-      semantics.dispose();
-    },
-  );
+    expect(repository.replacedEventId, event.id);
+    expect(repository.replacedMemberIds, contains(_groupOwnerId));
+    expect(repository.replacedMemberIds, contains(_userId));
+    expect(repository.recurrenceDraft, isNull);
+    expect(repository.recurrenceScope, isNull);
+    expect(find.text('home'), findsOneWidget);
+    semantics.dispose();
+  });
 
-  testWidgets('ordinary participant cannot manage recurring members', (
-    tester,
-  ) async {
+  testWidgets('일반 참여자가 반복 일정 멤버를 관리할 수 없다', (tester) async {
     const ordinary = PlannerUser(
       id: 'ordinary-participant',
       email: 'ordinary@example.com',
@@ -1138,101 +1100,97 @@ void main() {
     );
   });
 
-  testWidgets(
-    'recurring member save fails closed when external members omit creator',
-    (tester) async {
-      final auth = _TestAuth(currentUser: null);
-      final semantics = tester.ensureSemantics();
-      final repository = _SingletonConversionRepository();
-      final event = _occurrence().copyWith(memberIds: const <String>[]);
-      repository.replacementSource = event;
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        user: _groupOwner,
-        group: _ownerGroup,
-        members: const <PlannerMember>[
-          PlannerMember(
-            id: _groupOwnerId,
-            name: '그룹 소유자',
-            email: 'group-owner@example.com',
-            isOwner: true,
-          ),
-          PlannerMember(
-            id: _userId,
-            name: '반복 사용자',
-            email: 'recurrence@example.com',
-          ),
-        ],
-        events: <PlannerEvent>[event.copyWith(groupId: _ownerGroup.id)],
-      );
-      // Keep the replacement source aligned with the event projected by the
-      // controller.  The missing creator is intentionally preserved as the
-      // invalid external state under test.
-      repository.replacementSource = controller.events.single;
-      addTearDown(auth.dispose);
-      await tester.pumpWidget(
-        _app(
-          controller,
-          EventEditorScreen(
-            eventId: controller.events.single.id,
-            occurrenceKey: controller.events.single.occurrenceKey,
-          ),
+  testWidgets('외부 멤버 목록에 생성자가 없으면 반복 멤버 저장이 안전하게 실패한다', (tester) async {
+    final auth = _TestAuth(currentUser: null);
+    final semantics = tester.ensureSemantics();
+    final repository = _SingletonConversionRepository();
+    final event = _occurrence().copyWith(memberIds: const <String>[]);
+    repository.replacementSource = event;
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      user: _groupOwner,
+      group: _ownerGroup,
+      members: const <PlannerMember>[
+        PlannerMember(
+          id: _groupOwnerId,
+          name: '그룹 소유자',
+          email: 'group-owner@example.com',
+          isOwner: true,
         ),
-      );
-      await tester.pumpAndSettle();
-
-      final scopeButton = find.widgetWithText(
-        OutlinedButton,
-        '참여자 변경 범위 선택',
-        skipOffstage: false,
-      );
-      await tester.drag(find.byType(ListView), const Offset(0, -500));
-      await tester.pumpAndSettle();
-      await tester.tap(scopeButton);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('전체 일정'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, '저장'));
-      await tester.pumpAndSettle();
-
-      final creatorTile = find.widgetWithText(
-        CheckboxListTile,
-        '반복 사용자',
-        skipOffstage: false,
-      );
-      expect(tester.widget<CheckboxListTile>(creatorTile).value, isFalse);
-      expect(tester.widget<CheckboxListTile>(creatorTile).onChanged, isNull);
-      expect(
-        find.bySemanticsLabel(
-          RegExp('작성자 참여 정보가 없어 저장할 수 없음'),
-          skipOffstage: false,
+        PlannerMember(
+          id: _userId,
+          name: '반복 사용자',
+          email: 'recurrence@example.com',
         ),
-        findsOneWidget,
-      );
-      final groupOwnerTile = find.widgetWithText(
-        CheckboxListTile,
-        '그룹 소유자',
-        skipOffstage: false,
-      );
-      await tester.drag(find.byType(ListView), const Offset(0, -500));
-      await tester.pumpAndSettle();
-      await tester.tap(groupOwnerTile, warnIfMissed: false);
-      await tester.pumpAndSettle();
-      final saveMembers = find.widgetWithText(
-        FilledButton,
-        '참여자 저장하기',
-        skipOffstage: false,
-      );
-      await tester.drag(find.byType(ListView), const Offset(0, -500));
-      await tester.pumpAndSettle();
-      await tester.tap(saveMembers, warnIfMissed: false);
-      await tester.pumpAndSettle();
+      ],
+      events: <PlannerEvent>[event.copyWith(groupId: _ownerGroup.id)],
+    );
+    // 교체 원본을 컨트롤러가 투영한 일정과 일치시킨다. 누락된 생성자는 검사
+    // 대상인 잘못된 외부 상태로 의도적으로 유지한다.
+    repository.replacementSource = controller.events.single;
+    addTearDown(auth.dispose);
+    await tester.pumpWidget(
+      _app(
+        controller,
+        EventEditorScreen(
+          eventId: controller.events.single.id,
+          occurrenceKey: controller.events.single.occurrenceKey,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
 
-      expect(repository.replacedMemberIds, isNull);
-      expect(find.text('home'), findsNothing);
-      expect(find.text('작성자 참여 정보를 확인한 뒤 다시 저장해 주세요.'), findsOneWidget);
-      semantics.dispose();
-    },
-  );
+    final scopeButton = find.widgetWithText(
+      OutlinedButton,
+      '참여자 변경 범위 선택',
+      skipOffstage: false,
+    );
+    await tester.drag(find.byType(ListView), const Offset(0, -500));
+    await tester.pumpAndSettle();
+    await tester.tap(scopeButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('전체 일정'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '저장'));
+    await tester.pumpAndSettle();
+
+    final creatorTile = find.widgetWithText(
+      CheckboxListTile,
+      '반복 사용자',
+      skipOffstage: false,
+    );
+    expect(tester.widget<CheckboxListTile>(creatorTile).value, isFalse);
+    expect(tester.widget<CheckboxListTile>(creatorTile).onChanged, isNull);
+    expect(
+      find.bySemanticsLabel(
+        RegExp('작성자 참여 정보가 없어 저장할 수 없음'),
+        skipOffstage: false,
+      ),
+      findsOneWidget,
+    );
+    final groupOwnerTile = find.widgetWithText(
+      CheckboxListTile,
+      '그룹 소유자',
+      skipOffstage: false,
+    );
+    await tester.drag(find.byType(ListView), const Offset(0, -500));
+    await tester.pumpAndSettle();
+    await tester.tap(groupOwnerTile, warnIfMissed: false);
+    await tester.pumpAndSettle();
+    final saveMembers = find.widgetWithText(
+      FilledButton,
+      '참여자 저장하기',
+      skipOffstage: false,
+    );
+    await tester.drag(find.byType(ListView), const Offset(0, -500));
+    await tester.pumpAndSettle();
+    await tester.tap(saveMembers, warnIfMissed: false);
+    await tester.pumpAndSettle();
+
+    expect(repository.replacedMemberIds, isNull);
+    expect(find.text('home'), findsNothing);
+    expect(find.text('작성자 참여 정보를 확인한 뒤 다시 저장해 주세요.'), findsOneWidget);
+    semantics.dispose();
+  });
 }

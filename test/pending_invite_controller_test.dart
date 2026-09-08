@@ -245,7 +245,7 @@ class _RejoinAfterLeaveRepository extends _InviteLocalRepository {
 }
 
 void main() {
-  test('memory pending store enforces TTL and clear', () async {
+  test('메모리 대기 저장소가 TTL과 지우기를 적용한다', () async {
     final store = MemoryPendingInviteStore();
     final expiry = DateTime.now().toUtc().add(const Duration(minutes: 1));
     await store.write(_token, expiry);
@@ -255,29 +255,26 @@ void main() {
     expect(await store.read(), isNull);
   });
 
-  test(
-    'pending intent expires live and clears its store without polling',
-    () async {
-      final store = MemoryPendingInviteStore();
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: _InviteLocalRepository(),
-        pendingInviteStore: store,
-        pendingInviteTtl: const Duration(milliseconds: 30),
-      );
-      addTearDown(controller.dispose);
+  test('대기 의도가 실시간으로 만료되고 폴링 없이 저장소를 지운다', () async {
+    final store = MemoryPendingInviteStore();
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: _InviteLocalRepository(),
+      pendingInviteStore: store,
+      pendingInviteTtl: const Duration(milliseconds: 30),
+    );
+    addTearDown(controller.dispose);
 
-      expect(controller.captureInviteToken(_token), isTrue);
-      expect(controller.hasPendingInvite, isTrue);
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(controller.captureInviteToken(_token), isTrue);
+    expect(controller.hasPendingInvite, isTrue);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
 
-      expect(controller.hasPendingInvite, isFalse);
-      expect(controller.pendingInvite?.expiresAt, isNull);
-      expect(await store.readRecord(), isNull);
-    },
-  );
+    expect(controller.hasPendingInvite, isFalse);
+    expect(controller.pendingInvite?.expiresAt, isNull);
+    expect(await store.readRecord(), isNull);
+  });
 
-  test('explicit clear fences a slow hydration result', () async {
+  test('명시적 지우기가 늦은 복원 결과를 차단한다', () async {
     final store = _DelayedPendingInviteStore();
     final controller = PlannerController(
       auth: AuthRepository(),
@@ -299,28 +296,25 @@ void main() {
     expect(store.clearCalls, greaterThanOrEqualTo(1));
   });
 
-  test(
-    'invite creation returns plaintext once but caches a token-free row',
-    () async {
-      final repository = LocalScheduleRepository();
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: repository,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      await controller.signIn('demo@example.com', 'planner');
-      await controller.loadGroups();
-      controller.selectedGroup = controller.groups.single;
+  test('초대 생성이 평문을 한 번 반환하지만 토큰 없는 행을 캐시한다', () async {
+    final repository = LocalScheduleRepository();
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: repository,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.signIn('demo@example.com', 'planner');
+    await controller.loadGroups();
+    controller.selectedGroup = controller.groups.single;
 
-      final returned = await controller.createInviteCode();
-      expect(returned.token, isNotNull);
-      expect(controller.invites, hasLength(1));
-      expect(controller.invites.single.token, isNull);
-    },
-  );
+    final returned = await controller.createInviteCode();
+    expect(returned.token, isNotNull);
+    expect(controller.invites, hasLength(1));
+    expect(controller.invites.single.token, isNull);
+  });
 
-  test('captures while signed out and previews after first login', () async {
+  test('로그아웃 중 캡처하고 첫 로그인 후 미리보기를 표시한다', () async {
     final repository = _InviteLocalRepository();
     final controller = PlannerController(
       auth: AuthRepository(),
@@ -339,7 +333,7 @@ void main() {
     expect(controller.pendingInvite?.preview?.groupTimezone, 'Asia/Seoul');
   });
 
-  test('all invite list assignments strip token-bearing fake rows', () async {
+  test('모든 초대 목록 할당이 토큰 포함 가짜 행을 제거한다', () async {
     final repository = _TokenBearingRepository();
     final controller = PlannerController(
       auth: AuthRepository(),
@@ -360,7 +354,7 @@ void main() {
     expect(controller.invites.single.token, isNull);
   });
 
-  test('stale invite creation never returns its plaintext token', () async {
+  test('오래된 초대 생성이 평문 토큰을 반환하지 않는다', () async {
     final repository = _DelayedCreateRepository();
     final controller = PlannerController(
       auth: AuthRepository(),
@@ -392,225 +386,200 @@ void main() {
     expect(controller.errorMessage, isNot(contains(_token)));
   });
 
-  test(
-    'stale invite creation is discarded after a group revision changes',
-    () async {
-      final repository = _DelayedCreateRepository();
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: repository,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      await controller.signIn('demo@example.com', 'planner');
-      await controller.loadGroups();
-      controller.selectedGroup = controller.groups.single;
+  test('그룹 리비전 변경 후 오래된 초대 생성을 버린다', () async {
+    final repository = _DelayedCreateRepository();
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: repository,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.signIn('demo@example.com', 'planner');
+    await controller.loadGroups();
+    controller.selectedGroup = controller.groups.single;
 
-      final creating = controller.createInviteCode();
-      await Future<void>.delayed(Duration.zero);
-      unawaited(controller.loadGroups());
-      repository.createGate.complete(
-        InviteCode(
-          id: 'stale-revision-invite',
-          groupId: 'demo-group',
-          expiresAt: DateTime.utc(2099),
-          maxUses: 1,
-          usesCount: 0,
-          version: 1,
-          token: _token,
-        ),
-      );
+    final creating = controller.createInviteCode();
+    await Future<void>.delayed(Duration.zero);
+    unawaited(controller.loadGroups());
+    repository.createGate.complete(
+      InviteCode(
+        id: 'stale-revision-invite',
+        groupId: 'demo-group',
+        expiresAt: DateTime.utc(2099),
+        maxUses: 1,
+        usesCount: 0,
+        version: 1,
+        token: _token,
+      ),
+    );
 
-      await expectLater(
-        creating,
-        throwsA(isA<InviteOperationStaleException>()),
-      );
-      expect(controller.invites, isEmpty);
-      expect(controller.errorMessage, isNot(contains(_token)));
-    },
-  );
+    await expectLater(creating, throwsA(isA<InviteOperationStaleException>()));
+    expect(controller.invites, isEmpty);
+    expect(controller.errorMessage, isNot(contains(_token)));
+  });
 
-  test(
-    'ambient signed-out auth event does not erase a logged-out intent',
-    () async {
-      final auth = AuthRepository();
-      final controller = PlannerController(
-        auth: auth,
-        repository: _InviteLocalRepository(),
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      controller.captureInviteToken(_token);
-      await auth.signOut();
-      expect(controller.hasPendingInvite, isTrue);
-    },
-  );
+  test('주변 로그아웃 인증 이벤트가 로그아웃 상태의 의도를 지우지 않는다', () async {
+    final auth = AuthRepository();
+    final controller = PlannerController(
+      auth: auth,
+      repository: _InviteLocalRepository(),
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    controller.captureInviteToken(_token);
+    await auth.signOut();
+    expect(controller.hasPendingInvite, isTrue);
+  });
 
-  test(
-    'a subsequent identity switch clears the pending intent synchronously',
-    () async {
-      final auth = _InviteAuth();
-      final controller = PlannerController(
-        auth: auth,
-        repository: _InviteLocalRepository(),
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      addTearDown(auth.dispose);
+  test('이후 사용자 전환이 대기 의도를 동기적으로 지운다', () async {
+    final auth = _InviteAuth();
+    final controller = PlannerController(
+      auth: auth,
+      repository: _InviteLocalRepository(),
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    addTearDown(auth.dispose);
 
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.signedIn,
-          user: PlannerUser(id: 'first-user', email: 'first@example.com'),
-        ),
-      );
-      await Future<void>.delayed(Duration.zero);
-      controller.captureInviteToken(_token);
-      expect(controller.hasPendingInvite, isTrue);
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.signedIn,
+        user: PlannerUser(id: 'first-user', email: 'first@example.com'),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    controller.captureInviteToken(_token);
+    expect(controller.hasPendingInvite, isTrue);
 
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.signedIn,
-          user: PlannerUser(id: 'second-user', email: 'second@example.com'),
-        ),
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(controller.hasPendingInvite, isFalse);
-    },
-  );
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.signedIn,
+        user: PlannerUser(id: 'second-user', email: 'second@example.com'),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.hasPendingInvite, isFalse);
+  });
 
-  test(
-    'duplicate capture is idempotent and a newer token supersedes stale work',
-    () async {
-      final repository = _InviteLocalRepository()
-        ..previewGate = Completer<InvitePreview>();
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: repository,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      await controller.signIn('demo@example.com', 'planner');
+  test('중복 캡처가 멱등이고 최신 토큰이 오래된 작업을 대체한다', () async {
+    final repository = _InviteLocalRepository()
+      ..previewGate = Completer<InvitePreview>();
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: repository,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.signIn('demo@example.com', 'planner');
 
-      expect(controller.captureInviteToken(_token), isTrue);
-      expect(controller.captureInviteToken(_token), isTrue);
-      final pending = controller.previewPendingInvite();
-      await Future<void>.delayed(Duration.zero);
-      expect(repository.previewCalls, 1);
-      expect(controller.captureInviteToken('8K9MW3PXQ2RT'), isTrue);
-      repository.previewGate!.complete(
-        InvitePreview(
-          groupId: 'demo-group',
-          groupName: '우리 가족',
-          groupDescription: '함께 정리하는 한 주',
-          groupTimezone: 'Asia/Seoul',
-          expiresAt: DateTime.utc(2099, 1, 1),
-          alreadyMember: false,
-        ),
-      );
-      expect(await pending, isNull);
-      expect(controller.pendingInvitePreview, isNull);
-      expect(controller.pendingInviteState, PendingInviteState.captured);
-    },
-  );
+    expect(controller.captureInviteToken(_token), isTrue);
+    expect(controller.captureInviteToken(_token), isTrue);
+    final pending = controller.previewPendingInvite();
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.previewCalls, 1);
+    expect(controller.captureInviteToken('8K9MW3PXQ2RT'), isTrue);
+    repository.previewGate!.complete(
+      InvitePreview(
+        groupId: 'demo-group',
+        groupName: '우리 가족',
+        groupDescription: '함께 정리하는 한 주',
+        groupTimezone: 'Asia/Seoul',
+        expiresAt: DateTime.utc(2099, 1, 1),
+        alreadyMember: false,
+      ),
+    );
+    expect(await pending, isNull);
+    expect(controller.pendingInvitePreview, isNull);
+    expect(controller.pendingInviteState, PendingInviteState.captured);
+  });
 
-  test(
-    'concurrent previews share one repository call for one generation',
-    () async {
-      final repository = _InviteLocalRepository()
-        ..previewGate = Completer<InvitePreview>();
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: repository,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      await controller.signIn('demo@example.com', 'planner');
-      controller.captureInviteToken(_token);
+  test('동시 미리보기가 한 세대에서 하나의 저장소 호출을 공유한다', () async {
+    final repository = _InviteLocalRepository()
+      ..previewGate = Completer<InvitePreview>();
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: repository,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.signIn('demo@example.com', 'planner');
+    controller.captureInviteToken(_token);
 
-      final first = controller.previewPendingInvite();
-      final second = controller.previewPendingInvite();
-      await Future<void>.delayed(Duration.zero);
-      expect(repository.previewCalls, 1);
-      repository.previewGate!.complete(
-        InvitePreview(
-          groupId: 'demo-group',
-          groupName: '우리 가족',
-          groupDescription: '함께 정리하는 한 주',
-          groupTimezone: 'Asia/Seoul',
-          expiresAt: DateTime.utc(2099),
-          alreadyMember: false,
-        ),
-      );
-      final results = await Future.wait(<Future<InvitePreview?>>[
-        first,
-        second,
-      ]);
-      expect(results[0], results[1]);
-    },
-  );
+    final first = controller.previewPendingInvite();
+    final second = controller.previewPendingInvite();
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.previewCalls, 1);
+    repository.previewGate!.complete(
+      InvitePreview(
+        groupId: 'demo-group',
+        groupName: '우리 가족',
+        groupDescription: '함께 정리하는 한 주',
+        groupTimezone: 'Asia/Seoul',
+        expiresAt: DateTime.utc(2099),
+        alreadyMember: false,
+      ),
+    );
+    final results = await Future.wait(<Future<InvitePreview?>>[first, second]);
+    expect(results[0], results[1]);
+  });
 
-  test(
-    'stale preview finalization cannot clear a newer revision request',
-    () async {
-      final repository = _RevisionPreviewRepository()
-        ..previewGates.add(Completer<InvitePreview>());
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: repository,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      await controller.signIn('demo@example.com', 'planner');
-      controller.captureInviteToken(_token);
+  test('오래된 미리보기 종료가 최신 리비전 요청을 지울 수 없다', () async {
+    final repository = _RevisionPreviewRepository()
+      ..previewGates.add(Completer<InvitePreview>());
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: repository,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.signIn('demo@example.com', 'planner');
+    controller.captureInviteToken(_token);
 
-      final first = controller.previewPendingInvite();
-      await Future<void>.delayed(Duration.zero);
-      expect(repository.previewCalls, 1);
+    final first = controller.previewPendingInvite();
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.previewCalls, 1);
 
-      // loadGroups advances the planner revision without replacing this
-      // pending token, so the second preview is a new request for the same
-      // generation/token with a distinct request identity.
-      unawaited(controller.loadGroups());
-      await Future<void>.delayed(Duration.zero);
-      repository.previewGates.add(Completer<InvitePreview>());
-      final second = controller.previewPendingInvite();
-      await Future<void>.delayed(Duration.zero);
-      expect(repository.previewCalls, 2);
-      expect(controller.isPreviewingInvite, isTrue);
-      expect(controller.pendingInviteState, PendingInviteState.loading);
+    // loadGroups는 이 대기 토큰을 바꾸지 않고 플래너 리비전을 올리므로,
+    // 두 번째 미리보기는 같은 세대/토큰에 대해 요청 식별자만 다른 새 요청이다.
+    unawaited(controller.loadGroups());
+    await Future<void>.delayed(Duration.zero);
+    repository.previewGates.add(Completer<InvitePreview>());
+    final second = controller.previewPendingInvite();
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.previewCalls, 2);
+    expect(controller.isPreviewingInvite, isTrue);
+    expect(controller.pendingInviteState, PendingInviteState.loading);
 
-      repository.previewGates[0].complete(
-        InvitePreview(
-          groupId: 'demo-group',
-          groupName: '우리 가족',
-          groupDescription: '함께 정리하는 한 주',
-          groupTimezone: 'Asia/Seoul',
-          expiresAt: DateTime.utc(2099),
-          alreadyMember: false,
-        ),
-      );
-      expect(await first, isNull);
-      // F1's finally must not turn off F2 or roll its state back to captured.
-      expect(controller.isPreviewingInvite, isTrue);
-      expect(controller.pendingInviteState, PendingInviteState.loading);
+    repository.previewGates[0].complete(
+      InvitePreview(
+        groupId: 'demo-group',
+        groupName: '우리 가족',
+        groupDescription: '함께 정리하는 한 주',
+        groupTimezone: 'Asia/Seoul',
+        expiresAt: DateTime.utc(2099),
+        alreadyMember: false,
+      ),
+    );
+    expect(await first, isNull);
+    // F1의 finally가 F2를 끄거나 상태를 캡처 시점으로 되돌리면 안 된다.
+    expect(controller.isPreviewingInvite, isTrue);
+    expect(controller.pendingInviteState, PendingInviteState.loading);
 
-      repository.previewGates[1].complete(
-        InvitePreview(
-          groupId: 'demo-group',
-          groupName: '우리 가족',
-          groupDescription: '함께 정리하는 한 주',
-          groupTimezone: 'Asia/Seoul',
-          expiresAt: DateTime.utc(2099),
-          alreadyMember: false,
-        ),
-      );
-      expect((await second)?.groupId, 'demo-group');
-      expect(controller.isPreviewingInvite, isFalse);
-    },
-  );
+    repository.previewGates[1].complete(
+      InvitePreview(
+        groupId: 'demo-group',
+        groupName: '우리 가족',
+        groupDescription: '함께 정리하는 한 주',
+        groupTimezone: 'Asia/Seoul',
+        expiresAt: DateTime.utc(2099),
+        alreadyMember: false,
+      ),
+    );
+    expect((await second)?.groupId, 'demo-group');
+    expect(controller.isPreviewingInvite, isFalse);
+  });
 
-  test('explicit accept is idempotently guarded and clears pending', () async {
+  test('명시적 수락을 멱등하게 보호하고 대기 상태를 지운다', () async {
     final repository = _InviteLocalRepository();
     final controller = PlannerController(
       auth: AuthRepository(),
@@ -628,203 +597,180 @@ void main() {
     expect(controller.pendingInvite, isNull);
   });
 
-  test(
-    'committed join projection failure clears pending and forbids retry',
-    () async {
-      final repository = _CommittedFailureRepository();
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: repository,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      await controller.signIn('demo@example.com', 'planner');
-      controller.captureInviteToken(_token);
-      await controller.previewPendingInvite();
+  test('커밋된 참여의 투영 실패가 대기 상태를 지우고 재시도를 막는다', () async {
+    final repository = _CommittedFailureRepository();
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: repository,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.signIn('demo@example.com', 'planner');
+    controller.captureInviteToken(_token);
+    await controller.previewPendingInvite();
 
-      await expectLater(
-        controller.acceptPendingInvite(),
-        throwsA(isA<InviteJoinCommittedException>()),
-      );
-      expect(controller.hasPendingInvite, isFalse);
-      expect(controller.errorMessage, contains('완료되었지만'));
-      expect(controller.errorMessage, isNot(contains(_token)));
-      expect(await controller.acceptPendingInvite(), isNull);
-      expect(repository.joinCalls, 1);
-    },
-  );
+    await expectLater(
+      controller.acceptPendingInvite(),
+      throwsA(isA<InviteJoinCommittedException>()),
+    );
+    expect(controller.hasPendingInvite, isFalse);
+    expect(controller.errorMessage, contains('완료되었지만'));
+    expect(controller.errorMessage, isNot(contains(_token)));
+    expect(await controller.acceptPendingInvite(), isNull);
+    expect(repository.joinCalls, 1);
+  });
 
-  test(
-    'a stale committed failure cannot publish an error for a newer token',
-    () async {
-      final repository = _LateCommittedRepository();
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: repository,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      await controller.signIn('demo@example.com', 'planner');
-      controller.captureInviteToken(_token);
-      await controller.previewPendingInvite();
+  test('오래된 커밋 실패가 최신 토큰의 오류를 게시할 수 없다', () async {
+    final repository = _LateCommittedRepository();
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: repository,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.signIn('demo@example.com', 'planner');
+    controller.captureInviteToken(_token);
+    await controller.previewPendingInvite();
 
-      var notifications = 0;
-      controller.addListener(() => notifications++);
-      final acceptingA = controller.acceptPendingInvite();
-      await Future<void>.delayed(Duration.zero);
-      expect(repository.joinCalls, 1);
+    var notifications = 0;
+    controller.addListener(() => notifications++);
+    final acceptingA = controller.acceptPendingInvite();
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.joinCalls, 1);
 
-      const tokenB = '8K9MW3PXQ2RT';
-      expect(controller.captureInviteToken(tokenB), isTrue);
-      final notificationsAfterB = notifications;
-      expect(controller.hasPendingInvite, isTrue);
-      expect(controller.pendingInviteState, PendingInviteState.captured);
+    const tokenB = '8K9MW3PXQ2RT';
+    expect(controller.captureInviteToken(tokenB), isTrue);
+    final notificationsAfterB = notifications;
+    expect(controller.hasPendingInvite, isTrue);
+    expect(controller.pendingInviteState, PendingInviteState.captured);
 
-      repository.committedGate.complete();
-      await expectLater(
-        acceptingA,
-        throwsA(isA<InviteJoinCommittedException>()),
-      );
+    repository.committedGate.complete();
+    await expectLater(acceptingA, throwsA(isA<InviteJoinCommittedException>()));
 
-      expect(controller.hasPendingInvite, isTrue);
-      expect(controller.pendingInviteState, PendingInviteState.captured);
-      expect(controller.pendingInviteError, isNull);
-      expect(controller.errorMessage, isNull);
-      expect(notifications, notificationsAfterB);
-      expect(await controller.acceptPendingInvite(), isNull);
-      expect(repository.joinCalls, 1);
-    },
-  );
+    expect(controller.hasPendingInvite, isTrue);
+    expect(controller.pendingInviteState, PendingInviteState.captured);
+    expect(controller.pendingInviteError, isNull);
+    expect(controller.errorMessage, isNull);
+    expect(notifications, notificationsAfterB);
+    expect(await controller.acceptPendingInvite(), isNull);
+    expect(repository.joinCalls, 1);
+  });
 
-  test(
-    'group revision invalidates stale preview and committed accept once',
-    () async {
-      final repository = _InviteLocalRepository()
-        ..previewGate = Completer<InvitePreview>()
-        ..joinGate = Completer<PlannerGroup>();
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: repository,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
-      await controller.signIn('demo@example.com', 'planner');
+  test('그룹 리비전이 오래된 미리보기와 커밋된 수락을 한 번 무효화한다', () async {
+    final repository = _InviteLocalRepository()
+      ..previewGate = Completer<InvitePreview>()
+      ..joinGate = Completer<PlannerGroup>();
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: repository,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.signIn('demo@example.com', 'planner');
 
-      controller.captureInviteToken(_token);
-      final previewing = controller.previewPendingInvite();
-      await Future<void>.delayed(Duration.zero);
-      // A planner refresh is a newer group context but does not clear the
-      // pending intent itself.
-      unawaited(controller.loadGroups());
-      repository.previewGate!.complete(
-        InvitePreview(
-          groupId: 'demo-group',
-          groupName: '우리 가족',
-          groupDescription: '함께 정리하는 한 주',
-          groupTimezone: 'Asia/Seoul',
-          expiresAt: DateTime.utc(2099, 1, 1),
-          alreadyMember: false,
-        ),
-      );
-      expect(await previewing, isNull);
-      expect(controller.pendingInviteState, PendingInviteState.captured);
+    controller.captureInviteToken(_token);
+    final previewing = controller.previewPendingInvite();
+    await Future<void>.delayed(Duration.zero);
+    // 플래너 새로 고침은 더 최신 그룹 컨텍스트지만 대기 중인 의도 자체를
+    // 지우지는 않는다.
+    unawaited(controller.loadGroups());
+    repository.previewGate!.complete(
+      InvitePreview(
+        groupId: 'demo-group',
+        groupName: '우리 가족',
+        groupDescription: '함께 정리하는 한 주',
+        groupTimezone: 'Asia/Seoul',
+        expiresAt: DateTime.utc(2099, 1, 1),
+        alreadyMember: false,
+      ),
+    );
+    expect(await previewing, isNull);
+    expect(controller.pendingInviteState, PendingInviteState.captured);
 
-      // Retry against the current planner revision, then make that revision
-      // stale while acceptance is in flight. The commit clears the exact
-      // token, so a second accept cannot call join again.
-      await controller.previewPendingInvite();
-      final accepting = controller.acceptPendingInvite();
-      await Future<void>.delayed(Duration.zero);
-      unawaited(controller.loadGroups());
-      repository.joinGate!.complete(
-        (await repository.groupsForUser(demoUserId)).single,
-      );
-      expect(await accepting, isNull);
-      expect(controller.hasPendingInvite, isFalse);
-      expect(repository.joinCalls, 1);
-      expect(await controller.acceptPendingInvite(), isNull);
-      expect(repository.joinCalls, 1);
-    },
-  );
+    // 현재 플래너 리비전을 기준으로 재시도한 뒤 수락이 진행되는 동안 해당
+    // 리비전을 오래된 상태로 만든다. 커밋은 정확한 토큰을 지우므로 두 번째
+    // 수락이 join을 다시 호출할 수 없다.
+    await controller.previewPendingInvite();
+    final accepting = controller.acceptPendingInvite();
+    await Future<void>.delayed(Duration.zero);
+    unawaited(controller.loadGroups());
+    repository.joinGate!.complete(
+      (await repository.groupsForUser(demoUserId)).single,
+    );
+    expect(await accepting, isNull);
+    expect(controller.hasPendingInvite, isFalse);
+    expect(repository.joinCalls, 1);
+    expect(await controller.acceptPendingInvite(), isNull);
+    expect(repository.joinCalls, 1);
+  });
 
-  test(
-    'accepting an invite removes a leave tombstone before reload and invalidates notifications',
-    () async {
-      final repository = _RejoinAfterLeaveRepository();
-      final notifications = _InviteNotificationSink();
-      final controller = PlannerController(
-        auth: AuthRepository(),
-        repository: repository,
-        notifications: notifications,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(controller.dispose);
+  test('초대 수락이 다시 불러오기 전에 탈퇴 차단 표식을 제거하고 알림을 무효화한다', () async {
+    final repository = _RejoinAfterLeaveRepository();
+    final notifications = _InviteNotificationSink();
+    final controller = PlannerController(
+      auth: AuthRepository(),
+      repository: repository,
+      notifications: notifications,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(controller.dispose);
 
-      await controller.signIn('demo@example.com', 'planner');
-      await controller.selectGroup('demo-group');
-      await controller.leaveGroup();
-      expect(repository.removed, isTrue);
-      expect(controller.groups, isEmpty);
+    await controller.signIn('demo@example.com', 'planner');
+    await controller.selectGroup('demo-group');
+    await controller.leaveGroup();
+    expect(repository.removed, isTrue);
+    expect(controller.groups, isEmpty);
 
-      controller.captureInviteToken(_token);
-      await controller.previewPendingInvite();
-      final joined = await controller.acceptPendingInvite();
-      expect(joined?.id, 'demo-group');
-      expect(notifications.membershipGroups, <String>['demo-group']);
+    controller.captureInviteToken(_token);
+    await controller.previewPendingInvite();
+    final joined = await controller.acceptPendingInvite();
+    expect(joined?.id, 'demo-group');
+    expect(notifications.membershipGroups, <String>['demo-group']);
 
-      // The repository now exposes the joined group again. A subsequent
-      // authoritative load must not filter it using the old leave tombstone.
-      await controller.loadGroups();
-      expect(controller.groups.map((group) => group.id), <String>[
-        'demo-group',
-      ]);
-    },
-  );
+    // 이제 저장소가 참여한 그룹을 다시 노출한다. 이후 권위 있는 로드에서
+    // 이전 탈퇴 차단 표식으로 이 그룹을 걸러내면 안 된다.
+    await controller.loadGroups();
+    expect(controller.groups.map((group) => group.id), <String>['demo-group']);
+  });
 
-  test(
-    'stale invite acceptance after an account switch cannot resurrect the group or notify',
-    () async {
-      final auth = _InviteAuth();
-      final repository = _InviteLocalRepository()
-        ..joinGate = Completer<PlannerGroup>();
-      final notifications = _InviteNotificationSink();
-      final controller = PlannerController(
-        auth: auth,
-        repository: repository,
-        notifications: notifications,
-        pendingInviteStore: MemoryPendingInviteStore(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
+  test('계정 전환 후 오래된 초대 수락이 그룹을 복원하거나 알림을 보낼 수 없다', () async {
+    final auth = _InviteAuth();
+    final repository = _InviteLocalRepository()
+      ..joinGate = Completer<PlannerGroup>();
+    final notifications = _InviteNotificationSink();
+    final controller = PlannerController(
+      auth: auth,
+      repository: repository,
+      notifications: notifications,
+      pendingInviteStore: MemoryPendingInviteStore(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
 
-      await controller.signIn('demo@example.com', 'planner');
-      controller.captureInviteToken(_token);
-      await controller.previewPendingInvite();
-      final accepting = controller.acceptPendingInvite();
-      await Future<void>.delayed(Duration.zero);
-      expect(repository.joinCalls, 1);
+    await controller.signIn('demo@example.com', 'planner');
+    controller.captureInviteToken(_token);
+    await controller.previewPendingInvite();
+    final accepting = controller.acceptPendingInvite();
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.joinCalls, 1);
 
-      final userB = const PlannerUser(
-        id: 'user-b',
-        email: 'user-b@example.com',
-      );
-      auth.emit(AuthRepositoryEvent(type: AuthEventType.signedIn, user: userB));
-      await Future<void>.delayed(Duration.zero);
-      repository.joinGate!.complete(
-        const PlannerGroup(
-          id: 'demo-group',
-          name: '우리 가족',
-          timezone: 'Asia/Seoul',
-        ),
-      );
-      expect(await accepting, isNull);
-      await Future<void>.delayed(Duration.zero);
+    final userB = const PlannerUser(id: 'user-b', email: 'user-b@example.com');
+    auth.emit(AuthRepositoryEvent(type: AuthEventType.signedIn, user: userB));
+    await Future<void>.delayed(Duration.zero);
+    repository.joinGate!.complete(
+      const PlannerGroup(
+        id: 'demo-group',
+        name: '우리 가족',
+        timezone: 'Asia/Seoul',
+      ),
+    );
+    expect(await accepting, isNull);
+    await Future<void>.delayed(Duration.zero);
 
-      expect(controller.user?.id, 'user-b');
-      expect(controller.groups, isEmpty);
-      expect(notifications.membershipGroups, isEmpty);
-    },
-  );
+    expect(controller.user?.id, 'user-b');
+    expect(controller.groups, isEmpty);
+    expect(notifications.membershipGroups, isEmpty);
+  });
 }

@@ -2,9 +2,9 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// Static Feature 3 contract checks. The disposable PostgreSQL runner covers
-/// execution semantics; these checks keep the migration/Edge boundary visible
-/// even when Docker or a provider SDK is unavailable in CI.
+/// 기능 3의 정적 계약 검사다. 일회용 PostgreSQL 실행기가 실행 의미를 검사하며,
+/// 이 검사는 CI에서 Docker나 공급자 SDK를 사용할 수 없어도 마이그레이션/Edge
+/// 경계를 명확히 보여 준다.
 void main() {
   late String migration;
   late String fixture;
@@ -39,7 +39,7 @@ void main() {
     config = normalized(File('supabase/config.toml').readAsStringSync());
   });
 
-  test('migration is the CLI-created immediate successor and additive', () {
+  test('마이그레이션이 CLI로 만든 바로 다음 추가형 변경이다', () {
     final names =
         Directory('supabase/migrations')
             .listSync()
@@ -53,9 +53,13 @@ void main() {
         .whereType<RegExpMatch>()
         .map((match) => match.group(1)!)
         .toList();
-    expect(names.length, 16);
+    expect(names.length, greaterThanOrEqualTo(16));
     expect(timestamps.toSet().length, names.length);
-    expect(timestamps.last, '20260907171029');
+    expect(
+      BigInt.parse(timestamps.last),
+      greaterThanOrEqualTo(BigInt.parse('20260907171029')),
+      reason: '미리 알림 이후의 forward-only 수정 마이그레이션을 허용해야 한다',
+    );
     expect(
       migration,
       contains('create table if not exists public.notification_preferences'),
@@ -75,7 +79,7 @@ void main() {
     );
   });
 
-  test('client settings and candidate RPC wire contract is explicit', () {
+  test('클라이언트 설정과 후보 RPC 전송 계약이 명확하다', () {
     for (final signature in <String>[
       'public.get_notification_preferences()',
       'public.set_notification_preferences( p_local_enabled boolean, p_push_enabled boolean, p_expected_version integer )',
@@ -103,7 +107,7 @@ void main() {
     expect(migration, contains("'single'"));
   });
 
-  test('RLS, ACL, private bearer storage, and lifecycle hooks are present', () {
+  test('RLS, ACL, 비공개 전달자 저장소, 수명 주기 훅이 존재한다', () {
     for (final table in <String>[
       'notification_preferences',
       'event_reminder_settings',
@@ -159,7 +163,7 @@ void main() {
     expect(migration, contains('setting_disabled'));
   });
 
-  test('queue leases, idempotency, retry and worker boundary are explicit', () {
+  test('큐 임대, 멱등성, 재시도, 작업자 경계가 명확하다', () {
     expect(migration, contains('for update of j skip locked'));
     expect(migration, contains('for update skip locked'));
     expect(
@@ -181,21 +185,21 @@ void main() {
     expect(migration, contains('worker_load_event_reminder_payload'));
     expect(migration, contains('worker_complete_event_reminder_job'));
     expect(migration, contains('pg_roles where rolname = \'service_role\''));
-    expect(migration, contains('never represented in sql'));
+    expect(migration, contains('sql이나 flutter에 절대'));
     expect(fixture, contains('dead_letter'));
-    expect(fixture, contains('last active device'));
-    expect(fixture, contains('eighth-attempt worker crash'));
-    expect(fixture, contains('dirty bit'));
-    expect(fixture, contains('reconcile race fixture'));
-    expect(fixture, contains('timed lead beyond seven days'));
-    expect(fixture, contains('participant lifecycle is terminal'));
-    expect(fixture, contains('group leave follows the same path'));
-    expect(fixture, contains('soft-deleting an event is terminal'));
-    expect(runner, contains("printf 'reapplying %s\\n'"));
+    expect(fixture, contains('마지막 활성 기기'));
+    expect(fixture, contains('여덟 번째 시도의 작업자 중단'));
+    expect(fixture, contains('dirty 비트'));
+    expect(fixture, contains('조정 경합 픽스처'));
+    expect(fixture, contains('7일을 넘는 시간 지정 사전 알림'));
+    expect(fixture, contains('참여자 수명 주기의 종료'));
+    expect(fixture, contains('그룹 탈퇴도 같은 경로'));
+    expect(fixture, contains('일정 소프트 삭제는 종료 상태'));
+    expect(runner, contains("printf '%s 재적용 중\\n'"));
     expect(runner, contains('20260907130006_reminders.sql'));
   });
 
-  test('Edge worker fails closed before claim and never logs payloads', () {
+  test('Edge 작업자가 가져오기 전에 안전하게 실패하고 페이로드를 기록하지 않는다', () {
     expect(config, contains('[functions.send-reminders]'));
     expect(config, contains('verify_jwt = false'));
     expect(edge, contains('reminder_worker_secret'));
@@ -214,8 +218,8 @@ void main() {
     expect(edge, isNot(contains('console.warn')));
     expect(edge, contains('provider_adapter_unavailable'));
     expect(edge, contains('export async function handlerequest'));
-    expect(edgeTest, contains('missing and mismatched worker secrets'));
-    expect(edgeTest, contains('leaves every lease untouched'));
+    expect(edgeTest, contains('작업자 비밀 값이 없거나 일치하지 않으면'));
+    expect(edgeTest, contains('모든 임대를 그대로 두고'));
     expect(edgeTest, contains('private-device-token'));
     expect(edgeTest, contains('assertfalse(serialized.includes(forbidden))'));
     expect(edgeTest, contains('params.p_limit, 100'));

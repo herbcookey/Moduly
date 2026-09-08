@@ -1,8 +1,8 @@
--- pgTAP fixture for Feature G's bounded, group-scoped event search RPC.
+-- 기능 G의 범위 제한 그룹 단위 일정 검색 RPC용 pgTAP 픽스처다.
 --
--- Setup runs as the migration owner; read calls run as authenticated.  The
--- entire fixture is transactional and is safe to run against a disposable
--- Supabase/PostgreSQL database.
+-- 설정은 마이그레이션 소유자로, 조회 호출은 authenticated로 실행한다. 전체
+-- 픽스처가 트랜잭션 안에서 동작하므로 일회용 Supabase/PostgreSQL 데이터베이스에서
+-- 안전하게 실행할 수 있다.
 
 begin;
 
@@ -113,9 +113,9 @@ insert into public.memberships (
    (select member_id from event_search_fixture),
    'member', true, '2026-01-01T00:00:00Z', null);
 
--- Live singleton rows.  The description deliberately includes wildcard,
--- backslash, quote, and SQL-like text; position/lower must treat each as a
--- literal substring rather than SQL pattern syntax.
+-- 운영 중인 단일 일정 행이다. 설명에는 의도적으로 와일드카드, 백슬래시, 따옴표 및
+-- SQL과 비슷한 텍스트를 넣는다. position/lower는 각각을 SQL 패턴 문법이 아니라
+-- 리터럴 부분 문자열로 처리해야 한다.
 insert into public.events (
   id, group_id, created_by, title, description, starts_at, ends_at, timezone,
   is_all_day, all_day_start, all_day_end, version, color_value,
@@ -165,8 +165,8 @@ select e.id, (select member_id from event_search_fixture)
  )
 on conflict (event_id, user_id) do nothing;
 
--- A recurring row and a full effective override prove that search uses the
--- materialized occurrence title/description, not only the anchor event.
+-- 반복 행과 완전한 유효 재정의를 통해 검색이 기준 일정뿐 아니라 구체화된 발생의
+-- 제목/설명도 사용하는지 확인한다.
 insert into public.events (
   id, group_id, created_by, title, description, starts_at, ends_at, timezone,
   is_all_day, all_day_start, all_day_end, version, color_value,
@@ -211,8 +211,8 @@ insert into public.event_occurrence_overrides (
   '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 );
 
--- Bulk rows are intentionally >1000.  Each row has a unique starts_at value,
--- allowing the loop below to prove no keyset duplicate or omission.
+-- 대량 행은 의도적으로 1,000개를 넘긴다. 각 행의 starts_at 값이 고유하므로 아래
+-- 반복문에서 키셋 중복이나 누락이 없음을 확인할 수 있다.
 insert into public.events (
   id, group_id, created_by, title, description, starts_at, ends_at, timezone,
   is_all_day, all_day_start, all_day_end, version, color_value,
@@ -233,20 +233,20 @@ select e.id, (select member_id from event_search_fixture)
  where e.group_id = (select bulk_group_id from event_search_fixture)
 on conflict (event_id, user_id) do nothing;
 
--- Archive one group after its rows exist; the function must return the same
--- neutral authorization error as a missing or inaccessible group.
+-- 행을 만든 뒤 그룹 하나를 보관한다. 함수는 없거나 접근할 수 없는 그룹과 같은
+-- 중립적인 권한 오류를 반환해야 한다.
 update public.groups
    set deleted_at = '2026-02-01T00:00:00Z', version = 2
  where id = (select archive_group_id from event_search_fixture);
 
--- Catalog/ACL/security checks are performed before changing role.
+-- 역할을 바꾸기 전에 카탈로그/ACL/보안 검사를 수행한다.
 select ok(
   exists (
     select 1 from pg_catalog.pg_class c
      where c.oid = 'public.events_group_creator_start_id_live_idx'::regclass
        and c.relkind = 'i'
   ),
-  'creator-filter partial B-tree index exists'
+  '생성자 필터용 부분 B-tree 인덱스가 있다'
 );
 select ok(
   has_function_privilege(
@@ -254,7 +254,7 @@ select ok(
     'public.search_events_v1(uuid,timestamptz,timestamptz,text,text,uuid,uuid,integer,text)',
     'execute'
   ),
-  'authenticated can execute search_events_v1'
+  'authenticated 역할은 search_events_v1을 실행할 수 있다'
 );
 select ok(
   not has_function_privilege(
@@ -267,7 +267,7 @@ select ok(
     'public.search_events_v1(uuid,timestamptz,timestamptz,text,text,uuid,uuid,integer,text)',
     'execute'
   ),
-  'anon and PUBLIC cannot execute search_events_v1'
+  'anon 및 PUBLIC 역할은 search_events_v1을 실행할 수 없다'
 );
 select ok(
   exists (
@@ -276,7 +276,7 @@ select ok(
        and p.prosecdef
        and p.proconfig @> array['search_path=""']::text[]
   ),
-  'search function is SECURITY DEFINER with an empty search_path'
+  '검색 함수는 빈 search_path를 사용하는 SECURITY DEFINER 함수다'
 );
 
 select set_config(
@@ -295,8 +295,8 @@ select set_config(
 select set_config('request.jwt.claim.role', 'authenticated', true);
 set local role authenticated;
 
--- Empty query is valid for filter-only reads.  The response envelope has no
--- count field and uses the complete occurrence row shape.
+-- 필터만 사용하는 조회에서는 빈 쿼리도 유효하다. 응답 봉투에는 count 필드가 없고
+-- 완전한 발생 행 형태를 사용한다.
 select is(
   jsonb_array_length((public.search_events_v1(
     (select group_id from event_search_fixture),
@@ -304,7 +304,7 @@ select is(
     null, null, 100, null
   )->'events')),
   4,
-  'empty query returns all live rows in the bounded period'
+  '빈 검색어는 제한된 기간의 모든 활성 행을 반환한다'
 );
 select ok(
   not ((public.search_events_v1(
@@ -312,7 +312,7 @@ select ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z', 'UTC', null,
     null, null, 100, null
   )) ? 'count'),
-  'search envelope does not expose a pre-RLS count'
+  '검색 응답은 RLS 적용 전 개수를 노출하지 않는다'
 );
 select ok(
   exists (
@@ -326,7 +326,7 @@ select ok(
        and row_data ? 'member_ids'
        and row_data ? 'occurrence_key'
   ),
-  'search rows include complete event and occurrence fields'
+  '검색 행에는 완전한 이벤트 및 발생 항목 필드가 포함된다'
 );
 
 select is(
@@ -336,7 +336,7 @@ select is(
     null, null, 100, null
   )->'events')),
   1,
-  'Korean title substring is matched case-insensitively'
+  '한국어 제목의 부분 문자열이 대소문자 구분 없이 일치한다'
 );
 select is(
   jsonb_array_length((public.search_events_v1(
@@ -345,7 +345,7 @@ select is(
     null, null, 100, null
   )->'events')),
   1,
-  'emoji and case-folded Unicode description search works'
+  '이모지 및 대소문자를 정규화한 유니코드 설명 검색이 동작한다'
 );
 select is(
   jsonb_array_length((public.search_events_v1(
@@ -354,7 +354,7 @@ select is(
     null, null, 100, null
   )->'events')),
   1,
-  'percent and underscore are literal substring characters'
+  '퍼센트 기호와 밑줄은 부분 문자열의 리터럴 문자로 처리된다'
 );
 select is(
   jsonb_array_length((public.search_events_v1(
@@ -363,7 +363,7 @@ select is(
     null, null, 100, null
   )->'events')),
   1,
-  'SQL-like input and punctuation are not interpreted as SQL'
+  'SQL 형태의 입력과 문장 부호는 SQL로 해석되지 않는다'
 );
 select is(
   jsonb_array_length((public.search_events_v1(
@@ -372,11 +372,11 @@ select is(
     null, null, 100, null
   )->'events')),
   1,
-  'quotes are literal search characters'
+  '따옴표는 검색용 리터럴 문자로 처리된다'
 );
 
--- NFC and NFD are deliberately distinct literal forms; no server-only
--- normalization may make one query match the other.
+-- NFC와 NFD는 의도적으로 서로 다른 리터럴 형태다. 서버 전용 정규화로 한 쿼리가
+-- 다른 형태와 일치하게 해서는 안 된다.
 select is(
   (public.search_events_v1(
     (select group_id from event_search_fixture),
@@ -384,7 +384,7 @@ select is(
     null, null, 100, null
   )->'events'->0->>'id'),
   (select nfc_event_id::text from event_search_fixture),
-  'NFC query matches the NFC title form'
+  'NFC 검색어는 NFC 형식의 제목과 일치한다'
 );
 select is(
   (public.search_events_v1(
@@ -393,7 +393,7 @@ select is(
     null, null, 100, null
   )->'events'->0->>'id'),
   (select nfd_event_id::text from event_search_fixture),
-  'NFD query matches the NFD title form'
+  'NFD 검색어는 NFD 형식의 제목과 일치한다'
 );
 
 select is(
@@ -403,7 +403,7 @@ select is(
     (select member_id from event_search_fixture), null, 100, null
   )->'events')),
   1,
-  'creator filter returns only an active same-group creator'
+  '생성자 필터는 같은 그룹의 활성 생성자만 반환한다'
 );
 select is(
   jsonb_array_length((public.search_events_v1(
@@ -412,11 +412,10 @@ select is(
     null, (select member_id from event_search_fixture), 100, null
   )->'events')),
   4,
-  'participant filter is evaluated server-side through event_members'
+  '참여자 필터는 서버에서 event_members를 통해 평가된다'
 );
 
--- The New York spring-forward day is a valid local-midnight period even though
--- its UTC length is 23 hours.
+-- 뉴욕에서 서머타임이 시작되는 날은 UTC 길이가 23시간이어도 유효한 현지 자정 기간이다.
 select is(
   jsonb_array_length((public.search_events_v1(
     (select group_id from event_search_fixture),
@@ -424,7 +423,7 @@ select is(
     'America/New_York', 'DST', null, null, 100, null
   )->'events')),
   1,
-  'DST local-midnight period is accepted'
+  'DST가 적용되는 현지 자정 기간도 허용된다'
 );
 select throws_ok(
   format(
@@ -433,10 +432,10 @@ select throws_ok(
     '2026-03-01T01:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '22023', 'range must be local-midnight and at most 366 days',
-  'non-midnight period is rejected'
+  '자정이 아닌 기간은 거부된다'
 );
 
--- Recurrence text comes from the effective rule/override snapshot.
+-- 반복 텍스트는 유효 규칙/재정의 스냅샷에서 가져온다.
 select is(
   jsonb_array_length((public.search_events_v1(
     (select group_id from event_search_fixture),
@@ -444,7 +443,7 @@ select is(
     null, null, 100, null
   )->'events')),
   1,
-  'recurring occurrence override title is searchable'
+  '반복 발생 항목의 재정의 제목을 검색할 수 있다'
 );
 select is(
   (public.search_events_v1(
@@ -453,12 +452,11 @@ select is(
     null, null, 100, null
   )->'events'->0->>'occurrence_key'),
   'o00000000000000000001',
-  'override result keeps its stable occurrence key'
+  '재정의 결과는 안정적인 발생 항목 키를 유지한다'
 );
 
--- A one-row page from a recurring series must resume on occurrence_key even
--- when event_id is unchanged; using event_id alone as a seen key would hide
--- this same-series second occurrence.
+-- 반복 묶음의 한 행짜리 페이지는 event_id가 같아도 occurrence_key를 기준으로
+-- 이어져야 한다. 확인한 키로 event_id만 사용하면 같은 묶음의 두 번째 발생이 숨겨진다.
 do $$
 declare
   v_first jsonb;
@@ -477,7 +475,7 @@ begin
   if jsonb_array_length(v_first->'events') <> 1
      or v_first->>'has_more' <> 'true'
      or v_first->>'next_cursor' is null then
-    raise exception 'recurring first cursor page is incomplete';
+    raise exception '반복 일정의 첫 커서 페이지가 불완전합니다';
   end if;
   v_first_event := (v_first->'events'->0->>'event_id')::uuid;
   v_first_key := v_first->'events'->0->>'occurrence_key';
@@ -491,7 +489,7 @@ begin
   if jsonb_array_length(v_second->'events') <> 1
      or v_second->>'has_more' <> 'false'
      or v_second->>'next_cursor' is not null then
-    raise exception 'recurring second cursor page is incomplete';
+    raise exception '반복 일정의 두 번째 커서 페이지가 불완전합니다';
   end if;
   v_second_event := (v_second->'events'->0->>'event_id')::uuid;
   v_second_key := v_second->'events'->0->>'occurrence_key';
@@ -500,17 +498,17 @@ begin
      or v_first_key = v_second_key
      or v_first_key is null
      or v_second_key is null then
-    raise exception 'recurring cursor did not resume on a distinct occurrence key';
+    raise exception '반복 일정 커서가 서로 다른 발생 키에서 이어지지 않았습니다';
   end if;
 end;
 $$;
 select ok(
   true,
-  'recurring limit-one pages resume same event_id by distinct occurrence_key'
+  '반복 일정의 한 행짜리 페이지는 서로 다른 occurrence_key로 같은 event_id를 이어 간다'
 );
 
--- Query and server limits fail closed.  Empty is the only query value below
--- the two-codepoint minimum that is accepted.
+-- 쿼리 및 서버 제한은 실패 시 차단한다. 두 코드 포인트 최소 길이보다 짧으면서
+-- 허용되는 쿼리 값은 빈 문자열뿐이다.
 select throws_ok(
   format(
     'select public.search_events_v1(%L::uuid, %L::timestamptz, %L::timestamptz, ''UTC'', %L, null, null, 100, null)',
@@ -518,7 +516,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z', 'x'
   ),
   '22023', 'query must contain 2 to 100 characters and at most 400 bytes',
-  'one-codepoint query is rejected'
+  '코드 포인트 하나인 검색어는 거부된다'
 );
 select throws_ok(
   format(
@@ -527,7 +525,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z', repeat('界', 101)
   ),
   '22023', 'query must contain 2 to 100 characters and at most 400 bytes',
-  'query above the Unicode character maximum is rejected'
+  '유니코드 문자 최대 길이를 넘는 검색어는 거부된다'
 );
 select throws_ok(
   format(
@@ -536,7 +534,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '22023', 'limit must be between 1 and 100',
-  'zero limit is rejected'
+  '0인 제한값은 거부된다'
 );
 select throws_ok(
   format(
@@ -545,11 +543,11 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '22023', 'limit must be between 1 and 100',
-  'limit above the server maximum is rejected'
+  '서버 최대값을 넘는 제한값은 거부된다'
 );
 
--- Creator/participant probes for inactive, outsider, and cross-group users all
--- return the same authorization result without revealing membership state.
+-- 비활성, 외부 및 다른 그룹 사용자를 작성자/참여자로 탐색해도 멤버십 상태를
+-- 노출하지 않고 모두 같은 권한 결과를 반환한다.
 select throws_ok(
   format(
     'select public.search_events_v1(%L::uuid, %L::timestamptz, %L::timestamptz, ''UTC'', null, %L::uuid, null, 100, null)',
@@ -558,7 +556,7 @@ select throws_ok(
     (select inactive_id from event_search_fixture)
   ),
   '42501', 'creator is not an active member of this group',
-  'inactive creator target is rejected'
+  '비활성 생성자 대상은 거부된다'
 );
 select throws_ok(
   format(
@@ -568,7 +566,7 @@ select throws_ok(
     (select outsider_id from event_search_fixture)
   ),
   '42501', 'participant is not an active member of this group',
-  'outsider participant target is rejected'
+  '외부 사용자 참여자 대상은 거부된다'
 );
 select throws_ok(
   format(
@@ -578,11 +576,11 @@ select throws_ok(
     (select other_owner_id from event_search_fixture)
   ),
   '42501', 'creator is not an active member of this group',
-  'cross-group creator target is rejected'
+  '다른 그룹의 생성자 대상은 거부된다'
 );
 
--- All inaccessible groups use the same neutral result, whether missing,
--- archived, or owned by a different caller.
+-- 접근할 수 없는 그룹은 없거나 보관되었거나 다른 호출자가 소유했는지와 관계없이
+-- 같은 중립 결과를 사용한다.
 select set_config(
   'request.jwt.claim.sub', (select outsider_id::text from event_search_fixture), true
 );
@@ -593,7 +591,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '42501', 'group is unavailable',
-  'outsider cannot search the group'
+  '외부 사용자는 그룹을 검색할 수 없다'
 );
 select set_config(
   'request.jwt.claim.sub', (select inactive_id::text from event_search_fixture), true
@@ -605,7 +603,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '42501', 'group is unavailable',
-  'inactive member cannot search the group'
+  '비활성 구성원은 그룹을 검색할 수 없다'
 );
 select set_config(
   'request.jwt.claim.sub', (select owner_id::text from event_search_fixture), true
@@ -617,7 +615,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '42501', 'group is unavailable',
-  'archived group is indistinguishable from an unavailable group'
+  '보관된 그룹은 사용할 수 없는 그룹과 구분되지 않는다'
 );
 select throws_ok(
   format(
@@ -626,10 +624,10 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '42501', 'group is unavailable',
-  'missing group is indistinguishable from an unavailable group'
+  '존재하지 않는 그룹은 사용할 수 없는 그룹과 구분되지 않는다'
 );
 
--- Anonymous JWTs and missing authentication cannot invoke the definer.
+-- 익명 JWT 또는 인증 없음 상태에서는 정의자 함수를 호출할 수 없다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -645,7 +643,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '28000', 'authentication is required',
-  'anonymous JWT is rejected'
+  '익명 JWT는 거부된다'
 );
 select set_config('request.jwt.claims', '{}', true);
 select set_config('request.jwt.claim.sub', '', true);
@@ -656,10 +654,10 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '28000', 'authentication is required',
-  'missing JWT subject is rejected'
+  'JWT subject가 없으면 거부된다'
 );
 
--- Restore owner claims for cursor and bulk tests.
+-- 커서 및 대량 테스트를 위해 소유자 클레임을 복원한다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -682,7 +680,7 @@ select ok(
   (select canonical_cursor from event_search_fixture) is not null
     and (select canonical_cursor from event_search_fixture) !~ '='
     and (select canonical_cursor from event_search_fixture) ~ '^[A-Za-z0-9_-]+$',
-  'search emits an unpadded URL-safe v2 cursor'
+  '검색은 패딩 없는 URL 안전 v2 커서를 반환한다'
 );
 select is(
   (public.search_events_v1(
@@ -691,7 +689,7 @@ select is(
     null, null, 37, (select canonical_cursor from event_search_fixture)
   )->'events'->0->>'title'),
   'Bulk event 37',
-  'v2 cursor resumes after the exact starts_at/event_id/occurrence_key tuple'
+  'v2 커서는 정확한 starts_at/event_id/occurrence_key 튜플 다음부터 재개한다'
 );
 select throws_ok(
   format(
@@ -701,7 +699,7 @@ select throws_ok(
     rtrim(translate(replace(encode(convert_to('[]', 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor has an invalid shape',
-  'non-object cursor is rejected'
+  '객체가 아닌 커서는 거부된다'
 );
 select throws_ok(
   format(
@@ -710,7 +708,7 @@ select throws_ok(
     '2026-04-01T00:00:00Z', '2026-04-02T00:00:00Z', 'not-a-cursor!'
   ),
   '22023', 'cursor is malformed',
-  'malformed cursor alphabet is rejected'
+  '잘못된 문자 집합을 사용한 커서는 거부된다'
 );
 
 create temporary table event_search_seen (
@@ -744,21 +742,21 @@ begin
     if v_payload->>'has_more' = 'true' then
       v_cursor := v_payload->>'next_cursor';
       if v_cursor is null then
-        raise exception 'has_more page omitted next_cursor';
+        raise exception 'has_more 페이지가 next_cursor를 누락했습니다';
       end if;
     else
       exit;
     end if;
   end loop;
   if v_total <> 1001 then
-    raise exception 'expected 1001 bulk rows, got %', v_total;
+    raise exception '대량 행 1,001개를 기대했지만 %개입니다', v_total;
   end if;
 end;
 $$;
 select is(
   (select count(*) from event_search_seen),
   1001::bigint,
-  '1001 bulk events paginate without duplicate rows or omissions'
+  '대량 이벤트 1001개가 중복이나 누락 없이 페이지로 나뉜다'
 );
 
 select * from finish();

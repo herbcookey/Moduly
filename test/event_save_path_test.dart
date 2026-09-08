@@ -413,75 +413,69 @@ class _RecordingSupabaseScheduleRepository extends SupabaseScheduleRepository {
 }
 
 void main() {
-  test(
-    'saveEvent reports a missing group instead of silently succeeding',
-    () async {
-      final repository = _SilentCreateRepository();
-      final auth = _CurrentAuth();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await Future<void>.delayed(Duration.zero);
+  test('saveEvent가 조용히 성공하지 않고 누락된 그룹을 보고한다', () async {
+    final repository = _SilentCreateRepository();
+    final auth = _CurrentAuth();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await Future<void>.delayed(Duration.zero);
 
-      await expectLater(
-        controller.saveEvent(
-          draft: EventDraft(
-            title: 'Not saved',
-            startAt: DateTime.utc(2026, 8, 14, 16),
-            endAt: DateTime.utc(2026, 8, 14, 17),
-          ),
-        ),
-        throwsA(
-          isA<ScheduleValidationException>().having(
-            (error) => error.message,
-            'message',
-            '일정을 저장하려면 로그인하고 그룹을 선택해 주세요.',
-          ),
-        ),
-      );
-      expect(repository.created, isNull);
-      expect(controller.errorMessage, '일정을 저장하려면 로그인하고 그룹을 선택해 주세요.');
-      expect(controller.isSaving, isFalse);
-    },
-  );
-
-  test(
-    'saveEvent upserts the create result before realtime delivery',
-    () async {
-      final repository = _SilentCreateRepository();
-      final auth = _CurrentAuth();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await Future<void>.delayed(Duration.zero);
-      controller.user = _user;
-      controller.selectedGroup = _group;
-
-      final result = await controller.saveEvent(
+    await expectLater(
+      controller.saveEvent(
         draft: EventDraft(
-          title: 'Created remotely',
+          title: 'Not saved',
           startAt: DateTime.utc(2026, 8, 14, 16),
           endAt: DateTime.utc(2026, 8, 14, 17),
         ),
-      );
+      ),
+      throwsA(
+        isA<ScheduleValidationException>().having(
+          (error) => error.message,
+          'message',
+          '일정을 저장하려면 로그인하고 그룹을 선택해 주세요.',
+        ),
+      ),
+    );
+    expect(repository.created, isNull);
+    expect(controller.errorMessage, '일정을 저장하려면 로그인하고 그룹을 선택해 주세요.');
+    expect(controller.isSaving, isFalse);
+  });
 
-      expect(repository.created, isNotNull);
-      expect(result, isA<EventSaveSnapshot>());
-      final saved = (result! as EventSaveSnapshot).event;
-      expect(saved.id, repository.created!.id);
-      expect(saved, controller.events.single);
-      expect(
-        controller.events.map((event) => event.id),
-        contains(repository.created!.id),
-      );
-    },
-  );
+  test('saveEvent가 Realtime 전달 전에 생성 결과를 upsert한다', () async {
+    final repository = _SilentCreateRepository();
+    final auth = _CurrentAuth();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await Future<void>.delayed(Duration.zero);
+    controller.user = _user;
+    controller.selectedGroup = _group;
 
-  test('saveEvent upserts the versioned update result', () async {
+    final result = await controller.saveEvent(
+      draft: EventDraft(
+        title: 'Created remotely',
+        startAt: DateTime.utc(2026, 8, 14, 16),
+        endAt: DateTime.utc(2026, 8, 14, 17),
+      ),
+    );
+
+    expect(repository.created, isNotNull);
+    expect(result, isA<EventSaveSnapshot>());
+    final saved = (result! as EventSaveSnapshot).event;
+    expect(saved.id, repository.created!.id);
+    expect(saved, controller.events.single);
+    expect(
+      controller.events.map((event) => event.id),
+      contains(repository.created!.id),
+    );
+  });
+
+  test('saveEvent가 버전이 있는 갱신 결과를 upsert한다', () async {
     final repository = _SilentCreateRepository();
     final auth = _CurrentAuth();
     final controller = PlannerController(auth: auth, repository: repository);
@@ -568,157 +562,148 @@ void main() {
     }
   });
 
-  test(
-    'event author keeps the normal atomic update path for member-only saves',
-    () async {
-      final repository = _SilentCreateRepository();
-      final auth = _CurrentAuth();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await Future<void>.delayed(Duration.zero);
-      controller.user = _user;
-      controller.selectedGroup = _group;
-      final existing = PlannerEvent(
-        id: 'event-author-members',
-        groupId: _group.id,
-        title: 'Shared event',
-        startAt: DateTime.utc(2026, 8, 14, 16),
-        endAt: DateTime.utc(2026, 8, 14, 17),
-        ownerId: _user.id,
-        memberIds: const <String>['user-1'],
-        timezone: _group.timezone,
-        version: 4,
-      );
-      controller.events = <PlannerEvent>[existing];
+  test('일정 작성자가 멤버 전용 저장에도 일반 원자적 갱신 경로를 유지한다', () async {
+    final repository = _SilentCreateRepository();
+    final auth = _CurrentAuth();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await Future<void>.delayed(Duration.zero);
+    controller.user = _user;
+    controller.selectedGroup = _group;
+    final existing = PlannerEvent(
+      id: 'event-author-members',
+      groupId: _group.id,
+      title: 'Shared event',
+      startAt: DateTime.utc(2026, 8, 14, 16),
+      endAt: DateTime.utc(2026, 8, 14, 17),
+      ownerId: _user.id,
+      memberIds: const <String>['user-1'],
+      timezone: _group.timezone,
+      version: 4,
+    );
+    controller.events = <PlannerEvent>[existing];
 
-      await controller.saveEvent(
-        existing: existing,
-        draft: EventDraft(
-          title: existing.title,
-          note: existing.note,
-          startAt: existing.startAt,
-          endAt: existing.endAt,
-          timezone: existing.timezone,
-          colorValue: existing.colorValue,
-          memberIds: const <String>['user-1', 'member-a'],
-        ),
-      );
+    await controller.saveEvent(
+      existing: existing,
+      draft: EventDraft(
+        title: existing.title,
+        note: existing.note,
+        startAt: existing.startAt,
+        endAt: existing.endAt,
+        timezone: existing.timezone,
+        colorValue: existing.colorValue,
+        memberIds: const <String>['user-1', 'member-a'],
+      ),
+    );
 
-      expect(repository.updated, isNotNull);
-      expect(repository.updated!.version, 5);
-      expect(repository.updated!.memberIds, <String>['member-a', 'user-1']);
-      expect(controller.events.single.memberIds, <String>[
-        'member-a',
-        'user-1',
-      ]);
-    },
-  );
+    expect(repository.updated, isNotNull);
+    expect(repository.updated!.version, 5);
+    expect(repository.updated!.memberIds, <String>['member-a', 'user-1']);
+    expect(controller.events.single.memberIds, <String>['member-a', 'user-1']);
+  });
 
-  test(
-    'saveEvent routes singleton/series conversions through recurrence capability',
-    () async {
-      final repository = LocalScheduleRepository();
-      const demo = PlannerUser(id: 'demo-user', email: 'demo@example.com');
-      final auth = _CurrentAuth(currentUser: demo);
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await Future<void>.delayed(Duration.zero);
-      const group = PlannerGroup(
-        id: 'demo-group',
-        name: 'Demo',
+  test('saveEvent가 단일/시리즈 변환을 반복 기능으로 라우팅한다', () async {
+    final repository = LocalScheduleRepository();
+    const demo = PlannerUser(id: 'demo-user', email: 'demo@example.com');
+    final auth = _CurrentAuth(currentUser: demo);
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await Future<void>.delayed(Duration.zero);
+    const group = PlannerGroup(
+      id: 'demo-group',
+      name: 'Demo',
+      timezone: 'UTC',
+      ownerId: 'demo-user',
+    );
+    controller.user = demo;
+    controller.selectedGroup = group;
+    final start = DateTime.utc(2030, 2, 1, 9);
+    final range = EventRange(
+      startUtc: DateTime.utc(2030, 2, 1),
+      endUtc: DateTime.utc(2030, 2, 5),
+      viewTimezone: 'UTC',
+    );
+    controller.selectedEventRange = range;
+    final single = await repository.createEvent(
+      demo.id,
+      group.id,
+      EventDraft(
+        title: 'convert',
+        startAt: start,
+        endAt: start.add(const Duration(hours: 1)),
         timezone: 'UTC',
-        ownerId: 'demo-user',
-      );
-      controller.user = demo;
-      controller.selectedGroup = group;
-      final start = DateTime.utc(2030, 2, 1, 9);
-      final range = EventRange(
-        startUtc: DateTime.utc(2030, 2, 1),
-        endUtc: DateTime.utc(2030, 2, 5),
-        viewTimezone: 'UTC',
-      );
-      controller.selectedEventRange = range;
-      final single = await repository.createEvent(
-        demo.id,
-        group.id,
-        EventDraft(
-          title: 'convert',
-          startAt: start,
-          endAt: start.add(const Duration(hours: 1)),
-          timezone: 'UTC',
-        ),
-      );
-      controller.events = <PlannerEvent>[single];
-      final rule = RecurrenceRule(
-        frequency: RecurrenceFrequency.daily,
-        end: RecurrenceEnd.count,
-        count: 2,
-      );
+      ),
+    );
+    controller.events = <PlannerEvent>[single];
+    final rule = RecurrenceRule(
+      frequency: RecurrenceFrequency.daily,
+      end: RecurrenceEnd.count,
+      count: 2,
+    );
 
-      final recurringResult = await controller.saveEvent(
-        existing: single,
-        draft: EventDraft(
-          title: single.title,
-          startAt: single.startAt,
-          endAt: single.endAt,
-          timezone: 'UTC',
-          recurrence: rule,
-          memberIds: single.memberIds,
-        ),
-      );
-      expect(recurringResult, isA<EventSaveReceipt>());
-      final recurringReceipt = (recurringResult! as EventSaveReceipt).receipt;
-      expect(recurringReceipt.eventId, single.id);
-      expect(recurringReceipt.occurrenceKey, 'single');
-      expect(recurringReceipt.scope, EventEditScope.all);
-      expect(recurringReceipt.changed, isTrue);
-      var rows = (await repository.eventsForRange(
-        userId: demo.id,
-        groupId: group.id,
-        range: range,
-        limit: 20,
-      )).events.where((event) => event.id == single.id).toList();
-      expect(rows.map((event) => event.occurrenceKey), <String>[
-        occurrenceKeyForIndex(0),
-        occurrenceKeyForIndex(1),
-      ]);
+    final recurringResult = await controller.saveEvent(
+      existing: single,
+      draft: EventDraft(
+        title: single.title,
+        startAt: single.startAt,
+        endAt: single.endAt,
+        timezone: 'UTC',
+        recurrence: rule,
+        memberIds: single.memberIds,
+      ),
+    );
+    expect(recurringResult, isA<EventSaveReceipt>());
+    final recurringReceipt = (recurringResult! as EventSaveReceipt).receipt;
+    expect(recurringReceipt.eventId, single.id);
+    expect(recurringReceipt.occurrenceKey, 'single');
+    expect(recurringReceipt.scope, EventEditScope.all);
+    expect(recurringReceipt.changed, isTrue);
+    var rows = (await repository.eventsForRange(
+      userId: demo.id,
+      groupId: group.id,
+      range: range,
+      limit: 20,
+    )).events.where((event) => event.id == single.id).toList();
+    expect(rows.map((event) => event.occurrenceKey), <String>[
+      occurrenceKeyForIndex(0),
+      occurrenceKeyForIndex(1),
+    ]);
 
-      final occurrence = rows.first;
-      controller.events = <PlannerEvent>[occurrence];
-      final singletonResult = await controller.saveEvent(
-        existing: occurrence,
-        draft: EventDraft(
-          title: 'converted back',
-          startAt: occurrence.startAt,
-          endAt: occurrence.endAt,
-          timezone: 'UTC',
-          memberIds: occurrence.memberIds,
-        ),
-      );
-      expect(singletonResult, isA<EventSaveReceipt>());
-      final singletonReceipt = (singletonResult! as EventSaveReceipt).receipt;
-      expect(singletonReceipt.eventId, occurrence.id);
-      expect(singletonReceipt.occurrenceKey, occurrence.occurrenceKey);
-      expect(singletonReceipt.scope, EventEditScope.all);
-      expect(singletonReceipt.changed, isTrue);
-      rows = (await repository.eventsForRange(
-        userId: demo.id,
-        groupId: group.id,
-        range: range,
-        limit: 20,
-      )).events.where((event) => event.id == single.id).toList();
-      expect(rows, hasLength(1));
-      expect(rows.single.occurrenceKey, 'single');
-      expect(rows.single.recurrenceRule, isNull);
-      expect(rows.single.title, 'converted back');
-    },
-  );
+    final occurrence = rows.first;
+    controller.events = <PlannerEvent>[occurrence];
+    final singletonResult = await controller.saveEvent(
+      existing: occurrence,
+      draft: EventDraft(
+        title: 'converted back',
+        startAt: occurrence.startAt,
+        endAt: occurrence.endAt,
+        timezone: 'UTC',
+        memberIds: occurrence.memberIds,
+      ),
+    );
+    expect(singletonResult, isA<EventSaveReceipt>());
+    final singletonReceipt = (singletonResult! as EventSaveReceipt).receipt;
+    expect(singletonReceipt.eventId, occurrence.id);
+    expect(singletonReceipt.occurrenceKey, occurrence.occurrenceKey);
+    expect(singletonReceipt.scope, EventEditScope.all);
+    expect(singletonReceipt.changed, isTrue);
+    rows = (await repository.eventsForRange(
+      userId: demo.id,
+      groupId: group.id,
+      range: range,
+      limit: 20,
+    )).events.where((event) => event.id == single.id).toList();
+    expect(rows, hasLength(1));
+    expect(rows.single.occurrenceKey, 'single');
+    expect(rows.single.recurrenceRule, isNull);
+    expect(rows.single.title, 'converted back');
+  });
 
   test('반복 저장 후 새로고침 중 그룹이 바뀌면 오래된 성공 결과를 반환하지 않는다', () async {
     final repository = _RefreshGatedRecurringRepository();
@@ -972,209 +957,181 @@ void main() {
     expect(controller.events.single.title, refreshed.title);
   });
 
-  test(
-    'saveEvent routes recurring member-only changes through assignment capability',
-    () async {
-      final repository = LocalScheduleRepository();
-      const admin = PlannerUser(id: 'demo-user', email: 'demo@example.com');
-      const creator = PlannerUser(id: 'member-jin', email: 'jin@example.com');
-      const group = PlannerGroup(
-        id: 'demo-group',
-        name: '우리 가족',
-        timezone: 'Asia/Seoul',
-        ownerId: 'demo-user',
-      );
-      final auth = _CurrentAuth(currentUser: admin);
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await Future<void>.delayed(Duration.zero);
-      final anchor = DateTime.utc(2031, 2, 3, 9);
-      final rule = RecurrenceRule(
-        frequency: RecurrenceFrequency.daily,
-        end: RecurrenceEnd.count,
-        count: 3,
-      );
-      final created = await repository.createRecurringEvent(
-        creator.id,
-        group.id,
-        EventDraft(
-          title: 'shared series',
-          startAt: anchor,
-          endAt: anchor.add(const Duration(hours: 1)),
-          timezone: 'UTC',
-          recurrence: rule,
-          memberIds: const <String>['member-jin'],
-        ),
-      );
-      final range = EventRange(
-        startUtc: DateTime.utc(2031, 2, 3),
-        endUtc: DateTime.utc(2031, 2, 8),
-        viewTimezone: 'UTC',
-      );
-      final occurrence = (await repository.eventsForRange(
-        userId: admin.id,
-        groupId: group.id,
-        range: range,
-        limit: 20,
-      )).events.first;
-      expect(occurrence.id, created.id);
-      controller.user = admin;
-      controller.selectedGroup = group;
-      controller.members = await repository.membersForGroup(group.id);
-      controller.selectedEventRange = range;
-      controller.events = <PlannerEvent>[occurrence];
-
-      await controller.saveEvent(
-        existing: occurrence,
-        draft: EventDraft(
-          title: occurrence.title,
-          note: occurrence.note,
-          startAt: occurrence.startAt,
-          endAt: occurrence.endAt,
-          timezone: occurrence.timezone,
-          colorValue: occurrence.colorValue,
-          memberIds: const <String>['member-jin', 'member-soo'],
-          recurrence: occurrence.recurrenceRule,
-        ),
-      );
-
-      final refreshed = (await repository.eventsForRange(
-        userId: admin.id,
-        groupId: group.id,
-        range: range,
-        limit: 20,
-      )).events;
-      expect(refreshed, hasLength(3));
-      expect(
-        refreshed.every(
-          (event) => event.memberIds.toSet().containsAll(const <String>{
-            'member-jin',
-            'member-soo',
-          }),
-        ),
-        isTrue,
-      );
-      expect(
-        refreshed.every((event) => event.version == occurrence.version + 1),
-        isTrue,
-      );
-      expect(controller.events, hasLength(3));
-      expect(
-        controller.events.every((event) => event.occurrenceKey != 'single'),
-        isTrue,
-      );
-    },
-  );
-
-  test(
-    'Supabase member-only save dispatches assignment RPC instead of recurrence RPC',
-    () async {
-      final transport = _RecordingRpcTransport(<String, dynamic>{
-        'group_id': 'group-remote',
-        'event_id': 'event-remote',
-        'occurrence_key': occurrenceKeyForIndex(0),
-        'series_version': 3,
-        'occurrence_version': 0,
-        'scope': 'all',
-        'committed': true,
-        'changed': true,
-      });
-      final client = SupabaseClient(
-        'https://example.supabase.co',
-        'sb_publishable_test',
-        authOptions: const AuthClientOptions(
-          autoRefreshToken: false,
-          authFlowType: AuthFlowType.implicit,
-        ),
-        httpClient: transport,
-      );
-      final repository = _RecordingSupabaseScheduleRepository(client);
-      final auth = _CurrentAuth();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-        client.dispose();
-      });
-      await Future<void>.delayed(Duration.zero);
-      const group = PlannerGroup(
-        id: 'group-remote',
-        name: 'Remote',
+  test('saveEvent가 반복 멤버 전용 변경을 할당 기능으로 라우팅한다', () async {
+    final repository = LocalScheduleRepository();
+    const admin = PlannerUser(id: 'demo-user', email: 'demo@example.com');
+    const creator = PlannerUser(id: 'member-jin', email: 'jin@example.com');
+    const group = PlannerGroup(
+      id: 'demo-group',
+      name: '우리 가족',
+      timezone: 'Asia/Seoul',
+      ownerId: 'demo-user',
+    );
+    final auth = _CurrentAuth(currentUser: admin);
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await Future<void>.delayed(Duration.zero);
+    final anchor = DateTime.utc(2031, 2, 3, 9);
+    final rule = RecurrenceRule(
+      frequency: RecurrenceFrequency.daily,
+      end: RecurrenceEnd.count,
+      count: 3,
+    );
+    final created = await repository.createRecurringEvent(
+      creator.id,
+      group.id,
+      EventDraft(
+        title: 'shared series',
+        startAt: anchor,
+        endAt: anchor.add(const Duration(hours: 1)),
         timezone: 'UTC',
-        ownerId: 'user-1',
-      );
-      final rule = RecurrenceRule(
-        frequency: RecurrenceFrequency.daily,
-        end: RecurrenceEnd.count,
-        count: 2,
-      );
-      final existing = PlannerEvent(
-        id: 'event-remote',
-        groupId: group.id,
-        seriesId: 'event-remote',
-        title: 'remote series',
-        startAt: DateTime.utc(2031, 2, 3, 9),
-        endAt: DateTime.utc(2031, 2, 3, 10),
-        ownerId: 'creator-remote',
-        memberIds: const <String>['creator-remote'],
-        timezone: 'UTC',
-        version: 2,
-        occurrenceKey: occurrenceKeyForIndex(0),
-        occurrenceIndex: 0,
-        occurrenceVersion: 0,
-        isOccurrence: true,
-        recurrenceRule: rule,
-      );
-      controller.user = _user;
-      controller.selectedGroup = group;
-      controller.members = const <PlannerMember>[
-        PlannerMember(
-          id: 'user-1',
-          name: 'Owner',
-          email: 'user@example.com',
-          isOwner: true,
-        ),
-        PlannerMember(
-          id: 'creator-remote',
-          name: 'Creator',
-          email: 'creator@example.com',
-        ),
-      ];
-      controller.selectedEventRange = EventRange(
-        startUtc: DateTime.utc(2031, 2, 3),
-        endUtc: DateTime.utc(2031, 2, 5),
-        viewTimezone: 'UTC',
-      );
-      controller.events = <PlannerEvent>[existing];
+        recurrence: rule,
+        memberIds: const <String>['member-jin'],
+      ),
+    );
+    final range = EventRange(
+      startUtc: DateTime.utc(2031, 2, 3),
+      endUtc: DateTime.utc(2031, 2, 8),
+      viewTimezone: 'UTC',
+    );
+    final occurrence = (await repository.eventsForRange(
+      userId: admin.id,
+      groupId: group.id,
+      range: range,
+      limit: 20,
+    )).events.first;
+    expect(occurrence.id, created.id);
+    controller.user = admin;
+    controller.selectedGroup = group;
+    controller.members = await repository.membersForGroup(group.id);
+    controller.selectedEventRange = range;
+    controller.events = <PlannerEvent>[occurrence];
 
-      await expectLater(
-        controller.saveEvent(
-          existing: existing,
-          draft: EventDraft(
-            title: existing.title,
-            note: existing.note,
-            startAt: existing.startAt,
-            endAt: existing.endAt,
-            timezone: existing.timezone,
-            colorValue: existing.colorValue,
-            memberIds: const <String>[],
-            recurrence: rule,
-          ),
-        ),
-        throwsA(isA<ScheduleValidationException>()),
-      );
-      // Creator exclusion is rejected before any RPC is issued.
-      expect(
-        transport.requests.whereType<http.Request>().where(
-          (request) => request.url.path.contains('/rpc/'),
-        ),
-        isEmpty,
-      );
+    await controller.saveEvent(
+      existing: occurrence,
+      draft: EventDraft(
+        title: occurrence.title,
+        note: occurrence.note,
+        startAt: occurrence.startAt,
+        endAt: occurrence.endAt,
+        timezone: occurrence.timezone,
+        colorValue: occurrence.colorValue,
+        memberIds: const <String>['member-jin', 'member-soo'],
+        recurrence: occurrence.recurrenceRule,
+      ),
+    );
 
-      await controller.saveEvent(
+    final refreshed = (await repository.eventsForRange(
+      userId: admin.id,
+      groupId: group.id,
+      range: range,
+      limit: 20,
+    )).events;
+    expect(refreshed, hasLength(3));
+    expect(
+      refreshed.every(
+        (event) => event.memberIds.toSet().containsAll(const <String>{
+          'member-jin',
+          'member-soo',
+        }),
+      ),
+      isTrue,
+    );
+    expect(
+      refreshed.every((event) => event.version == occurrence.version + 1),
+      isTrue,
+    );
+    expect(controller.events, hasLength(3));
+    expect(
+      controller.events.every((event) => event.occurrenceKey != 'single'),
+      isTrue,
+    );
+  });
+
+  test('Supabase 멤버 전용 저장이 반복 RPC 대신 할당 RPC를 호출한다', () async {
+    final transport = _RecordingRpcTransport(<String, dynamic>{
+      'group_id': 'group-remote',
+      'event_id': 'event-remote',
+      'occurrence_key': occurrenceKeyForIndex(0),
+      'series_version': 3,
+      'occurrence_version': 0,
+      'scope': 'all',
+      'committed': true,
+      'changed': true,
+    });
+    final client = SupabaseClient(
+      'https://example.supabase.co',
+      'sb_publishable_test',
+      authOptions: const AuthClientOptions(
+        autoRefreshToken: false,
+        authFlowType: AuthFlowType.implicit,
+      ),
+      httpClient: transport,
+    );
+    final repository = _RecordingSupabaseScheduleRepository(client);
+    final auth = _CurrentAuth();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+      client.dispose();
+    });
+    await Future<void>.delayed(Duration.zero);
+    const group = PlannerGroup(
+      id: 'group-remote',
+      name: 'Remote',
+      timezone: 'UTC',
+      ownerId: 'user-1',
+    );
+    final rule = RecurrenceRule(
+      frequency: RecurrenceFrequency.daily,
+      end: RecurrenceEnd.count,
+      count: 2,
+    );
+    final existing = PlannerEvent(
+      id: 'event-remote',
+      groupId: group.id,
+      seriesId: 'event-remote',
+      title: 'remote series',
+      startAt: DateTime.utc(2031, 2, 3, 9),
+      endAt: DateTime.utc(2031, 2, 3, 10),
+      ownerId: 'creator-remote',
+      memberIds: const <String>['creator-remote'],
+      timezone: 'UTC',
+      version: 2,
+      occurrenceKey: occurrenceKeyForIndex(0),
+      occurrenceIndex: 0,
+      occurrenceVersion: 0,
+      isOccurrence: true,
+      recurrenceRule: rule,
+    );
+    controller.user = _user;
+    controller.selectedGroup = group;
+    controller.members = const <PlannerMember>[
+      PlannerMember(
+        id: 'user-1',
+        name: 'Owner',
+        email: 'user@example.com',
+        isOwner: true,
+      ),
+      PlannerMember(
+        id: 'creator-remote',
+        name: 'Creator',
+        email: 'creator@example.com',
+      ),
+    ];
+    controller.selectedEventRange = EventRange(
+      startUtc: DateTime.utc(2031, 2, 3),
+      endUtc: DateTime.utc(2031, 2, 5),
+      viewTimezone: 'UTC',
+    );
+    controller.events = <PlannerEvent>[existing];
+
+    await expectLater(
+      controller.saveEvent(
         existing: existing,
         draft: EventDraft(
           title: existing.title,
@@ -1183,41 +1140,61 @@ void main() {
           endAt: existing.endAt,
           timezone: existing.timezone,
           colorValue: existing.colorValue,
-          memberIds: const <String>['creator-remote', 'user-1'],
+          memberIds: const <String>[],
           recurrence: rule,
         ),
-      );
+      ),
+      throwsA(isA<ScheduleValidationException>()),
+    );
+    // 생성자 제외는 RPC를 보내기 전에 거부한다.
+    expect(
+      transport.requests.whereType<http.Request>().where(
+        (request) => request.url.path.contains('/rpc/'),
+      ),
+      isEmpty,
+    );
 
-      final rpcPaths = transport.requests
-          .whereType<http.Request>()
-          .map((request) => request.url.path)
-          .toList(growable: false);
-      expect(
-        rpcPaths,
-        contains('/rest/v1/rpc/replace_recurring_event_members_if_version'),
-      );
-      expect(
-        rpcPaths,
-        isNot(
-          contains('/rest/v1/rpc/update_event_occurrence_scope_if_version'),
-        ),
-      );
-      final replaceRequest = transport.requests
-          .whereType<http.Request>()
-          .firstWhere(
-            (request) => request.url.path.contains(
-              '/rpc/replace_recurring_event_members_if_version',
-            ),
-          );
-      final body = jsonDecode(replaceRequest.body) as Map<String, dynamic>;
-      expect(body['p_event_id'], 'event-remote');
-      expect(body['p_expected_version'], 2);
-      expect(body['p_occurrence_key'], occurrenceKeyForIndex(0));
-      expect(body['p_member_ids'], <Object?>['creator-remote', 'user-1']);
-    },
-  );
+    await controller.saveEvent(
+      existing: existing,
+      draft: EventDraft(
+        title: existing.title,
+        note: existing.note,
+        startAt: existing.startAt,
+        endAt: existing.endAt,
+        timezone: existing.timezone,
+        colorValue: existing.colorValue,
+        memberIds: const <String>['creator-remote', 'user-1'],
+        recurrence: rule,
+      ),
+    );
 
-  test('selectGroup starts events when member metadata fails', () async {
+    final rpcPaths = transport.requests
+        .whereType<http.Request>()
+        .map((request) => request.url.path)
+        .toList(growable: false);
+    expect(
+      rpcPaths,
+      contains('/rest/v1/rpc/replace_recurring_event_members_if_version'),
+    );
+    expect(
+      rpcPaths,
+      isNot(contains('/rest/v1/rpc/update_event_occurrence_scope_if_version')),
+    );
+    final replaceRequest = transport.requests
+        .whereType<http.Request>()
+        .firstWhere(
+          (request) => request.url.path.contains(
+            '/rpc/replace_recurring_event_members_if_version',
+          ),
+        );
+    final body = jsonDecode(replaceRequest.body) as Map<String, dynamic>;
+    expect(body['p_event_id'], 'event-remote');
+    expect(body['p_expected_version'], 2);
+    expect(body['p_occurrence_key'], occurrenceKeyForIndex(0));
+    expect(body['p_member_ids'], <Object?>['creator-remote', 'user-1']);
+  });
+
+  test('멤버 메타데이터가 실패해도 selectGroup이 일정을 시작한다', () async {
     final repository = _MemberFailureRepository();
     final auth = _CurrentAuth();
     final controller = PlannerController(auth: auth, repository: repository);
@@ -1238,15 +1215,13 @@ void main() {
     expect(controller.errorMessage, '잠시 후 다시 시도해 주세요.');
   });
 
-  testWidgets('editor renders a save error and stays on the form', (
-    tester,
-  ) async {
+  testWidgets('편집기가 저장 오류를 표시하고 폼에 머문다', (tester) async {
     final repository = _SilentCreateRepository();
     final auth = _CurrentAuth(currentUser: null);
     final controller = PlannerController(auth: auth, repository: repository);
     addTearDown(auth.dispose);
-    // Inject the controller directly so this widget test exercises the form
-    // without depending on provider-created bootstrap timing.
+    // 공급자가 만든 부트스트랩 시점에 의존하지 않고 폼을 검사하도록
+    // 이 위젯 테스트에는 컨트롤러를 직접 주입한다.
     controller.user = _user;
     controller.isLoading = false;
 
@@ -1275,56 +1250,51 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets(
-    'editor round-trips legacy all-day dates without extending the end date',
-    (tester) async {
-      final repository = _SilentCreateRepository();
-      final auth = _CurrentAuth(currentUser: null);
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(auth.dispose);
-      controller.user = _user;
-      controller.selectedGroup = _group;
-      final existing = PlannerEvent(
-        id: 'legacy-all-day',
-        groupId: _group.id,
-        title: 'Legacy all-day',
-        startAt: DateTime.utc(2026, 8, 10),
-        endAt: DateTime.utc(2026, 8, 13),
-        allDay: true,
-        ownerId: _user.id,
-        timezone: 'UTC',
-      );
-      controller.events = <PlannerEvent>[existing];
+  testWidgets('편집기가 종료일을 늘리지 않고 기존 종일 날짜를 왕복 처리한다', (tester) async {
+    final repository = _SilentCreateRepository();
+    final auth = _CurrentAuth(currentUser: null);
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(auth.dispose);
+    controller.user = _user;
+    controller.selectedGroup = _group;
+    final existing = PlannerEvent(
+      id: 'legacy-all-day',
+      groupId: _group.id,
+      title: 'Legacy all-day',
+      startAt: DateTime.utc(2026, 8, 10),
+      endAt: DateTime.utc(2026, 8, 13),
+      allDay: true,
+      ownerId: _user.id,
+      timezone: 'UTC',
+    );
+    controller.events = <PlannerEvent>[existing];
 
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: <Override>[
-            plannerControllerProvider.overrideWith((ref) => controller),
-          ],
-          child: const MaterialApp(
-            home: EventEditorScreen(eventId: 'legacy-all-day'),
-          ),
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: <Override>[
+          plannerControllerProvider.overrideWith((ref) => controller),
+        ],
+        child: const MaterialApp(
+          home: EventEditorScreen(eventId: 'legacy-all-day'),
         ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-      await tester.tap(find.widgetWithText(TextButton, '저장'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.widgetWithText(TextButton, '저장'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
-      final updated = repository.updated;
-      expect(updated, isNotNull);
-      expect(updated!.allDay, isTrue);
-      expect(updated.startAt, existing.startAt);
-      expect(updated.endAt, existing.endAt);
-      expect(updated.allDayStartDate, DateTime(2026, 8, 10));
-      expect(updated.allDayEndDate, DateTime(2026, 8, 13));
-    },
-  );
+    final updated = repository.updated;
+    expect(updated, isNotNull);
+    expect(updated!.allDay, isTrue);
+    expect(updated.startAt, existing.startAt);
+    expect(updated.endAt, existing.endAt);
+    expect(updated.allDayStartDate, DateTime(2026, 8, 10));
+    expect(updated.allDayEndDate, DateTime(2026, 8, 13));
+  });
 
-  testWidgets('editor preserves all existing event member assignments', (
-    tester,
-  ) async {
+  testWidgets('편집기가 기존 일정 멤버 할당을 모두 보존한다', (tester) async {
     final repository = _SilentCreateRepository();
     final auth = _CurrentAuth(currentUser: null);
     final controller = PlannerController(auth: auth, repository: repository);
@@ -1362,54 +1332,49 @@ void main() {
     expect(repository.updated?.memberIds, existing.memberIds);
   });
 
-  testWidgets(
-    'non-owner events open read-only without save or delete actions',
-    (tester) async {
-      final repository = LocalScheduleRepository();
-      final auth = _CurrentAuth(currentUser: null);
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(auth.dispose);
-      controller.user = _user;
-      controller.events = <PlannerEvent>[
-        PlannerEvent(
-          id: 'other-event',
-          groupId: _group.id,
-          title: 'Other member event',
-          startAt: DateTime.utc(2026, 8, 14, 16),
-          endAt: DateTime.utc(2026, 8, 14, 17),
-          ownerId: 'other-user',
-          timezone: _group.timezone,
+  testWidgets('소유자가 아닌 일정이 저장이나 삭제 동작 없이 읽기 전용으로 열린다', (tester) async {
+    final repository = LocalScheduleRepository();
+    final auth = _CurrentAuth(currentUser: null);
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(auth.dispose);
+    controller.user = _user;
+    controller.events = <PlannerEvent>[
+      PlannerEvent(
+        id: 'other-event',
+        groupId: _group.id,
+        title: 'Other member event',
+        startAt: DateTime.utc(2026, 8, 14, 16),
+        endAt: DateTime.utc(2026, 8, 14, 17),
+        ownerId: 'other-user',
+        timezone: _group.timezone,
+      ),
+    ];
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: <Override>[
+          plannerControllerProvider.overrideWith((ref) => controller),
+        ],
+        child: const MaterialApp(
+          home: EventEditorScreen(eventId: 'other-event'),
         ),
-      ];
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: <Override>[
-            plannerControllerProvider.overrideWith((ref) => controller),
-          ],
-          child: const MaterialApp(
-            home: EventEditorScreen(eventId: 'other-event'),
-          ),
-        ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('일정 보기'), findsOneWidget);
+    expect(find.byTooltip('삭제'), findsNothing);
+    expect(find.text('저장'), findsNothing);
+    expect(find.text('일정 저장하기'), findsNothing);
+    expect(find.text('이 일정은 작성자만 수정할 수 있어요.'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField).first).readOnly,
+      isTrue,
+    );
+  });
 
-      expect(find.text('일정 보기'), findsOneWidget);
-      expect(find.byTooltip('삭제'), findsNothing);
-      expect(find.text('저장'), findsNothing);
-      expect(find.text('일정 저장하기'), findsNothing);
-      expect(find.text('이 일정은 작성자만 수정할 수 있어요.'), findsOneWidget);
-      expect(
-        tester.widget<TextField>(find.byType(TextField).first).readOnly,
-        isTrue,
-      );
-    },
-  );
-
-  testWidgets('event color choices expose distinct Korean semantics labels', (
-    tester,
-  ) async {
+  testWidgets('일정 색상 선택지가 구별되는 한국어 의미 라벨을 제공한다', (tester) async {
     final repository = LocalScheduleRepository();
     final auth = _CurrentAuth(currentUser: null);
     final controller = PlannerController(auth: auth, repository: repository);

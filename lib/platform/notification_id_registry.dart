@@ -6,18 +6,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/notification_identity.dart';
 
-/// Small async key/value seam used by the durable notification-ID registry.
-/// Keeping it separate from [SharedPreferencesAsync] makes malformed-storage
-/// and reload behavior testable without a native platform channel.
+/// 영구 알림 ID 레지스트리가 사용하는 작은 비동기 키/값 접점이다.
+/// [SharedPreferencesAsync]와 분리하면 네이티브 플랫폼 채널 없이도 잘못된 저장소와
+/// 다시 불러오기 동작을 테스트할 수 있다.
 abstract interface class NotificationStringStore {
   Future<String?> read(String key);
 
   Future<void> write(String key, String value);
 }
 
-/// Production [NotificationStringStore] backed by the non-cached async
-/// SharedPreferences API. The registry serializes writes so two reconciliation
-/// callbacks cannot interleave individual platform writes.
+/// 캐시를 사용하지 않는 비동기 SharedPreferences API 기반의 프로덕션
+/// [NotificationStringStore]다. 두 조정 콜백의 개별 플랫폼 쓰기가 서로
+/// 끼어들지 않도록 레지스트리가 쓰기를 순차 처리한다.
 class SharedPreferencesAsyncStringStore implements NotificationStringStore {
   SharedPreferencesAsyncStringStore({SharedPreferencesAsync? preferences})
     : preferences = preferences ?? SharedPreferencesAsync();
@@ -32,12 +32,12 @@ class SharedPreferencesAsyncStringStore implements NotificationStringStore {
       preferences.setString(key, value);
 }
 
-/// Durable registry for the allocator's positive 31-bit IDs.
+/// 할당기의 양의 31비트 ID를 위한 영구 레지스트리다.
 ///
-/// Values contain only a versioned list of `(numeric id, framed identity)`
-/// entries. User namespaces are SHA-256 digests, so the preferences key does
-/// not reveal an account identifier. Unknown/malformed storage fails closed
-/// with [FormatException]; it is never silently treated as an empty registry.
+/// 값에는 버전이 지정된 `(숫자 ID, 프레임 식별자)` 항목 목록만 들어 있다.
+/// 사용자 네임스페이스는 SHA-256 다이제스트이므로 환경설정 키에 계정 식별자가 드러나지
+/// 않는다. 알 수 없거나 잘못된 저장소는 [FormatException]과 함께 실패 시 차단하며,
+/// 빈 레지스트리로 조용히 처리하지 않는다.
 class SharedPreferencesAsyncNotificationIdRegistry
     implements NotificationIdRegistry {
   SharedPreferencesAsyncNotificationIdRegistry({
@@ -47,7 +47,7 @@ class SharedPreferencesAsyncNotificationIdRegistry
            store ??
            SharedPreferencesAsyncStringStore(preferences: preferences) {
     if (store != null && preferences != null) {
-      throw ArgumentError('store and preferences cannot both be supplied');
+      throw ArgumentError('store와 preferences를 동시에 제공할 수 없습니다');
     }
   }
 
@@ -60,8 +60,7 @@ class SharedPreferencesAsyncNotificationIdRegistry
   final NotificationStringStore store;
   Future<void> _writeQueue = Future<void>.value();
 
-  /// Exposed for tests and diagnostics; it is a one-way digest and contains
-  /// no raw user identifier.
+  /// 테스트와 진단을 위해 노출한다. 단방향 다이제스트이며 원시 사용자 식별자가 없다.
   String storageKeyForUser(String userId) {
     final normalized = _normalizeUserId(userId);
     final digest = sha256.convert(utf8.encode(normalized)).toString();
@@ -104,8 +103,8 @@ class SharedPreferencesAsyncNotificationIdRegistry
   }
 
   Future<T> _serialized<T>(Future<T> Function() operation) {
-    // Keep the queue itself error-free so one failed platform operation does
-    // not prevent a later settings retry from reaching SharedPreferences.
+    // 플랫폼 작업 하나가 실패해도 이후 설정 재시도가 SharedPreferences에 도달할 수
+    // 있도록 대기열 자체는 오류 없는 상태로 유지한다.
     final result = _writeQueue.then<T>((_) => operation());
     _writeQueue = result.then<void>(
       (_) {},

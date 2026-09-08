@@ -77,7 +77,7 @@ void main() {
           localCapability: NotificationCapabilityState.unsupported,
           pushCapability: NotificationCapabilityState.unsupported,
           onRequestPermission: () async {
-            fail('unsupported must not request OS permission');
+            fail('지원하지 않는 상태에서는 OS 권한을 요청하면 안 된다');
           },
         ),
       ),

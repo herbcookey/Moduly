@@ -100,8 +100,8 @@ class _RangeRepository extends LocalScheduleRepository {
       Stream<void>.empty();
 }
 
-/// A pre-calendar-range adapter shape. Its inherited bounded capability is
-/// intentionally disabled by the runtime-type compatibility switch.
+/// 달력 범위 기능 도입 전의 어댑터 형태다. 상속받은 범위 제한 기능은 런타임
+/// 타입 호환성 스위치에서 의도적으로 비활성화한다.
 class _LegacyRepository extends LocalScheduleRepository {}
 
 PlannerEvent _event({
@@ -205,74 +205,66 @@ void _showAgenda(PlannerController controller) {
 }
 
 void main() {
-  testWidgets(
-    'daily view remains the default and existing event cards render',
-    (tester) async {
-      final auth = _TestAuth();
-      final event = _event(id: 'day-event', title: '기존 일간 일정');
-      final repository = _RangeRepository(rangeEvents: <PlannerEvent>[event]);
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        events: <PlannerEvent>[event],
-      );
-      addTearDown(() {
-        auth.dispose();
-      });
+  testWidgets('일간 보기가 기본값으로 유지되고 기존 일정 카드가 표시된다', (tester) async {
+    final auth = _TestAuth();
+    final event = _event(id: 'day-event', title: '기존 일간 일정');
+    final repository = _RangeRepository(rangeEvents: <PlannerEvent>[event]);
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      events: <PlannerEvent>[event],
+    );
+    addTearDown(() {
+      auth.dispose();
+    });
 
-      await tester.pumpWidget(_app(controller));
-      await tester.pump();
+    await tester.pumpWidget(_app(controller));
+    await tester.pump();
 
-      expect(controller.calendarView, CalendarViewMode.day);
-      expect(find.text('기존 일간 일정'), findsOneWidget);
-      expect(find.text('일간'), findsOneWidget);
-      expect(
-        tester.getSize(find.byTooltip('이전 기간')).height,
-        greaterThanOrEqualTo(48),
-      );
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(controller.calendarView, CalendarViewMode.day);
+    expect(find.text('기존 일간 일정'), findsOneWidget);
+    expect(find.text('일간'), findsOneWidget);
+    expect(
+      tester.getSize(find.byTooltip('이전 기간')).height,
+      greaterThanOrEqualTo(48),
+    );
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets(
-    'legacy adapter shows loading while group selection has no event snapshot',
-    (tester) async {
-      final auth = _TestAuth();
-      final repository = _LegacyRepository();
-      final controller = PlannerController(auth: auth, repository: repository)
-        ..user = _user
-        ..groups = <PlannerGroup>[_group]
-        ..selectedGroup = _group
-        ..selectedDay = DateTime(2026, 8, 10)
-        ..events = const <PlannerEvent>[]
-        ..isLoadingEvents = false
-        ..isLoading = false
-        ..authFlowState = AuthFlowState.signedIn;
-      addTearDown(auth.dispose);
+  testWidgets('그룹 선택에 일정 스냅샷이 없을 때 기존 어댑터가 로딩을 표시한다', (tester) async {
+    final auth = _TestAuth();
+    final repository = _LegacyRepository();
+    final controller = PlannerController(auth: auth, repository: repository)
+      ..user = _user
+      ..groups = <PlannerGroup>[_group]
+      ..selectedGroup = _group
+      ..selectedDay = DateTime(2026, 8, 10)
+      ..events = const <PlannerEvent>[]
+      ..isLoadingEvents = false
+      ..isLoading = false
+      ..authFlowState = AuthFlowState.signedIn;
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(_app(controller));
-      await tester.pump();
+    await tester.pumpWidget(_app(controller));
+    await tester.pump();
 
-      // Reproduce the brief selectGroup state after the legacy stream has
-      // cleared events but before its auxiliary reads have completed.
-      controller.isLoading = true;
-      controller.notifyListeners();
-      await tester.pump();
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
-      expect(find.text('비어 있는 하루예요'), findsNothing);
-      expect(tester.takeException(), isNull);
+    // 레거시 스트림이 일정을 지운 뒤 보조 읽기를 마치기 전의 짧은
+    // selectGroup 상태를 재현한다.
+    controller.isLoading = true;
+    controller.notifyListeners();
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('비어 있는 하루예요'), findsNothing);
+    expect(tester.takeException(), isNull);
 
-      controller.isLoading = false;
-      controller.notifyListeners();
-      await tester.pump();
-      expect(find.text('비어 있는 하루예요'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    controller.isLoading = false;
+    controller.notifyListeners();
+    await tester.pump();
+    expect(find.text('비어 있는 하루예요'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets('month mode exposes a 7-column grid and cell selection', (
-    tester,
-  ) async {
+  testWidgets('월간 모드가 7열 그리드와 셀 선택을 제공한다', (tester) async {
     final auth = _TestAuth();
     final event = _event(id: 'month-event', title: '월간 일정');
     final repository = _RangeRepository(rangeEvents: <PlannerEvent>[event]);
@@ -313,9 +305,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('leap February and a six-row month expose visible grids', (
-    tester,
-  ) async {
+  testWidgets('윤년 2월과 6행인 달이 보이는 그리드를 제공한다', (tester) async {
     final auth = _TestAuth();
     final event = _event(
       id: 'leap-event',
@@ -350,65 +340,60 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'agenda orders all-day before timed and shows cross-midnight once',
-    (tester) async {
-      final auth = _TestAuth();
-      final allDay = _event(
-        id: 'agenda-all-day',
-        title: '종일 모임',
-        allDay: true,
-        startAt: DateTime.utc(2026, 8, 10),
-        endAt: DateTime.utc(2026, 8, 12),
-        allDayStartDate: DateTime(2026, 8, 10),
-        allDayEndDate: DateTime(2026, 8, 12),
-      );
-      final timed = _event(
-        id: 'agenda-timed',
-        title: '아침 회의',
-        startAt: DateTime.utc(2026, 8, 10, 8),
-        endAt: DateTime.utc(2026, 8, 10, 9),
-      );
-      final overnight = _event(
-        id: 'agenda-overnight',
-        title: '자정 넘김',
-        startAt: DateTime.utc(2026, 8, 10, 23, 30),
-        endAt: DateTime.utc(2026, 8, 11, 1, 30),
-      );
-      final repository = _RangeRepository(
-        rangeEvents: <PlannerEvent>[overnight, timed, allDay],
-      );
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        events: <PlannerEvent>[overnight, timed, allDay],
-      );
-      addTearDown(() {
-        auth.dispose();
-      });
+  testWidgets('일정 목록이 종일 일정을 먼저 정렬하고 자정 통과 일정을 한 번 표시한다', (tester) async {
+    final auth = _TestAuth();
+    final allDay = _event(
+      id: 'agenda-all-day',
+      title: '종일 모임',
+      allDay: true,
+      startAt: DateTime.utc(2026, 8, 10),
+      endAt: DateTime.utc(2026, 8, 12),
+      allDayStartDate: DateTime(2026, 8, 10),
+      allDayEndDate: DateTime(2026, 8, 12),
+    );
+    final timed = _event(
+      id: 'agenda-timed',
+      title: '아침 회의',
+      startAt: DateTime.utc(2026, 8, 10, 8),
+      endAt: DateTime.utc(2026, 8, 10, 9),
+    );
+    final overnight = _event(
+      id: 'agenda-overnight',
+      title: '자정 넘김',
+      startAt: DateTime.utc(2026, 8, 10, 23, 30),
+      endAt: DateTime.utc(2026, 8, 11, 1, 30),
+    );
+    final repository = _RangeRepository(
+      rangeEvents: <PlannerEvent>[overnight, timed, allDay],
+    );
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      events: <PlannerEvent>[overnight, timed, allDay],
+    );
+    addTearDown(() {
+      auth.dispose();
+    });
 
-      await tester.pumpWidget(_app(controller));
-      await tester.pump();
-      _showAgenda(controller);
-      await tester.pump();
+    await tester.pumpWidget(_app(controller));
+    await tester.pump();
+    _showAgenda(controller);
+    await tester.pump();
 
-      expect(find.text('종일 모임'), findsOneWidget);
-      expect(find.text('아침 회의'), findsOneWidget);
-      expect(find.text('자정 넘김'), findsOneWidget);
-      expect(find.text('종일 · 8월 10일–8월 11일'), findsOneWidget);
-      expect(find.textContaining('다음 날까지'), findsOneWidget);
-      expect(
-        tester.getTopLeft(find.text('종일 모임')).dy,
-        lessThan(tester.getTopLeft(find.text('아침 회의')).dy),
-      );
-      expect(find.text('자정 넘김'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(find.text('종일 모임'), findsOneWidget);
+    expect(find.text('아침 회의'), findsOneWidget);
+    expect(find.text('자정 넘김'), findsOneWidget);
+    expect(find.text('종일 · 8월 10일–8월 11일'), findsOneWidget);
+    expect(find.textContaining('다음 날까지'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('종일 모임')).dy,
+      lessThan(tester.getTopLeft(find.text('아침 회의')).dy),
+    );
+    expect(find.text('자정 넘김'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets('participant filter applies to month and agenda event cards', (
-    tester,
-  ) async {
+  testWidgets('참여자 필터가 월간 및 일정 목록 카드에 적용된다', (tester) async {
     final auth = _TestAuth();
     final first = _event(
       id: 'member-one-event',
@@ -458,7 +443,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('today uses the selected group timezone', (tester) async {
+  testWidgets('오늘이 선택한 그룹의 시간대를 사용한다', (tester) async {
     final auth = _TestAuth();
     final repository = _RangeRepository();
     final controller = _controller(
@@ -484,45 +469,40 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'date picker cancel leaves selection unchanged and select updates it',
-    (tester) async {
-      final auth = _TestAuth();
-      final repository = _RangeRepository();
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        events: const <PlannerEvent>[],
-      );
-      addTearDown(() {
-        auth.dispose();
-      });
+  testWidgets('날짜 선택기 취소는 선택을 유지하고 선택 완료는 날짜를 갱신한다', (tester) async {
+    final auth = _TestAuth();
+    final repository = _RangeRepository();
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      events: const <PlannerEvent>[],
+    );
+    addTearDown(() {
+      auth.dispose();
+    });
 
-      await tester.pumpWidget(_app(controller));
-      await tester.pump();
-      final initial = controller.selectedDay;
-      await tester.tap(find.byTooltip('날짜 선택'));
-      await tester.pumpAndSettle();
-      expect(find.text('날짜 선택'), findsWidgets);
-      await tester.tap(find.text('취소'));
-      await tester.pumpAndSettle();
-      expect(controller.selectedDay, initial);
+    await tester.pumpWidget(_app(controller));
+    await tester.pump();
+    final initial = controller.selectedDay;
+    await tester.tap(find.byTooltip('날짜 선택'));
+    await tester.pumpAndSettle();
+    expect(find.text('날짜 선택'), findsWidgets);
+    await tester.tap(find.text('취소'));
+    await tester.pumpAndSettle();
+    expect(controller.selectedDay, initial);
 
-      await tester.tap(find.byTooltip('날짜 선택'));
-      await tester.pumpAndSettle();
-      final day15 = find.text('15').last;
-      expect(day15, findsOneWidget);
-      await tester.tap(day15);
-      await tester.tap(find.text('선택'));
-      await tester.pumpAndSettle();
-      expect(controller.selectedDay.day, 15);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    await tester.tap(find.byTooltip('날짜 선택'));
+    await tester.pumpAndSettle();
+    final day15 = find.text('15').last;
+    expect(day15, findsOneWidget);
+    await tester.tap(day15);
+    await tester.tap(find.text('선택'));
+    await tester.pumpAndSettle();
+    expect(controller.selectedDay.day, 15);
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets('range error offers retry and load-more remains reachable', (
-    tester,
-  ) async {
+  testWidgets('범위 오류가 재시도를 제공하고 더 불러오기를 사용할 수 있다', (tester) async {
     final auth = _TestAuth();
     final first = _event(id: 'range-first', title: '첫 페이지 일정');
     final second = _event(
@@ -581,59 +561,58 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'month cells, controls and semantics survive 320x568 at 2x with keyboard',
-    (tester) async {
-      _useSmallViewport(tester);
-      final semantics = tester.ensureSemantics();
-      final auth = _TestAuth();
-      final event = _event(id: 'a11y-event', title: '접근성 일정');
-      final repository = _RangeRepository(rangeEvents: <PlannerEvent>[event]);
-      final controller = _controller(
-        auth: auth,
-        repository: repository,
-        events: <PlannerEvent>[event],
-      );
-      addTearDown(() {
-        auth.dispose();
-      });
+  testWidgets('2배 텍스트와 키보드가 있는 320x568에서도 월 셀, 컨트롤, 의미 정보가 유지된다', (
+    tester,
+  ) async {
+    _useSmallViewport(tester);
+    final semantics = tester.ensureSemantics();
+    final auth = _TestAuth();
+    final event = _event(id: 'a11y-event', title: '접근성 일정');
+    final repository = _RangeRepository(rangeEvents: <PlannerEvent>[event]);
+    final controller = _controller(
+      auth: auth,
+      repository: repository,
+      events: <PlannerEvent>[event],
+    );
+    addTearDown(() {
+      auth.dispose();
+    });
 
-      await tester.pumpWidget(_largeConstrained(_app(controller)));
-      await tester.pump();
-      final homeContext = tester.element(find.byType(HomeScreen));
-      expect(MediaQuery.textScalerOf(homeContext).scale(12), 24);
-      expect(MediaQuery.viewInsetsOf(homeContext).bottom, 300);
-      _showMonth(controller);
-      await tester.pump();
+    await tester.pumpWidget(_largeConstrained(_app(controller)));
+    await tester.pump();
+    final homeContext = tester.element(find.byType(HomeScreen));
+    expect(MediaQuery.textScalerOf(homeContext).scale(12), 24);
+    expect(MediaQuery.viewInsetsOf(homeContext).bottom, 300);
+    _showMonth(controller);
+    await tester.pump();
 
-      for (final tooltip in <String>['이전 기간', '다음 기간', '날짜 선택']) {
-        expect(
-          tester.getSize(find.byTooltip(tooltip)).height,
-          greaterThanOrEqualTo(48),
-        );
-      }
+    for (final tooltip in <String>['이전 기간', '다음 기간', '날짜 선택']) {
       expect(
-        tester.getSize(find.widgetWithText(FilledButton, '오늘')).height,
+        tester.getSize(find.byTooltip(tooltip)).height,
         greaterThanOrEqualTo(48),
       );
-      final cell = _cell(2026, 8, 10);
-      await tester.scrollUntilVisible(
-        cell,
-        300,
-        scrollable: find.byType(Scrollable).first,
-      );
-      final cellRect = tester.getRect(cell);
-      expect(cellRect.width, greaterThanOrEqualTo(48));
-      expect(cellRect.height, greaterThanOrEqualTo(48));
-      expect(find.bySemanticsLabel(RegExp('2026년 8월 10일')), findsOneWidget);
-      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
-      await tester.pump();
-      expect(controller.selectedDay, DateTime(2026, 8, 11));
-      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
-      await tester.pump();
-      expect(controller.selectedDay, DateTime(2026, 8, 12));
-      semantics.dispose();
-      expect(tester.takeException(), isNull);
-    },
-  );
+    }
+    expect(
+      tester.getSize(find.widgetWithText(FilledButton, '오늘')).height,
+      greaterThanOrEqualTo(48),
+    );
+    final cell = _cell(2026, 8, 10);
+    await tester.scrollUntilVisible(
+      cell,
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    final cellRect = tester.getRect(cell);
+    expect(cellRect.width, greaterThanOrEqualTo(48));
+    expect(cellRect.height, greaterThanOrEqualTo(48));
+    expect(find.bySemanticsLabel(RegExp('2026년 8월 10일')), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(controller.selectedDay, DateTime(2026, 8, 11));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(controller.selectedDay, DateTime(2026, 8, 12));
+    semantics.dispose();
+    expect(tester.takeException(), isNull);
+  });
 }

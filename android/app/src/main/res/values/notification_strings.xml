@@ -1,5 +1,5 @@
 <resources>
-    <!-- Stable channel id shared by the Dart local-notification adapter. -->
+    <!-- Dart 로컬 알림 어댑터가 공유하는 안정적인 채널 ID다. -->
     <string name="moduly_reminders_channel_id" translatable="false">moduly_reminders</string>
     <string name="moduly_reminders_channel_name">일정 알림</string>
 </resources>

@@ -40,8 +40,8 @@ class _RosterAuth extends AuthRepository {
   PlannerUser? get currentUser => null;
 }
 
-/// Lifecycle signals are deliberately separate from the member read so tests
-/// can model another client changing M while a roster request is in flight.
+/// 명단 요청이 진행 중일 때 다른 클라이언트가 M을 바꾸는 상황을 테스트에서
+/// 재현할 수 있도록 수명 주기 신호를 멤버 읽기와 의도적으로 분리한다.
 class _RosterRepository extends LocalScheduleRepository {
   _RosterRepository({required Map<String, List<PlannerMember>> snapshots})
     : _snapshots = <String, List<PlannerMember>>{
@@ -111,7 +111,7 @@ Future<void> _waitForMemberRead(
     if ((repository.memberReads[groupId] ?? 0) >= atLeast) return;
     await Future<void>.delayed(const Duration(milliseconds: 20));
   }
-  fail('member roster refresh did not start');
+  fail('멤버 명단 새로 고침이 시작되지 않았다');
 }
 
 PlannerEvent _eventForMember(String groupId) => PlannerEvent(
@@ -125,52 +125,49 @@ PlannerEvent _eventForMember(String groupId) => PlannerEvent(
 );
 
 void main() {
-  test(
-    'external member deactivation refreshes roster and clears stale filter',
-    () async {
-      final auth = _RosterAuth();
-      final repository = _RosterRepository(
-        snapshots: <String, List<PlannerMember>>{
-          _groupA.id: <PlannerMember>[_viewerMember, _memberM],
-        },
-      );
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() async {
-        controller.dispose();
-        await repository.close();
-        auth.dispose();
-      });
-      await _settle();
+  test('외부 멤버 비활성화가 명단을 새로 고치고 오래된 필터를 지운다', () async {
+    final auth = _RosterAuth();
+    final repository = _RosterRepository(
+      snapshots: <String, List<PlannerMember>>{
+        _groupA.id: <PlannerMember>[_viewerMember, _memberM],
+      },
+    );
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() async {
+      controller.dispose();
+      await repository.close();
+      auth.dispose();
+    });
+    await _settle();
 
-      controller.user = _plannerUser;
-      controller.groups = const <PlannerGroup>[_groupA];
-      await controller.selectGroup(_groupA.id);
-      controller.events = <PlannerEvent>[_eventForMember(_groupA.id)];
-      controller.setMemberFilter(_memberM.id);
-      expect(controller.selectedMemberId, _memberM.id);
-      expect(
-        controller.members.any((member) => member.id == _memberM.id),
-        isTrue,
-      );
+    controller.user = _plannerUser;
+    controller.groups = const <PlannerGroup>[_groupA];
+    await controller.selectGroup(_groupA.id);
+    controller.events = <PlannerEvent>[_eventForMember(_groupA.id)];
+    controller.setMemberFilter(_memberM.id);
+    expect(controller.selectedMemberId, _memberM.id);
+    expect(
+      controller.members.any((member) => member.id == _memberM.id),
+      isTrue,
+    );
 
-      repository.setSnapshot(_groupA.id, <PlannerMember>[_viewerMember]);
-      repository.emitGroupLifecycle(_groupA.id, _groupA);
-      await _waitForMemberRead(repository, _groupA.id);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+    repository.setSnapshot(_groupA.id, <PlannerMember>[_viewerMember]);
+    repository.emitGroupLifecycle(_groupA.id, _groupA);
+    await _waitForMemberRead(repository, _groupA.id);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      expect(
-        controller.members.any((member) => member.id == _memberM.id),
-        isFalse,
-      );
-      expect(controller.selectedMemberId, isNull);
-      expect(controller.showAllMembers, isTrue);
-      // The event may retain a historical member id, but no stale display
-      // identity remains in the active roster or member-filter semantics.
-      expect(controller.events.single.memberIds, <String>[_memberM.id]);
-    },
-  );
+    expect(
+      controller.members.any((member) => member.id == _memberM.id),
+      isFalse,
+    );
+    expect(controller.selectedMemberId, isNull);
+    expect(controller.showAllMembers, isTrue);
+    // 일정에는 과거 멤버 ID가 남을 수 있지만 활성 명단이나 멤버 필터의
+    // 의미에는 오래된 표시 사용자 정보가 남지 않는다.
+    expect(controller.events.single.memberIds, <String>[_memberM.id]);
+  });
 
-  test('stale roster response after switching groups is ignored', () async {
+  test('그룹 전환 후 오래된 명단 응답을 무시한다', () async {
     final auth = _RosterAuth();
     final repository = _RosterRepository(
       snapshots: <String, List<PlannerMember>>{
@@ -208,88 +205,82 @@ void main() {
     );
   });
 
-  test(
-    'stale roster response after sign-out cannot restore private data',
-    () async {
-      final auth = _RosterAuth();
-      final repository = _RosterRepository(
-        snapshots: <String, List<PlannerMember>>{
-          _groupA.id: <PlannerMember>[_viewerMember, _memberM],
-        },
-      );
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() async {
-        controller.dispose();
-        await repository.close();
-        auth.dispose();
-      });
-      await _settle();
+  test('로그아웃 후 오래된 명단 응답이 비공개 데이터를 복원할 수 없다', () async {
+    final auth = _RosterAuth();
+    final repository = _RosterRepository(
+      snapshots: <String, List<PlannerMember>>{
+        _groupA.id: <PlannerMember>[_viewerMember, _memberM],
+      },
+    );
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() async {
+      controller.dispose();
+      await repository.close();
+      auth.dispose();
+    });
+    await _settle();
 
-      controller.user = _plannerUser;
-      controller.groups = const <PlannerGroup>[_groupA];
-      await controller.selectGroup(_groupA.id);
-      final staleRead = Completer<List<PlannerMember>>();
-      repository.queueMemberRead(_groupA.id, staleRead.future);
-      repository.emitGroupLifecycle(_groupA.id, _groupA);
-      await _waitForMemberRead(repository, _groupA.id);
+    controller.user = _plannerUser;
+    controller.groups = const <PlannerGroup>[_groupA];
+    await controller.selectGroup(_groupA.id);
+    final staleRead = Completer<List<PlannerMember>>();
+    repository.queueMemberRead(_groupA.id, staleRead.future);
+    repository.emitGroupLifecycle(_groupA.id, _groupA);
+    await _waitForMemberRead(repository, _groupA.id);
 
-      final signOut = controller.signOut();
-      staleRead.complete(<PlannerMember>[_viewerMember, _memberM]);
-      await signOut;
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+    final signOut = controller.signOut();
+    staleRead.complete(<PlannerMember>[_viewerMember, _memberM]);
+    await signOut;
+    await Future<void>.delayed(const Duration(milliseconds: 120));
 
-      expect(controller.user, isNull);
-      expect(controller.selectedGroup, isNull);
-      expect(controller.members, isEmpty);
-      expect(controller.events, isEmpty);
-    },
-  );
+    expect(controller.user, isNull);
+    expect(controller.selectedGroup, isNull);
+    expect(controller.members, isEmpty);
+    expect(controller.events, isEmpty);
+  });
 
-  test(
-    'roster read errors preserve last-known members until retry succeeds',
-    () async {
-      final auth = _RosterAuth();
-      final repository = _RosterRepository(
-        snapshots: <String, List<PlannerMember>>{
-          _groupA.id: <PlannerMember>[_viewerMember, _memberM],
-        },
-      );
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() async {
-        controller.dispose();
-        await repository.close();
-        auth.dispose();
-      });
-      await _settle();
+  test('명단 읽기 오류가 재시도 성공까지 마지막 멤버 목록을 보존한다', () async {
+    final auth = _RosterAuth();
+    final repository = _RosterRepository(
+      snapshots: <String, List<PlannerMember>>{
+        _groupA.id: <PlannerMember>[_viewerMember, _memberM],
+      },
+    );
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() async {
+      controller.dispose();
+      await repository.close();
+      auth.dispose();
+    });
+    await _settle();
 
-      controller.user = _plannerUser;
-      controller.groups = const <PlannerGroup>[_groupA];
-      await controller.selectGroup(_groupA.id);
-      controller.setMemberFilter(_memberM.id);
+    controller.user = _plannerUser;
+    controller.groups = const <PlannerGroup>[_groupA];
+    await controller.selectGroup(_groupA.id);
+    controller.setMemberFilter(_memberM.id);
 
-      repository.setSnapshot(_groupA.id, <PlannerMember>[_viewerMember]);
-      final errorRead = Completer<List<PlannerMember>>();
-      repository.queueMemberRead(_groupA.id, errorRead.future);
-      repository.emitGroupLifecycle(_groupA.id, _groupA);
-      await _waitForMemberRead(repository, _groupA.id);
-      errorRead.completeError(StateError('temporary roster error'));
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+    repository.setSnapshot(_groupA.id, <PlannerMember>[_viewerMember]);
+    final errorRead = Completer<List<PlannerMember>>();
+    repository.queueMemberRead(_groupA.id, errorRead.future);
+    repository.emitGroupLifecycle(_groupA.id, _groupA);
+    await _waitForMemberRead(repository, _groupA.id);
+    errorRead.completeError(StateError('temporary roster error'));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      expect(
-        controller.members.any((member) => member.id == _memberM.id),
-        isTrue,
-      );
-      expect(controller.selectedMemberId, _memberM.id);
+    expect(
+      controller.members.any((member) => member.id == _memberM.id),
+      isTrue,
+    );
+    expect(controller.selectedMemberId, _memberM.id);
 
-      repository.emitGroupLifecycle(_groupA.id, _groupA);
-      await _waitForMemberRead(repository, _groupA.id, atLeast: 3);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+    repository.emitGroupLifecycle(_groupA.id, _groupA);
+    await _waitForMemberRead(repository, _groupA.id, atLeast: 3);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      expect(
-        controller.members.any((member) => member.id == _memberM.id),
-        isFalse,
-      );
-      expect(controller.selectedMemberId, isNull);
-    },
-  );
+    expect(
+      controller.members.any((member) => member.id == _memberM.id),
+      isFalse,
+    );
+    expect(controller.selectedMemberId, isNull);
+  });
 }

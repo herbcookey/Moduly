@@ -9,18 +9,14 @@ void main() {
     final file = File(
       'supabase/migrations/202608140004_function_acl_hardening.sql',
     );
-    expect(
-      file.existsSync(),
-      isTrue,
-      reason: 'ACL hardening migration is required',
-    );
+    expect(file.existsSync(), isTrue, reason: 'ACL 강화 마이그레이션이 필요하다');
     migration = file.readAsStringSync().toLowerCase().replaceAll(
       RegExp(r'\s+'),
       ' ',
     );
   });
 
-  test('future functions default to private execution', () {
+  test('향후 함수의 기본 실행 권한이 비공개다', () {
     expect(
       migration,
       contains(
@@ -35,7 +31,7 @@ void main() {
     );
   });
 
-  test('trigger-only functions are not directly callable by API roles', () {
+  test('API 역할이 트리거 전용 함수를 직접 호출할 수 없다', () {
     for (final functionName in <String>[
       'touch_updated_at',
       'enforce_version_increment',
@@ -65,7 +61,7 @@ void main() {
     );
   });
 
-  test('RLS helpers and business RPCs are authenticated-only', () {
+  test('RLS 도우미와 비즈니스 RPC가 인증 전용이다', () {
     final signatures = <String, bool>{
       'is_valid_timezone(text)': false,
       'is_group_owner(uuid)': false,

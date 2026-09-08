@@ -1,8 +1,8 @@
--- pgTAP fixture for event participant assignments.
+-- 일정 참여자 할당용 pgTAP 픽스처다.
 --
--- It runs as the real authenticated role for reads/RPC calls.  Setup-only
--- writes use the session owner and are kept inside one transaction so this
--- file is safe to run repeatedly against a disposable local database.
+-- 조회/RPC 호출은 실제 authenticated 역할로 실행한다. 설정 전용 쓰기는 세션
+-- 소유자를 사용하고 한 트랜잭션 안에서 유지하므로 이 파일은 일회용 로컬
+-- 데이터베이스에서 반복 실행해도 안전하다.
 
 begin;
 
@@ -87,8 +87,8 @@ insert into auth.users (
   )
 on conflict (id) do nothing;
 
--- The owner creates the live fixture group and the second owner creates an
--- unrelated group used for cross-group target and hard-cascade assertions.
+-- 소유자가 운영 픽스처 그룹을 만들고 두 번째 소유자는 교차 그룹 대상 및 하드
+-- 연쇄 작업 검증에 사용할 관계없는 그룹을 만든다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -128,8 +128,8 @@ set second_group_id = created.id
 from public.create_group('Other participants', 'UTC', '') as created;
 reset role;
 
--- Membership rows are setup data.  The inactive row deliberately remains in
--- history but cannot ever be selected as an event target.
+-- 멤버십 행은 설정 데이터다. 비활성 행은 의도적으로 이력에 남지만 일정 대상으로
+-- 선택할 수 없다.
 insert into public.memberships (
   group_id, user_id, role, is_active, joined_at, removed_at
 ) values
@@ -149,8 +149,8 @@ insert into public.memberships (
     'member', true, now(), null
   );
 
--- The event creator is an ordinary member.  This makes the group-owner versus
--- creator distinction explicit for both participant replacement and body edit.
+-- 일정 작성자는 일반 멤버다. 참여자 교체와 본문 편집 모두에서 그룹 소유자와
+-- 작성자의 차이를 명확히 한다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -188,10 +188,9 @@ select set_config(
 );
 reset role;
 
--- A legacy/Data API INSERT remains supported for active creators. The new
--- AFTER INSERT trigger seeds exactly one creator row, keeps version at one,
--- and does not emit a second parent update. This path is intentionally tested
--- separately from the participant-aware RPCs below.
+-- 활성 작성자에게는 이전/Data API INSERT를 계속 지원한다. 새 AFTER INSERT 트리거는
+-- 작성자 행 하나만 채우고 버전을 1로 유지하며 두 번째 상위 갱신을 출력하지 않는다.
+-- 이 경로는 아래 참여자 인식 RPC와 의도적으로 분리해 테스트한다.
 set local role authenticated;
 select set_config(
   'request.jwt.claim.sub',
@@ -216,19 +215,19 @@ select is(
   (select e.version from public.events e
    where e.id = (select legacy_event_id from event_members_fixture)),
   1,
-  'legacy direct INSERT keeps the initial event version at one'
+  '레거시 직접 INSERT는 이벤트의 초기 버전을 1로 유지한다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select legacy_event_id from event_members_fixture)),
   1,
-  'legacy direct INSERT seeds one creator assignment without duplicates'
+  '레거시 직접 INSERT는 중복 없이 생성자 할당 하나를 만든다'
 );
 reset role;
 
--- RLS rejects an outsider direct event INSERT before the seed trigger can run.
--- A malformed active-creator INSERT fails the existing event checks; neither
--- failure may leave a child row behind.
+-- RLS는 초기화 트리거가 실행되기 전에 외부 사용자의 직접 일정 INSERT를 거부한다.
+-- 잘못된 활성 작성자 INSERT는 기존 일정 검사에서 실패한다. 어느 실패도 하위 행을
+-- 남겨서는 안 된다.
 select set_config(
   'request.jwt.claim.sub',
   (select outsider_id::text from event_members_fixture),
@@ -244,14 +243,14 @@ select throws_ok(
   ),
   '42501',
   null,
-  'RLS rejects an outsider direct event INSERT'
+  'RLS는 외부 사용자의 직접 이벤트 INSERT를 거부한다'
 );
 reset role;
 select is(
   (select count(*)::integer from public.event_members
    where event_id in (select e.id from public.events e where e.title = 'Unauthorized direct event')),
   0,
-  'unauthorized direct INSERT leaves no participant row'
+  '권한 없는 직접 INSERT는 참여자 행을 남기지 않는다'
 );
 
 select set_config(
@@ -269,14 +268,14 @@ select throws_ok(
   ),
   '23514',
   null,
-  'existing event checks reject malformed direct INSERT'
+  '기존 이벤트 검사는 잘못된 직접 INSERT를 거부한다'
 );
 reset role;
 select is(
   (select count(*)::integer from public.event_members
    where event_id in (select e.id from public.events e where e.title = 'Malformed direct event')),
   0,
-  'malformed direct INSERT leaves no participant row'
+  '잘못된 직접 INSERT는 참여자 행을 남기지 않는다'
 );
 
 select set_config(
@@ -285,14 +284,14 @@ select set_config(
   true
 );
 
--- Basic catalog, key, index, RLS, ACL and publication assertions.
+-- 기본 카탈로그, 키, 인덱스, RLS, ACL 및 publication을 검증한다.
 select ok(
   exists (
     select 1 from pg_catalog.pg_class
     where oid = 'public.event_members'::regclass
       and relrowsecurity
   ),
-  'event_members has RLS enabled'
+  'event_members에 RLS가 활성화되어 있다'
 );
 select ok(
   exists (
@@ -300,7 +299,7 @@ select ok(
     where conrelid = 'public.event_members'::regclass and contype = 'p'
       and pg_catalog.pg_get_constraintdef(oid) ilike '%(event_id, user_id)%'
   ),
-  'event_members has the composite primary key'
+  'event_members에 복합 기본 키가 있다'
 );
 select ok(
   exists (
@@ -311,7 +310,7 @@ select ok(
       and c.confrelid = 'public.events'::regclass
       and c.confdeltype = 'c'
   ),
-  'event_id cascades when an event is hard deleted'
+  '이벤트를 하드 삭제하면 event_id가 연쇄 삭제된다'
 );
 select ok(
   exists (
@@ -322,7 +321,7 @@ select ok(
       and c.confrelid = 'auth.users'::regclass
       and c.confdeltype = 'c'
   ),
-  'user_id cascades when an account is deleted'
+  '계정을 삭제하면 user_id가 연쇄 삭제된다'
 );
 select ok(
   exists (
@@ -333,19 +332,19 @@ select ok(
       and i.indrelid = 'public.event_members'::regclass
       and i.indisvalid
   ),
-  'user-leading event_members index exists'
+  'user_id가 선두인 event_members 인덱스가 있다'
 );
 select ok(
   has_table_privilege('authenticated', 'public.event_members', 'select')
     and not has_table_privilege('authenticated', 'public.event_members', 'insert')
     and not has_table_privilege('authenticated', 'public.event_members', 'update')
     and not has_table_privilege('authenticated', 'public.event_members', 'delete'),
-  'authenticated has SELECT but no direct child writes'
+  'authenticated 역할에는 SELECT 권한만 있고 하위 행 직접 쓰기 권한은 없다'
 );
 select ok(
   not has_table_privilege('anon', 'public.event_members', 'select')
     and not has_table_privilege('anon', 'public.event_members', 'insert'),
-  'anon has no event_members table privileges'
+  'anon 역할에는 event_members 테이블 권한이 없다'
 );
 select ok(
   has_function_privilege(
@@ -358,7 +357,7 @@ select ok(
       'public.replace_event_members_if_version(uuid, integer, uuid[])',
       'execute'
     ),
-  'participant replacement RPC is authenticated-only'
+  '참여자 교체 RPC는 authenticated 역할만 실행할 수 있다'
 );
 select ok(
   not exists (
@@ -366,7 +365,7 @@ select ok(
     where pubname = 'supabase_realtime'
       and schemaname = 'public' and tablename = 'event_members'
   ),
-  'event_members is not added to supabase_realtime'
+  'event_members는 supabase_realtime에 추가되지 않는다'
 );
 
 set local role authenticated;
@@ -375,7 +374,7 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select event_id from event_members_fixture)),
   3,
-  'active group owner sees current participant assignments'
+  '활성 그룹 소유자는 현재 참여자 할당을 볼 수 있다'
 );
 select set_config(
   'request.jwt.claim.sub',
@@ -386,7 +385,7 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select event_id from event_members_fixture)),
   3,
-  'active ordinary member sees assignments in the shared group'
+  '활성 일반 구성원은 공유 그룹의 할당을 볼 수 있다'
 );
 select set_config(
   'request.jwt.claim.sub',
@@ -397,7 +396,7 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select event_id from event_members_fixture)),
   0,
-  'outsider cannot see assignments from another group'
+  '외부 사용자는 다른 그룹의 할당을 볼 수 없다'
 );
 select set_config(
   'request.jwt.claim.sub',
@@ -405,9 +404,8 @@ select set_config(
   true
 );
 
--- The create RPC dedupes deterministically and returns creator/member IDs in
--- canonical order. NULL input defaults to the creator; an explicit empty
--- array is a real empty assignment set.
+-- 생성 RPC는 결정적으로 중복을 제거하고 작성자/멤버 ID를 정규 순서로 반환한다.
+-- NULL 입력은 작성자를 기본값으로 사용하며 명시적인 빈 배열은 실제 빈 할당 집합이다.
 select is(
   (select cardinality(created.member_ids)
    from public.create_event_with_members(
@@ -417,7 +415,7 @@ select is(
      'UTC', false, null, null, 305419896, null
    ) as created),
   1,
-  'create with NULL member_ids defaults to the creator'
+  'member_ids가 NULL인 생성 요청은 생성자를 기본값으로 사용한다'
 );
 update event_members_fixture f
 set empty_event_id = created.id
@@ -431,19 +429,19 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select empty_event_id from event_members_fixture)),
   0,
-  'create with an explicit empty array leaves no participants'
+  '명시적인 빈 배열로 생성하면 참여자가 남지 않는다'
 );
 select is(
   (select e.version from public.events e
    where e.id = (select empty_event_id from event_members_fixture)),
   1,
-  'explicit-empty create starts at version one'
+  '명시적인 빈 배열 생성은 버전 1에서 시작한다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select empty_event_id from event_members_fixture)),
   0,
-  'explicit-empty create has no trigger-seeded creator row'
+  '명시적인 빈 배열 생성에는 트리거가 만든 생성자 행이 없다'
 );
 update event_members_fixture f
 set default_event_id = created.id
@@ -464,7 +462,7 @@ select throws_ok(
   ),
   '42501',
   'only the event creator or group owner can replace members',
-  'ordinary member cannot replace another member-owned event'
+  '일반 구성원은 다른 구성원이 소유한 이벤트를 교체할 수 없다'
 );
 select set_config(
   'request.jwt.claim.sub',
@@ -481,7 +479,7 @@ select is(
            (select member_id from event_members_fixture)]::uuid[]
   ) as created),
   (select member_id from event_members_fixture),
-  'create dedupes duplicate UUIDs'
+  '생성 시 중복 UUID가 제거된다'
 );
 update event_members_fixture f
 set custom_event_id = created.id
@@ -492,7 +490,7 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select custom_event_id from event_members_fixture)),
   1,
-  'create custom list excludes the creator when requested'
+  '사용자 지정 목록 생성은 요청에 따라 생성자를 제외한다'
 );
 select ok(
   not exists (
@@ -500,11 +498,11 @@ select ok(
     where event_id = (select custom_event_id from event_members_fixture)
       and user_id = (select owner_id from event_members_fixture)
   ),
-  'create custom list does not re-add a trigger-seeded creator'
+  '사용자 지정 목록 생성은 트리거가 만든 생성자를 다시 추가하지 않는다'
 );
 
--- Owner replacement is allowed for a member-created event, leaves the body
--- untouched, bumps exactly once, and accepts an empty list.
+-- 멤버가 만든 일정에서도 소유자 교체를 허용하며 본문은 그대로 두고 버전을 정확히
+-- 한 번 올리며 빈 목록을 허용한다.
 select is(
   (select replaced.version
    from public.replace_event_members_if_version(
@@ -516,19 +514,19 @@ select is(
      ]::uuid[]
    ) as replaced),
   2,
-  'group owner can replace a creator-owned participant list once'
+  '그룹 소유자는 생성자 소유의 참여자 목록을 한 번 교체할 수 있다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select event_id from event_members_fixture)),
   1,
-  'owner replacement dedupes to one row'
+  '소유자 교체 시 중복이 제거되어 행 하나만 남는다'
 );
 select is(
   (select e.description from public.events e
    where e.id = (select event_id from event_members_fixture)),
   'Initial description',
-  'participant replacement leaves event body unchanged'
+  '참여자 교체는 이벤트 본문을 변경하지 않는다'
 );
 select is(
   (select replaced.version
@@ -536,16 +534,16 @@ select is(
      (select event_id from event_members_fixture), 2, '{}'::uuid[]
    ) as replaced),
   3,
-  'empty replacement clears all participants and bumps once'
+  '빈 목록으로 교체하면 모든 참여자가 제거되고 버전이 한 번 증가한다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select event_id from event_members_fixture)),
   0,
-  'empty replacement is allowed'
+  '빈 목록으로 교체할 수 있다'
 );
 
--- Reassign the event to active users for lifecycle and authorization checks.
+-- 수명 주기 및 권한 검사를 위해 일정을 활성 사용자에게 다시 할당한다.
 select public.replace_event_members_if_version(
   (select event_id from event_members_fixture), 3,
   array[
@@ -558,11 +556,11 @@ select is(
   (select e.version from public.events e
    where e.id = (select event_id from event_members_fixture)),
   4,
-  'reassignment increments from the expected version'
+  '재할당은 예상 버전에서 증가한다'
 );
 
--- Invalid target, cross-group target, duplicate membership, stale version and
--- outsider authorization all fail without a partial child replacement.
+-- 잘못된 대상, 다른 그룹 대상, 중복 멤버십, 오래된 버전 및 외부 사용자 권한은 모두
+-- 하위 행을 부분 교체하지 않고 실패한다.
 select throws_ok(
   format(
     'select public.replace_event_members_if_version(%L::uuid, 4, array[%L::uuid]::uuid[])',
@@ -571,13 +569,13 @@ select throws_ok(
   ),
   '42501',
   'all event members must be active members of the group',
-  'inactive target is rejected'
+  '비활성 대상은 거부된다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select event_id from event_members_fixture)),
   3,
-  'failed inactive replacement is atomic'
+  '실패한 비활성 대상 교체는 원자성을 유지한다'
 );
 select throws_ok(
   format(
@@ -587,7 +585,7 @@ select throws_ok(
   ),
   '42501',
   'all event members must be active members of the group',
-  'cross-group target is rejected'
+  '다른 그룹의 대상은 거부된다'
 );
 select throws_ok(
   format(
@@ -596,7 +594,7 @@ select throws_ok(
   ),
   '22023',
   'member_ids cannot contain null',
-  'NULL participant IDs are rejected'
+  'NULL 참여자 ID는 거부된다'
 );
 select throws_ok(
   format(
@@ -605,7 +603,7 @@ select throws_ok(
   ),
   '40001',
   'event was changed, deleted, or is unavailable',
-  'stale participant replacement is rejected'
+  '오래된 버전의 참여자 교체는 거부된다'
 );
 select set_config(
   'request.jwt.claim.sub',
@@ -619,11 +617,11 @@ select throws_ok(
   ),
   '42501',
   'only the event creator or group owner can replace members',
-  'outsider cannot replace participants'
+  '외부 사용자는 참여자를 교체할 수 없다'
 );
 
--- Body updates remain creator-only.  A group owner can replace the list but
--- cannot update title/body through the combined creator RPC.
+-- 본문 갱신은 계속 작성자 전용이다. 그룹 소유자는 목록을 교체할 수 있지만 결합
+-- 작성자 RPC를 통해 제목/본문을 갱신할 수 없다.
 select set_config(
   'request.jwt.claim.sub',
   (select owner_id::text from event_members_fixture),
@@ -637,7 +635,7 @@ select throws_ok(
   ),
   '40001',
   'event was changed, deleted, or is not yours',
-  'group owner cannot edit a non-owned event body'
+  '그룹 소유자는 자신이 소유하지 않은 이벤트 본문을 편집할 수 없다'
 );
 select set_config(
   'request.jwt.claim.sub',
@@ -654,11 +652,11 @@ select is(
      array[(select member_id from event_members_fixture)]::uuid[]
    ) as updated),
   5,
-  'creator can atomically update body and participant list'
+  '생성자는 본문과 참여자 목록을 원자적으로 업데이트할 수 있다'
 );
 
--- Membership deactivation prunes each assignment and bumps each affected
--- event once.  Reactivation does not restore the removed row.
+-- 멤버십 비활성화는 각 할당을 정리하고 영향을 받은 각 일정의 버전을 한 번 올린다.
+-- 재활성화해도 제거된 행을 복원하지 않는다.
 select set_config(
   'request.jwt.claim.sub',
   (select owner_id::text from event_members_fixture),
@@ -674,13 +672,13 @@ select is(
    where event_id = (select event_id from event_members_fixture)
      and user_id = (select member_id from event_members_fixture)),
   0,
-  'deactivation prunes current event assignment'
+  '비활성화하면 현재 이벤트 할당이 제거된다'
 );
 select is(
   (select e.version from public.events e
    where e.id = (select event_id from event_members_fixture)),
   6,
-  'deactivation bumps parent event exactly once'
+  '비활성화하면 상위 이벤트 버전이 정확히 한 번 증가한다'
 );
 select public.set_member_active(
   (select group_id from event_members_fixture),
@@ -692,11 +690,11 @@ select is(
    where event_id = (select event_id from event_members_fixture)
      and user_id = (select member_id from event_members_fixture)),
   0,
-  'reactivation does not restore a pruned assignment'
+  '다시 활성화해도 제거된 할당은 복원되지 않는다'
 );
 
--- Direct child writes are denied even to an authenticated caller, while
--- trigger functions and helper internals remain non-executable.
+-- 인증된 호출자에게도 직접 하위 쓰기를 거부하며 트리거 함수와 내부 도우미는 계속
+-- 직접 실행할 수 없다.
 select throws_ok(
   format(
     'insert into public.event_members(event_id, user_id) values (%L::uuid, %L::uuid)',
@@ -705,7 +703,7 @@ select throws_ok(
   ),
   '42501',
   null,
-  'authenticated cannot insert event_members directly'
+  'authenticated 역할은 event_members에 직접 INSERT할 수 없다'
 );
 select ok(
   not has_function_privilege(
@@ -713,17 +711,17 @@ select ok(
     'public.enforce_event_member_integrity()',
     'execute'
   ),
-  'authenticated cannot call trigger-only integrity function'
+  'authenticated 역할은 트리거 전용 무결성 함수를 호출할 수 없다'
 );
 select throws_ok(
   'select public.seed_event_creator_member()',
   '42501',
   null,
-  'authenticated cannot call the legacy event seed trigger function directly'
+  'authenticated 역할은 레거시 이벤트 초기화 트리거 함수를 직접 호출할 수 없다'
 );
 
--- Soft-deleted/archived events retain rows but RLS hides them.  A hard event
--- delete cascades rows and a hard group delete cascades its event children.
+-- 소프트 삭제/보관된 일정은 행을 유지하지만 RLS가 숨긴다. 일정 하드 삭제는 행을
+-- 연쇄 삭제하고 그룹 하드 삭제는 하위 일정을 연쇄 삭제한다.
 select set_config(
   'request.jwt.claim.sub',
   (select owner_id::text from event_members_fixture),
@@ -746,19 +744,18 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select soft_deleted_event_id from event_members_fixture)),
   1,
-  'soft deletion retains assignment rows'
+  '소프트 삭제는 할당 행을 보존한다'
 );
 set local role authenticated;
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select soft_deleted_event_id from event_members_fixture)),
   0,
-  'soft-deleted assignment is hidden to the authenticated reader'
+  '소프트 삭제된 할당은 authenticated 조회자에게 보이지 않는다'
 );
 
--- Deactivation prunes a live assignment exactly once but leaves the already
--- soft-deleted history row and version untouched.  Reactivation does not
--- restore either assignment.
+-- 비활성화는 운영 중인 할당을 정확히 한 번 정리하지만 이미 소프트 삭제된 이력
+-- 행과 버전은 건드리지 않는다. 재활성화해도 어느 할당도 복원하지 않는다.
 update event_members_fixture f
 set deactivation_event_id = created.id
 from public.create_event_with_members(
@@ -778,25 +775,25 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select deactivation_event_id from event_members_fixture)),
   0,
-  'deactivation prunes the live assignment exactly once'
+  '비활성화하면 활성 할당이 정확히 한 번 제거된다'
 );
 select is(
   (select e.version from public.events e
    where e.id = (select deactivation_event_id from event_members_fixture)),
   2,
-  'deactivation bumps the live event once'
+  '비활성화하면 활성 이벤트 버전이 한 번 증가한다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select soft_deleted_event_id from event_members_fixture)),
   1,
-  'deactivation retains the soft-deleted assignment row'
+  '비활성화해도 소프트 삭제된 할당 행은 보존된다'
 );
 select is(
   (select e.version from public.events e
    where e.id = (select soft_deleted_event_id from event_members_fixture)),
   2,
-  'deactivation leaves the soft-deleted event version unchanged'
+  '비활성화해도 소프트 삭제된 이벤트 버전은 변경되지 않는다'
 );
 set local role authenticated;
 select public.set_member_active(
@@ -809,13 +806,13 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select deactivation_event_id from event_members_fixture)),
   0,
-  'reactivation does not restore the deactivation-pruned assignment'
+  '다시 활성화해도 비활성화로 제거된 할당은 복원되지 않는다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select soft_deleted_event_id from event_members_fixture)),
   1,
-  'reactivation preserves the soft-deleted historical assignment'
+  '다시 활성화해도 소프트 삭제된 과거 할당은 보존된다'
 );
 set local role authenticated;
 
@@ -848,7 +845,7 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select archive_event_id from event_members_fixture)),
   1,
-  'archiving a group retains assignment rows'
+  '그룹을 보관 처리해도 할당 행은 보존된다'
 );
 set local role authenticated;
 
@@ -861,13 +858,13 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select soft_deleted_event_id from event_members_fixture)),
   0,
-  'RLS hides assignments for soft-deleted events'
+  'RLS는 소프트 삭제된 이벤트의 할당을 숨긴다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select archive_event_id from event_members_fixture)),
   0,
-  'RLS hides assignments in archived groups'
+  'RLS는 보관된 그룹의 할당을 숨긴다'
 );
 
 reset role;
@@ -876,7 +873,7 @@ select ok(
    where event_id = (select soft_deleted_event_id from event_members_fixture)) = 1
     and (select count(*) from public.event_members
          where event_id = (select archive_event_id from event_members_fixture)) = 1,
-  'setup owner can verify retained terminal rows'
+  '설정용 소유자는 보존된 최종 상태 행을 확인할 수 있다'
 );
 delete from public.events
 where id = (select default_event_id from event_members_fixture);
@@ -884,11 +881,11 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select default_event_id from event_members_fixture)),
   0,
-  'hard event delete cascades event_members'
+  '이벤트 하드 삭제는 event_members를 연쇄 삭제한다'
 );
 
--- Account deletion of a non-creator target cascades its assignment and bumps
--- the surviving parent exactly once; the event creator remains intact.
+-- 작성자가 아닌 대상의 계정을 삭제하면 할당을 연쇄 삭제하고 남은 상위 행의 버전을
+-- 정확히 한 번 올린다. 일정 작성자는 그대로 유지한다.
 select set_config(
   'request.jwt.claim.sub',
   (select member_id::text from event_members_fixture),
@@ -909,7 +906,7 @@ select is(
   (select e.version from public.events e
    where e.id = (select account_event_id from event_members_fixture)),
   1,
-  'create starts account-cascade event at version one'
+  '계정 연쇄 삭제용 이벤트는 생성 시 버전 1에서 시작한다'
 );
 delete from auth.users
 where id = (select deleting_id from event_members_fixture);
@@ -917,17 +914,17 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select account_event_id from event_members_fixture)),
   0,
-  'account delete cascades participant assignment'
+  '계정 삭제는 참여자 할당을 연쇄 삭제한다'
 );
 select is(
   (select e.version from public.events e
    where e.id = (select account_event_id from event_members_fixture)),
   2,
-  'account cascade bumps surviving event exactly once'
+  '계정 연쇄 삭제는 남은 이벤트 버전을 정확히 한 번 증가시킨다'
 );
 
--- Leave follows the same current-assignment rule as owner deactivation, but is
--- self-only and only ordinary members may invoke it.
+-- 탈퇴는 소유자 비활성화와 같은 현재 할당 규칙을 따르지만 본인만 수행할 수 있고
+-- 일반 멤버만 호출할 수 있다.
 set local role authenticated;
 update event_members_fixture f
 set leave_event_id = created.id
@@ -944,35 +941,35 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = (select leave_event_id from event_members_fixture)),
   0,
-  'leave_group prunes the leaving member assignment'
+  'leave_group은 탈퇴하는 구성원의 할당을 제거한다'
 );
 select is(
   (select e.version from public.events e
    where e.id = (select leave_event_id from event_members_fixture)),
   2,
-  'leave_group bumps the parent event exactly once'
+  'leave_group은 상위 이벤트 버전을 정확히 한 번 증가시킨다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select soft_deleted_event_id from event_members_fixture)),
   1,
-  'leave_group retains soft-deleted assignment history'
+  'leave_group은 소프트 삭제된 할당 이력을 보존한다'
 );
 select is(
   (select e.version from public.events e
    where e.id = (select soft_deleted_event_id from event_members_fixture)),
   2,
-  'leave_group leaves the soft-deleted event version unchanged'
+  'leave_group은 소프트 삭제된 이벤트 버전을 변경하지 않는다'
 );
 select is(
   (select count(*)::integer from public.event_members
    where event_id = (select archive_event_id from event_members_fixture)),
   1,
-  'leave_group leaves archived-group assignment history intact'
+  'leave_group은 보관된 그룹의 할당 이력을 그대로 보존한다'
 );
 
--- Hard-deleting an unrelated group cascades its owner membership, event and
--- event_members rows.  This is setup-only and does not represent API delete.
+-- 관계없는 그룹을 하드 삭제하면 소유자 멤버십, 일정 및 event_members 행이 연쇄
+-- 삭제된다. 이는 설정 전용이며 API 삭제를 나타내지 않는다.
 insert into public.groups (
   id, owner_id, name, description, timezone, version
 ) values (
@@ -1000,11 +997,11 @@ select is(
   (select count(*)::integer from public.event_members
    where event_id = '00000000-0000-4000-8000-000000009202'::uuid),
   0,
-  'hard group delete cascades event_members'
+  '그룹 하드 삭제는 event_members를 연쇄 삭제한다'
 );
 
--- Audit rows record no participant UUIDs/names.  Existing event audit entries
--- may contain only the event id and version metadata.
+-- 감사 행에는 참여자 UUID/이름을 기록하지 않는다. 기존 일정 감사 항목에는 일정 ID와
+-- 버전 메타데이터만 포함할 수 있다.
 select ok(
   not exists (
     select 1
@@ -1012,7 +1009,7 @@ select ok(
     where a.entity_type = 'events'
       and a.metadata::text like '%' || (select deleting_id::text from event_members_fixture) || '%'
   ),
-  'event participant changes do not put member UUIDs in audit metadata'
+  '이벤트 참여자 변경 시 감사 메타데이터에 구성원 UUID를 넣지 않는다'
 );
 
 select * from finish();

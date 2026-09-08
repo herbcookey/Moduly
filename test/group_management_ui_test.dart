@@ -98,9 +98,9 @@ class _EditConflictRepository extends LocalScheduleRepository {
 
   @override
   Stream<List<PlannerEvent>> watchEventsForUser(String userId, String groupId) {
-    // The controller treats a synchronous channel setup failure as an
-    // offline stream with no subscription. That keeps this test focused on
-    // version recovery and avoids retaining a stream between reloads.
+    // 컨트롤러는 동기적인 채널 설정 실패를 구독 없는 오프라인 스트림으로
+    // 취급한다. 그러면 이 테스트가 버전 복구에 집중하고 다시 불러오는 사이에
+    // 스트림이 남는 일을 피할 수 있다.
     return _ThrowingStream<List<PlannerEvent>>();
   }
 
@@ -141,11 +141,11 @@ class _ThrowingStream<T> extends Stream<T> {
     Function? onError,
     void Function()? onDone,
     bool? cancelOnError,
-  }) => throw StateError('test channel setup failed');
+  }) => throw StateError('테스트 채널 설정에 실패했습니다');
 }
 
 void main() {
-  testWidgets('timezone picker returns an exact IANA name', (tester) async {
+  testWidgets('시간대 선택기가 정확한 IANA 이름을 반환한다', (tester) async {
     String? selected;
     await tester.pumpWidget(
       _app(
@@ -170,35 +170,30 @@ void main() {
     expect(selected, 'America/New_York');
   });
 
-  testWidgets(
-    'timezone picker remains scrollable at large text and keyboard inset',
-    (tester) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: _testTheme(),
-          builder: (context, built) => MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              textScaler: TextScaler.linear(2),
-              viewInsets: const EdgeInsets.only(bottom: 280),
-            ),
-            child: built ?? const SizedBox.shrink(),
+  testWidgets('큰 텍스트와 키보드 인셋에서도 시간대 선택기를 스크롤할 수 있다', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: _testTheme(),
+        builder: (context, built) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            textScaler: TextScaler.linear(2),
+            viewInsets: const EdgeInsets.only(bottom: 280),
           ),
-          home: Scaffold(
-            body: IanaTimezoneField(value: 'Asia/Seoul', onChanged: (_) {}),
-          ),
+          child: built ?? const SizedBox.shrink(),
         ),
-      );
-      await tester.tap(find.byType(IanaTimezoneField));
-      await tester.pumpAndSettle();
-      expect(find.text('시간대 선택'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      expect(find.byType(ListView), findsOneWidget);
-    },
-  );
+        home: Scaffold(
+          body: IanaTimezoneField(value: 'Asia/Seoul', onChanged: (_) {}),
+        ),
+      ),
+    );
+    await tester.tap(find.byType(IanaTimezoneField));
+    await tester.pumpAndSettle();
+    expect(find.text('시간대 선택'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    expect(find.byType(ListView), findsOneWidget);
+  });
 
-  testWidgets('edit dialog preserves draft after a version conflict', (
-    tester,
-  ) async {
+  testWidgets('편집 대화상자가 버전 충돌 후 초안을 보존한다', (tester) async {
     var attempts = 0;
     String? submittedName;
     String? submittedTimezone;
@@ -240,9 +235,7 @@ void main() {
     expect(submittedTimezone, 'America/New_York');
   });
 
-  testWidgets('members edit retries with the reloaded selected-group version', (
-    tester,
-  ) async {
+  testWidgets('멤버 편집이 다시 불러온 선택 그룹 버전으로 재시도한다', (tester) async {
     const user = PlannerUser(id: 'owner-ui', email: 'owner-ui@example.com');
     const initial = PlannerGroup(
       id: 'ui-group',
@@ -253,15 +246,15 @@ void main() {
       ownerId: 'owner-ui',
     );
     final repository = _EditConflictRepository(user, initial);
-    // Keep bootstrap signed out; the test installs the authenticated
-    // planner context explicitly below so no background load can race the
-    // dialog's version-retry assertions.
+    // 부트스트랩은 로그아웃 상태로 둔다. 아래에서 테스트가 인증된 플래너
+    // 컨텍스트를 명시적으로 설치하므로 백그라운드 로드가 대화상자의 버전
+    // 재시도 검증과 경합하지 않는다.
     final auth = _UiAuth();
     final controller = PlannerController(auth: auth, repository: repository);
-    // ProviderScope owns/disposes the overridden controller at test teardown.
+    // ProviderScope가 재정의된 컨트롤러를 소유하고 테스트 종료 시 해제한다.
     addTearDown(auth.dispose);
-    // Bootstrap is intentionally not awaited here; the test installs the
-    // selected group synchronously before pumping the screen.
+    // 여기서는 의도적으로 부트스트랩을 기다리지 않는다. 화면을 펌프하기 전에
+    // 테스트가 선택된 그룹을 동기적으로 설치한다.
     controller.user = user;
     controller.groups = <PlannerGroup>[initial];
     controller.selectedGroup = initial;
@@ -301,40 +294,35 @@ void main() {
     expect(find.text('그룹 정보 편집'), findsNothing);
   });
 
-  testWidgets(
-    'transfer dialog filters to supplied active targets and requires a second confirmation',
-    (tester) async {
-      String? transferred;
-      final candidates = <PlannerMember>[
-        _member('active-1', '활성 멤버'),
-        _member('active-2', '두 번째 멤버'),
-      ];
-      await tester.pumpWidget(
-        _app(
-          TransferGroupDialog(
-            candidates: candidates,
-            onSubmit: (memberId) async => transferred = memberId,
-          ),
+  testWidgets('이전 대화상자가 제공된 활성 대상만 표시하고 두 번째 확인을 요구한다', (tester) async {
+    String? transferred;
+    final candidates = <PlannerMember>[
+      _member('active-1', '활성 멤버'),
+      _member('active-2', '두 번째 멤버'),
+    ];
+    await tester.pumpWidget(
+      _app(
+        TransferGroupDialog(
+          candidates: candidates,
+          onSubmit: (memberId) async => transferred = memberId,
         ),
-      );
-      expect(find.text('활성 멤버'), findsOneWidget);
-      await tester.tap(_listTileWithTitle('활성 멤버'));
-      await tester.pump();
-      final next = find.widgetWithText(FilledButton, '다음');
-      expect(tester.widget<FilledButton>(next).onPressed, isNotNull);
-      await tester.tap(next);
-      await tester.pump();
-      expect(find.text('소유권 이전을 확인할까요?'), findsOneWidget);
-      expect(find.text('활성 멤버님에게 소유권을 이전합니다.'), findsOneWidget);
-      await tester.tap(find.text('소유권 이전'));
-      await tester.pumpAndSettle();
-      expect(transferred, 'active-1');
-    },
-  );
+      ),
+    );
+    expect(find.text('활성 멤버'), findsOneWidget);
+    await tester.tap(_listTileWithTitle('활성 멤버'));
+    await tester.pump();
+    final next = find.widgetWithText(FilledButton, '다음');
+    expect(tester.widget<FilledButton>(next).onPressed, isNotNull);
+    await tester.tap(next);
+    await tester.pump();
+    expect(find.text('소유권 이전을 확인할까요?'), findsOneWidget);
+    expect(find.text('활성 멤버님에게 소유권을 이전합니다.'), findsOneWidget);
+    await tester.tap(find.text('소유권 이전'));
+    await tester.pumpAndSettle();
+    expect(transferred, 'active-1');
+  });
 
-  testWidgets('transfer conflict keeps target confirmation open for a retry', (
-    tester,
-  ) async {
+  testWidgets('이전 충돌 시 재시도할 수 있도록 대상 확인 창을 유지한다', (tester) async {
     var attempts = 0;
     await tester.pumpWidget(
       _app(
@@ -368,38 +356,33 @@ void main() {
     expect(find.text('소유권 이전을 확인할까요?'), findsNothing);
   });
 
-  testWidgets(
-    'archive dialog requires exact name and blocks duplicate submit',
-    (tester) async {
-      var calls = 0;
-      await tester.pumpWidget(
-        _app(
-          ArchiveGroupDialog(
-            groupName: '보관할 그룹',
-            onSubmit: () async {
-              calls += 1;
-              await Future<void>.delayed(const Duration(milliseconds: 20));
-            },
-          ),
+  testWidgets('보관 대화상자가 정확한 이름을 요구하고 중복 제출을 막는다', (tester) async {
+    var calls = 0;
+    await tester.pumpWidget(
+      _app(
+        ArchiveGroupDialog(
+          groupName: '보관할 그룹',
+          onSubmit: () async {
+            calls += 1;
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+          },
         ),
-      );
-      final archive = find.widgetWithText(FilledButton, '그룹 보관');
-      expect(tester.widget<FilledButton>(archive).onPressed, isNull);
-      await tester.enterText(_fieldWithLabel('그룹 이름 확인'), '다른 이름');
-      expect(tester.widget<FilledButton>(archive).onPressed, isNull);
-      expect(find.text('그룹 이름을 정확히 입력해 주세요.'), findsNothing);
-      await tester.enterText(_fieldWithLabel('그룹 이름 확인'), '보관할 그룹');
-      await tester.pump();
-      await tester.tap(archive);
-      await tester.tap(archive);
-      await tester.pumpAndSettle();
-      expect(calls, 1);
-    },
-  );
+      ),
+    );
+    final archive = find.widgetWithText(FilledButton, '그룹 보관');
+    expect(tester.widget<FilledButton>(archive).onPressed, isNull);
+    await tester.enterText(_fieldWithLabel('그룹 이름 확인'), '다른 이름');
+    expect(tester.widget<FilledButton>(archive).onPressed, isNull);
+    expect(find.text('그룹 이름을 정확히 입력해 주세요.'), findsNothing);
+    await tester.enterText(_fieldWithLabel('그룹 이름 확인'), '보관할 그룹');
+    await tester.pump();
+    await tester.tap(archive);
+    await tester.tap(archive);
+    await tester.pumpAndSettle();
+    expect(calls, 1);
+  });
 
-  testWidgets('dialog controls expose semantics and 48px touch targets', (
-    tester,
-  ) async {
+  testWidgets('대화상자 컨트롤이 의미 정보와 48px 터치 영역을 제공한다', (tester) async {
     await tester.pumpWidget(
       _app(
         Scaffold(

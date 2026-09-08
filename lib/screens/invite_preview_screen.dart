@@ -8,12 +8,11 @@ import '../models/app_models.dart';
 import '../repositories/schedule_repository.dart';
 import '../state/app_state.dart';
 
-/// Token-free invite landing page.
+/// 토큰을 포함하지 않는 초대 랜딩 페이지다.
 ///
-/// The controller owns the opaque token and exposes only a sanitized
-/// [InvitePreview].  This screen therefore never receives a token through a
-/// constructor, route extra, semantics label, error message, or analytics
-/// callback.  Joining remains an explicit user action after the preview.
+/// 컨트롤러가 불투명한 토큰을 소유하고 정제된 [InvitePreview]만 노출한다. 따라서 이
+/// 화면은 생성자, 경로 추가 정보, 시맨틱 레이블, 오류 메시지, 분석 콜백을 통해
+/// 토큰을 받지 않는다. 가입은 미리보기 후 사용자가 명시적으로 수행하는 동작으로 남는다.
 class InvitePreviewScreen extends ConsumerStatefulWidget {
   const InvitePreviewScreen({super.key});
 
@@ -38,13 +37,12 @@ class _InvitePreviewScreenState extends ConsumerState<InvitePreviewScreen> {
   Future<void> _previewPendingInvite() async {
     final controller = ref.read(plannerControllerProvider);
     if (!controller.isAuthenticated || !controller.hasPendingInvite) return;
-    // The controller is idempotent and owns all token validation.  Calling
-    // this once after route capture also handles a native cold link that was
-    // delivered just before the widget was mounted.
+    // 컨트롤러는 멱등하며 모든 토큰 검증을 담당한다. 경로를 포착한 뒤 이를 한
+    // 번 호출하면 위젯이 마운트되기 직전에 전달된 네이티브 콜드 링크도 처리한다.
     try {
       await controller.previewPendingInvite();
     } catch (_) {
-      // The controller publishes a typed, token-free error for the page.
+      // 컨트롤러가 페이지에 형식이 지정되고 토큰이 없는 오류를 공개한다.
     }
   }
 
@@ -54,7 +52,7 @@ class _InvitePreviewScreenState extends ConsumerState<InvitePreviewScreen> {
     try {
       await controller.retryPendingInvite();
     } catch (_) {
-      // Keep the stable unavailable/rate-limit message rendered below.
+      // 아래에 있는 고정된 사용 불가/호출 제한 메시지를 계속 렌더링한다.
     }
   }
 
@@ -63,13 +61,12 @@ class _InvitePreviewScreenState extends ConsumerState<InvitePreviewScreen> {
     if (controller.isAcceptingInvite || controller.isPreviewingInvite) return;
     try {
       final joined = await controller.acceptPendingInvite();
-      // A null result means the controller rejected a stale/expired intent or
-      // another accept already consumed this generation.  Stay on the
-      // token-free invite surface so the published safe error/retry state is
-      // visible; never claim success after a non-commit.
+      // `null` 결과는 컨트롤러가 오래되거나 만료된 의도를 거부했거나, 다른 수락이
+      // 이 세대를 이미 소비했다는 뜻이다. 공개된 안전한 오류/재시도 상태가
+      // 보이도록 토큰 없는 초대 화면에 머물며 커밋되지 않은 작업을 성공이라 하지 않는다.
       if (joined != null && mounted) context.go('/home');
     } catch (_) {
-      // The controller maps the server response to a safe banner/error state.
+      // 컨트롤러가 서버 응답을 안전한 배너/오류 상태로 변환한다.
     }
   }
 
@@ -77,17 +74,15 @@ class _InvitePreviewScreenState extends ConsumerState<InvitePreviewScreen> {
     final controller = ref.read(plannerControllerProvider);
     if (controller.isAcceptingInvite || controller.isPreviewingInvite) return;
     try {
-      // This idempotent controller operation clears the bearer token before
-      // selecting the existing group.  Clearing first prevents the router's
-      // pending-invite redirect from sending the user back to this screen.
+      // 이 멱등 컨트롤러 작업은 기존 그룹을 선택하기 전에 Bearer 토큰을 지운다.
+      // 먼저 지우면 라우터의 대기 초대 리디렉션이 사용자를 이 화면으로 되돌리지 않는다.
       final joined = await controller.acceptPendingInvite();
-      // Even an already-member preview must complete the authoritative join
-      // call (which also clears the pending generation) before navigation.
-      // A null/stale result stays on this safe surface instead of pretending
-      // that the group was opened.
+      // 이미 멤버인 미리보기도 화면 이동 전에 신뢰할 수 있는 가입 호출을 완료해야 한다.
+      // 이 호출은 대기 세대도 지운다. `null`/오래된 결과는 그룹이 열린 것처럼
+      // 가장하지 않고 이 안전한 화면에 남는다.
       if (joined != null && mounted) context.go('/groups');
     } catch (_) {
-      // The controller publishes a token-free error if selection fails.
+      // 선택이 실패하면 컨트롤러가 토큰 없는 오류를 공개한다.
     }
   }
 
@@ -104,10 +99,9 @@ class _InvitePreviewScreenState extends ConsumerState<InvitePreviewScreen> {
     final scheme = Theme.of(context).colorScheme;
     final loading = controller.isPreviewingInvite;
     final accepting = controller.isAcceptingInvite;
-    // PlannerController deliberately exposes only a token-free message at the
-    // widget boundary.  Preserve the one distinct, actor-local rate-limit
-    // state by matching its stable message; every lifecycle/validity failure
-    // intentionally renders the same unavailable copy.
+    // PlannerController는 위젯 경계에서 의도적으로 토큰이 없는 메시지만 노출한다.
+    // 고정 메시지를 비교해 행위자 로컬 속도 제한 상태 하나만 구분해서 보존한다. 모든
+    // 수명 주기/유효성 실패에는 의도적으로 같은 사용 불가 문구를 렌더링한다.
     final rateLimited = error == InviteRateLimitException().message;
 
     return Scaffold(

@@ -46,9 +46,9 @@ create table public.profiles (
 );
 
 comment on table public.profiles is
-  'One profile per auth.users row. Profile reads are restricted to the user and active co-members.';
+  'auth.users 행마다 프로필 하나를 둔다. 프로필 조회는 해당 사용자와 함께 활동 중인 멤버로 제한한다.';
 comment on column public.profiles.timezone is
-  'IANA/Olson timezone name used for display and date-only event entry.';
+  '표시 및 날짜 전용 일정 입력에 사용하는 IANA/Olson 시간대 이름이다.';
 
 create table public.groups (
   id uuid primary key default extensions.gen_random_uuid(),
@@ -64,11 +64,11 @@ create table public.groups (
 );
 
 comment on table public.groups is
-  'Planner workspaces. A group owner is also represented by an owner membership row.';
+  '플래너 작업 공간이다. 그룹 소유자는 소유자 멤버십 행으로도 나타낸다.';
 comment on column public.groups.version is
-  'Optimistic-lock value. Every update must send the previous value plus one.';
+  '낙관적 잠금 값이다. 모든 갱신은 이전 값에 1을 더해 보내야 한다.';
 comment on column public.groups.deleted_at is
-  'Soft-delete marker; groups are never hard-deleted through the authenticated API.';
+  '소프트 삭제 표시다. 인증된 API를 통해 그룹을 하드 삭제하지 않는다.';
 
 create table public.memberships (
   group_id uuid not null references public.groups(id) on delete cascade,
@@ -85,7 +85,7 @@ create table public.memberships (
 );
 
 comment on table public.memberships is
-  'Current and historical group membership. Only active rows are visible to ordinary members.';
+  '현재 및 과거 그룹 멤버십이다. 일반 멤버에게는 활성 행만 보인다.';
 
 create table public.invite_codes (
   id uuid primary key default extensions.gen_random_uuid(),
@@ -105,9 +105,9 @@ create table public.invite_codes (
 );
 
 comment on table public.invite_codes is
-  'Bearer invite metadata. Only the hash is persisted; create_invite_code returns plaintext once.';
+  'Bearer 초대 메타데이터다. 해시만 영속화하며 create_invite_code는 평문을 한 번만 반환한다.';
 comment on column public.invite_codes.uses_count is
-  'Incremented while holding the invite row lock in join_group_with_invite.';
+  'join_group_with_invite에서 초대 행 잠금을 유지하는 동안 증가시킨다.';
 
 create table public.events (
   id uuid primary key default extensions.gen_random_uuid(),
@@ -139,13 +139,13 @@ create table public.events (
 );
 
 comment on table public.events is
-  'Planner events. Timed boundaries are UTC instants; all-day events additionally carry an IANA timezone and local date range.';
+  '플래너 일정이다. 시간 지정 경계는 UTC 시각이며 종일 일정에는 IANA 시간대와 현지 날짜 범위도 포함한다.';
 comment on column public.events.all_day_end is
-  'Exclusive end date for an all-day event, so [all_day_start, all_day_end) is unambiguous.';
+  '종일 일정의 배타적 종료 날짜로, [all_day_start, all_day_end) 범위를 명확하게 한다.';
 comment on column public.events.version is
-  'Optimistic-lock value. Every update must send the previous value plus one.';
+  '낙관적 잠금 값이다. 모든 갱신은 이전 값에 1을 더해 보내야 한다.';
 comment on column public.events.deleted_at is
-  'Soft-delete marker. Authenticated clients use soft_delete_event_if_version.';
+  '소프트 삭제 표시다. 인증된 클라이언트는 soft_delete_event_if_version을 사용한다.';
 
 create table public.audit_logs (
   id uuid primary key default extensions.gen_random_uuid(),
@@ -159,7 +159,7 @@ create table public.audit_logs (
 );
 
 comment on table public.audit_logs is
-  'Append-only security/audit trail. Direct writes are denied; table triggers write minimal metadata.';
+  '추가 전용 보안/감사 이력이다. 직접 쓰기는 거부하며 테이블 트리거가 최소 메타데이터를 기록한다.';
 
 create table public.invite_join_attempts (
   id bigint generated always as identity primary key,
@@ -171,7 +171,7 @@ create table public.invite_join_attempts (
 );
 
 comment on table public.invite_join_attempts is
-  'Private rate-limit ledger. It stores only a token hash and is writable by the join RPC.';
+  '비공개 속도 제한 원장이다. 토큰 해시만 저장하며 가입 RPC만 쓸 수 있다.';
 
 create index memberships_user_active_idx
   on public.memberships (user_id, group_id)

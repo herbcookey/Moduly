@@ -10,11 +10,7 @@ void main() {
 
   setUpAll(() {
     final directory = Directory('supabase/migrations');
-    expect(
-      directory.existsSync(),
-      isTrue,
-      reason: 'Supabase migrations are required',
-    );
+    expect(directory.existsSync(), isTrue, reason: 'Supabase 마이그레이션이 필요하다');
     final files =
         directory
             .listSync()
@@ -22,14 +18,14 @@ void main() {
             .where((file) => file.path.toLowerCase().endsWith('.sql'))
             .toList()
           ..sort((a, b) => a.path.compareTo(b.path));
-    expect(files, isNotEmpty, reason: 'At least one SQL migration is required');
+    expect(files, isNotEmpty, reason: 'SQL 마이그레이션이 하나 이상 필요하다');
     migrations = files
         .map((file) => file.readAsStringSync())
         .join('\n')
         .toLowerCase();
   });
 
-  test('every client-visible table has RLS enabled', () {
+  test('클라이언트에 보이는 모든 테이블에 RLS가 활성화된다', () {
     for (final table in <String>[
       'profiles',
       'groups',
@@ -47,7 +43,7 @@ void main() {
       expect(
         migrations,
         contains('alter table public.$table enable row level security'),
-        reason: 'RLS is missing for public.$table',
+        reason: 'public.$table에 RLS가 없다',
       );
     }
     expect(migrations, contains('create policy'));
@@ -56,13 +52,12 @@ void main() {
     expect(migrations, isNot(contains('with check (true)')));
   });
 
-  test('invite flow hashes bearer tokens and is implemented as RPCs', () {
+  test('초대 흐름이 전달자 토큰을 해시하고 RPC로 구현된다', () {
     expect(migrations, contains('token_hash'));
     expect(
       migrations,
       matches(RegExp(r'(digest\s*\(|encode\s*\([^;]*digest)', dotAll: true)),
-      reason:
-          'Invite tokens must be hashed in the database, never persisted as plaintext',
+      reason: '초대 토큰은 데이터베이스에서 해시해야 하며 평문으로 저장하면 안 된다',
     );
     expect(
       migrations,
@@ -72,7 +67,7 @@ void main() {
           dotAll: true,
         ),
       ),
-      reason: 'Invite acceptance must be a transactional server-side RPC',
+      reason: '초대 수락은 트랜잭션 서버 측 RPC여야 한다',
     );
     expect(
       migrations,
@@ -82,7 +77,7 @@ void main() {
           dotAll: true,
         ),
       ),
-      reason: 'Invite creation must be a server-side RPC',
+      reason: '초대 생성은 서버 측 RPC여야 한다',
     );
     expect(migrations, contains('security definer'));
     expect(migrations, contains('set search_path'));
@@ -90,7 +85,7 @@ void main() {
     expect(migrations, contains('uses_count'));
   });
 
-  test('new invite codes use a twelve-character human-friendly alphabet', () {
+  test('새 초대 코드가 읽기 쉬운 12자 문자 집합을 사용한다', () {
     expect(
       migrations,
       contains(
@@ -104,7 +99,7 @@ void main() {
     );
   });
 
-  test('social profiles use provider names without changing authorization', () {
+  test('소셜 프로필이 권한을 바꾸지 않고 공급자 이름을 사용한다', () {
     expect(migrations, contains("raw_user_meta_data ->> 'full_name'"));
     expect(migrations, contains("raw_user_meta_data ->> 'name'"));
     expect(migrations, contains('from auth.users as auth_user'));
@@ -116,12 +111,12 @@ void main() {
     );
   });
 
-  test('event writes enforce optimistic locking in SQL', () {
+  test('일정 쓰기가 SQL에서 낙관적 잠금을 적용한다', () {
     expect(migrations, contains('events'));
     expect(
       migrations,
       matches(RegExp(r'function[^;]+(update|edit)[^;]*event', dotAll: true)),
-      reason: 'Event updates must go through a server-side versioned function',
+      reason: '일정 갱신은 서버 측 버전 함수로 처리해야 한다',
     );
     expect(
       migrations,
@@ -131,12 +126,12 @@ void main() {
           dotAll: true,
         ),
       ),
-      reason: 'An accepted event write must increment version atomically',
+      reason: '허용된 일정 쓰기는 버전을 원자적으로 증가시켜야 한다',
     );
     expect(
       migrations,
       matches(RegExp(r'where[^;]+version\s*=', dotAll: true)),
-      reason: 'The update predicate must include the caller expected version',
+      reason: '갱신 조건에 호출자가 예상한 버전이 포함되어야 한다',
     );
     expect(migrations, contains('version > 0'));
     expect(migrations, contains('ends_at > starts_at'));

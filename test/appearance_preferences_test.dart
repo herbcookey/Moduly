@@ -180,6 +180,8 @@ void main() {
     final auth = _Auth();
     final controller = _controller(auth, store);
 
+    // 기본값과 같은 false를 명시적으로 선택해도 사용자의 darkMode 의도이며,
+    // 아직 로드되지 않은 textScale 1.25는 함께 보존해야 한다.
     controller.toggleDarkMode(false);
     await Future<void>.delayed(Duration.zero);
     expect(

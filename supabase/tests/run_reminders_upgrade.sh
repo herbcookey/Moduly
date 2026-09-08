@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Feature 3 fresh/upgrade/reapply evidence. This runner uses a disposable local
-# PostgreSQL cluster and never contacts a Supabase project or provider.
+# 기능 3의 신규 설치/업그레이드/재적용 검증이다. 이 실행기는 일회용 로컬
+# PostgreSQL 클러스터를 사용하며 Supabase 프로젝트나 제공자에 접속하지 않는다.
 set -euo pipefail
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -47,12 +47,12 @@ SQL
 reminders_migration="$repo_dir/supabase/migrations/20260907130006_reminders.sql"
 for migration in "$repo_dir"/supabase/migrations/*.sql; do
   [[ "$migration" == "$reminders_migration" ]] && break
-  printf 'applying %s\n' "$(basename "$migration")"
+  printf '%s 적용 중\n' "$(basename "$migration")"
   psql_test -f "$migration" >/dev/null
 done
 
-# Install legacy rows before Feature 3. No reminder row should be synthesized,
-# and the event/group content must remain byte-for-byte unchanged.
+# 기능 3 전에 이전 행을 설치한다. 미리 알림 행을 만들어 내서는 안 되며 일정/그룹
+# 내용은 바이트 단위로 변경 없이 유지해야 한다.
 psql_test <<'SQL'
 insert into auth.users (id, instance_id, aud, role, email, encrypted_password,
                         email_confirmed_at, created_at, updated_at)
@@ -78,11 +78,11 @@ values ('00000000-0000-4000-8000-00000000f301', '00000000-0000-4000-8000-0000000
        ('00000000-0000-4000-8000-00000000f301', '00000000-0000-4000-8000-00000000f103');
 SQL
 
-printf 'applying %s\n' "$(basename "$reminders_migration")"
+printf '%s 적용 중\n' "$(basename "$reminders_migration")"
 psql_test -f "$reminders_migration" >/dev/null
 
-# Deactivate the participant after migration so the reminder hooks exercise
-# cancellation/pruning and candidate ACLs against a real inactive membership.
+# 마이그레이션 뒤 참여자를 비활성화하여 미리 알림 훅이 실제 비활성 멤버십을 대상으로
+# 취소/정리 및 후보 ACL을 검사하게 한다.
 psql_test <<'SQL'
 update public.memberships
 set is_active = false, removed_at = '2026-02-01T00:00:00Z'
@@ -117,8 +117,8 @@ insert into public.event_recurrence_rules (
   '2026-01-05T00:00:00Z', '2026-01-05T00:00:00Z');
 SQL
 
-printf 'reapplying %s\n' "$(basename "$reminders_migration")"
+printf '%s 재적용 중\n' "$(basename "$reminders_migration")"
 psql_test -f "$reminders_migration" >/dev/null
-printf 'running reminders fixture\n'
+printf '미리 알림 픽스처 실행 중\n'
 psql_test -f "$repo_dir/supabase/tests/reminders.sql" >/dev/null
-printf 'reminders fresh/reapply/neighbor checks passed\n'
+printf '미리 알림 신규 설치/재적용/인접 기능 검사를 통과했습니다\n'

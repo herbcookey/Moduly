@@ -6,18 +6,21 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:moduly/repositories/auth_repository.dart';
 
 void main() {
-  test('native auth callback stays on the custom URI scheme', () {
-    expect(
-      resolveAuthCallbackRedirect(
-        isWeb: false,
-        baseUri: Uri.parse('https://planner.example.test/login'),
-      ),
-      authCallbackRedirect,
-    );
+  test('네이티브 인증 콜백이 사용자 지정 URI 스킴을 유지한다', () {
+    for (final baseUri in <Uri>[
+      Uri.parse('https://planner.example.test/login'),
+      Uri.parse('http://localhost:3000/login'),
+      Uri.parse('file:///tmp/flutter/index.html'),
+    ]) {
+      expect(
+        resolveAuthCallbackRedirect(isWeb: false, baseUri: baseUri),
+        authCallbackRedirect,
+      );
+    }
     expect(authCallbackRedirectForPlatform(isWeb: false), authCallbackRedirect);
   });
 
-  test('web auth callback uses the current origin and fixed path', () {
+  test('웹 인증 콜백이 현재 출처와 고정 경로를 사용한다', () {
     expect(
       resolveAuthCallbackRedirect(
         isWeb: true,
@@ -29,7 +32,27 @@ void main() {
     );
   });
 
-  test('web auth callback supports local HTTP origins', () {
+  test('포트를 생략한 웹 HTTPS 콜백에 :0을 출력하지 않는다', () {
+    expect(
+      resolveAuthCallbackRedirect(
+        isWeb: true,
+        baseUri: Uri.parse('https://planner.example.test/login'),
+      ),
+      'https://planner.example.test/auth-callback',
+    );
+  });
+
+  test('웹 HTTPS의 명시적 표준 포트를 기본 포트로 정규화한다', () {
+    expect(
+      resolveAuthCallbackRedirect(
+        isWeb: true,
+        baseUri: Uri.parse('https://planner.example.test:443/login'),
+      ),
+      'https://planner.example.test/auth-callback',
+    );
+  });
+
+  test('웹 인증 콜백이 로컬 HTTP 출처를 지원한다', () {
     expect(
       resolveAuthCallbackRedirect(
         isWeb: true,
@@ -39,7 +62,27 @@ void main() {
     );
   });
 
-  test('web resolver never emits a custom scheme without a browser origin', () {
+  test('포트를 생략한 웹 HTTP 콜백에 :0을 출력하지 않는다', () {
+    expect(
+      resolveAuthCallbackRedirect(
+        isWeb: true,
+        baseUri: Uri.parse('http://planner.example.test/login'),
+      ),
+      'http://planner.example.test/auth-callback',
+    );
+  });
+
+  test('웹 HTTP의 명시적 표준 포트를 기본 포트로 정규화한다', () {
+    expect(
+      resolveAuthCallbackRedirect(
+        isWeb: true,
+        baseUri: Uri.parse('http://planner.example.test:80/login'),
+      ),
+      'http://planner.example.test/auth-callback',
+    );
+  });
+
+  test('웹 해석기가 브라우저 출처 없이 사용자 지정 스킴을 만들지 않는다', () {
     expect(
       resolveAuthCallbackRedirect(
         isWeb: true,
@@ -49,7 +92,7 @@ void main() {
     );
   });
 
-  test('client env template contains only public AppConfig keys', () {
+  test('클라이언트 환경 템플릿에 공개 AppConfig 키만 포함된다', () {
     final source = File('.env.example').readAsStringSync();
     final assignments = source
         .split('\n')
@@ -69,13 +112,13 @@ void main() {
     expect(source, isNot(contains('SUPABASE_SECRET_KEY')));
   });
 
-  test('macOS registers the native callback scheme', () {
+  test('macOS가 네이티브 콜백 스킴을 등록한다', () {
     final plist = File('macos/Runner/Info.plist').readAsStringSync();
     expect(plist, contains('<key>CFBundleURLTypes</key>'));
     expect(plist, contains('<string>moduly</string>'));
   });
 
-  test('platform callback and sandbox settings stay aligned', () {
+  test('플랫폼 콜백과 샌드박스 설정이 일치한다', () {
     final androidManifest = File(
       'android/app/src/main/AndroidManifest.xml',
     ).readAsStringSync();
@@ -138,11 +181,11 @@ void main() {
     expect(linuxRunner, isNot(contains('G_APPLICATION_NON_UNIQUE')));
   });
 
-  test('README documents web redirects and desktop installer limits', () {
+  test('README가 웹 리디렉션과 데스크톱 설치 프로그램 제한을 설명한다', () {
     final readme = File('README.md').readAsStringSync();
     expect(readme, contains('http://localhost:3000/auth-callback'));
     expect(readme, contains('flutter run -d chrome --web-port 3000'));
-    expect(readme, contains('SPA fallback'));
+    expect(readme, contains('SPA 대체 경로'));
     expect(readme, contains('com.apple.security.network.client'));
     expect(readme, contains('Windows'));
     expect(readme, contains('Linux'));
@@ -150,24 +193,21 @@ void main() {
     expect(readme, contains('x-scheme-handler/moduly'));
   });
 
-  test(
-    'direct demo sign-in enforces the six-character password minimum',
-    () async {
-      final auth = AuthRepository();
-      addTearDown(auth.dispose);
+  test('직접 데모 로그인이 비밀번호 최소 길이 6자를 적용한다', () async {
+    final auth = AuthRepository();
+    addTearDown(auth.dispose);
 
-      await expectLater(
-        auth.signIn('demo@example.com', '12345'),
-        throwsA(isA<AuthException>()),
-      );
-      expect(
-        (await auth.signIn('demo@example.com', '123456')).email,
-        'demo@example.com',
-      );
-    },
-  );
+    await expectLater(
+      auth.signIn('demo@example.com', '12345'),
+      throwsA(isA<AuthException>()),
+    );
+    expect(
+      (await auth.signIn('demo@example.com', '123456')).email,
+      'demo@example.com',
+    );
+  });
 
-  test('direct demo sign-up enforces the 120-character name maximum', () async {
+  test('직접 데모 가입이 이름을 최대 120자로 제한한다', () async {
     final auth = AuthRepository();
     addTearDown(auth.dispose);
     final tooLongName = List<String>.filled(121, 'n').join();

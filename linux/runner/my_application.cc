@@ -86,7 +86,7 @@ static gboolean my_application_local_command_line(GApplication* application,
 
   g_autoptr(GError) error = nullptr;
   if (!g_application_register(application, nullptr, &error)) {
-    g_warning("Failed to register: %s", error->message);
+    g_warning("등록하지 못했습니다: %s", error->message);
     *exit_status = 1;
     return TRUE;
   }
@@ -94,8 +94,8 @@ static gboolean my_application_local_command_line(GApplication* application,
   g_application_activate(application);
   *exit_status = 0;
 
-  // Return FALSE so gtk's application notifier can forward the command-line
-  // arguments (including custom-scheme callbacks) to app_links.
+  // gtk의 애플리케이션 알림기가 명령줄 인수(사용자 지정 스킴 콜백 포함)를
+  // app_links로 전달할 수 있도록 FALSE를 반환한다.
   return FALSE;
 }
 

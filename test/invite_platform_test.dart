@@ -18,7 +18,7 @@ class _RecordingShareInvoker {
 }
 
 void main() {
-  test('browser location seam selects package:web for JS and WASM builds', () {
+  test('브라우저 위치 이음새가 JS 및 WASM 빌드에서 package:web을 선택한다', () {
     final source = File('lib/platform/browser_location_source.dart');
     final webSource = File('lib/platform/browser_location_source_web.dart');
     expect(source.existsSync(), isTrue);
@@ -32,82 +32,76 @@ void main() {
     expect(webSource.readAsStringSync(), contains("package:web/web.dart"));
   });
 
-  test(
-    'bootstrap initializes auth before attaching links and keeps cold/auth links',
-    () async {
-      final links = StreamController<Uri>.broadcast();
-      addTearDown(links.close);
-      final cold = Uri.parse('moduly://invite/2345ABCDEFGH');
-      final authCallback = Uri.parse('moduly://auth-callback?code=opaque');
-      final events = <String>[];
-      final source = InviteLinkSource(
-        linkStream: links.stream,
-        initialLink: () async {
-          events.add('cold-read');
-          return cold;
-        },
-      );
-      addTearDown(source.dispose);
-      final received = <Uri>[];
-      final subscription = source.stream.listen(received.add);
-      addTearDown(subscription.cancel);
+  test('부트스트랩이 링크 연결 전에 인증을 초기화하고 콜드/인증 링크를 유지한다', () async {
+    final links = StreamController<Uri>.broadcast();
+    addTearDown(links.close);
+    final cold = Uri.parse('moduly://invite/2345ABCDEFGH');
+    final authCallback = Uri.parse('moduly://auth-callback?code=opaque');
+    final events = <String>[];
+    final source = InviteLinkSource(
+      linkStream: links.stream,
+      initialLink: () async {
+        events.add('cold-read');
+        return cold;
+      },
+    );
+    addTearDown(source.dispose);
+    final received = <Uri>[];
+    final subscription = source.stream.listen(received.add);
+    addTearDown(subscription.cancel);
 
-      await initializeBeforeInviteSource(
-        initialize: () async {
-          events.add('supabase-init');
-          await Future<void>.delayed(Duration.zero);
-        },
-        startInviteSource: () {
-          events.add('invite-start');
-          source.start();
-        },
-      );
-      await pumpEventQueue();
+    await initializeBeforeInviteSource(
+      initialize: () async {
+        events.add('supabase-init');
+        await Future<void>.delayed(Duration.zero);
+      },
+      startInviteSource: () {
+        events.add('invite-start');
+        source.start();
+      },
+    );
+    await pumpEventQueue();
 
-      links
-        ..add(authCallback)
-        ..add(Uri.parse('moduly://invite/89ABCDEFGHJK'))
-        ..add(Uri.parse('moduly://invite/89ABCDEFGHJK'));
-      await pumpEventQueue();
+    links
+      ..add(authCallback)
+      ..add(Uri.parse('moduly://invite/89ABCDEFGHJK'))
+      ..add(Uri.parse('moduly://invite/89ABCDEFGHJK'));
+    await pumpEventQueue();
 
-      expect(events, <String>['supabase-init', 'invite-start', 'cold-read']);
-      expect(received, <Uri>[
-        cold,
-        authCallback,
-        Uri.parse('moduly://invite/89ABCDEFGHJK'),
-      ]);
-    },
-  );
+    expect(events, <String>['supabase-init', 'invite-start', 'cold-read']);
+    expect(received, <Uri>[
+      cold,
+      authCallback,
+      Uri.parse('moduly://invite/89ABCDEFGHJK'),
+    ]);
+  });
 
-  test(
-    'early link source buffers cold URI and de-duplicates stream delivery',
-    () async {
-      final links = StreamController<Uri>.broadcast();
-      addTearDown(links.close);
-      final cold = Uri.parse('moduly://invite/2345ABCDEFGH');
-      final source = InviteLinkSource(
-        linkStream: links.stream,
-        initialLink: () async => cold,
-      );
-      addTearDown(source.dispose);
+  test('초기 링크 소스가 콜드 URI를 버퍼링하고 스트림 전달의 중복을 제거한다', () async {
+    final links = StreamController<Uri>.broadcast();
+    addTearDown(links.close);
+    final cold = Uri.parse('moduly://invite/2345ABCDEFGH');
+    final source = InviteLinkSource(
+      linkStream: links.stream,
+      initialLink: () async => cold,
+    );
+    addTearDown(source.dispose);
 
-      source.start();
-      await pumpEventQueue();
-      expect(source.takeBuffered(), <Uri>[cold]);
+    source.start();
+    await pumpEventQueue();
+    expect(source.takeBuffered(), <Uri>[cold]);
 
-      final received = <Uri>[];
-      final subscription = source.stream.listen(received.add);
-      addTearDown(subscription.cancel);
-      links
-        ..add(cold)
-        ..add(Uri.parse('moduly://invite/89ABCDEFGHJK'));
-      await pumpEventQueue();
+    final received = <Uri>[];
+    final subscription = source.stream.listen(received.add);
+    addTearDown(subscription.cancel);
+    links
+      ..add(cold)
+      ..add(Uri.parse('moduly://invite/89ABCDEFGHJK'));
+    await pumpEventQueue();
 
-      expect(received, <Uri>[Uri.parse('moduly://invite/89ABCDEFGHJK')]);
-    },
-  );
+    expect(received, <Uri>[Uri.parse('moduly://invite/89ABCDEFGHJK')]);
+  });
 
-  test('share adapter uses text and keeps the iPad anchor', () async {
+  test('공유 어댑터가 텍스트를 사용하고 iPad 앵커를 유지한다', () async {
     final platform = _RecordingShareInvoker();
     final service = SharePlusInviteShareService(invoker: platform.share);
     final origin = const Rect.fromLTWH(12, 24, 80, 48);
@@ -128,7 +122,7 @@ void main() {
     expect(platform.last?.sharePositionOrigin, origin);
   });
 
-  test('share adapter keeps an honest code-only fallback', () async {
+  test('공유 어댑터가 정확한 코드 전용 대체 경로를 유지한다', () async {
     final platform = _RecordingShareInvoker();
     final service = SharePlusInviteShareService(invoker: platform.share);
 

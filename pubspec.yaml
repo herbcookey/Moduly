@@ -1,5 +1,5 @@
 name: moduly
-description: "Moduly is a collaborative planner for everyday schedules."
+description: "Moduly는 일상 일정을 함께 관리하는 플래너입니다."
 # 다음 줄은 `flutter pub publish`로 패키지가 실수로 pub.dev에 게시되는 것을
 # 막는다. 비공개 패키지에 권장되는 설정이다.
 publish_to: 'none' # pub.dev에 게시하려면 이 줄을 제거한다.
@@ -39,25 +39,25 @@ dependencies:
   flutter_riverpod: ^2.6.1
   go_router: ^16.2.0
   supabase_flutter: ^2.9.1
-  # Deep-link intake is shared with Supabase auth, but declared directly so
-  # invite routing has an explicit, locked API dependency.
+  # 딥 링크 수신은 Supabase 인증과 공유하지만, 초대 라우팅이 명시적으로 잠긴
+  # API 의존성을 갖도록 직접 선언한다.
   app_links: 7.2.1
-  # Native OS share sheet with a web/text fallback.
+  # 웹/텍스트 대체 경로가 있는 네이티브 OS 공유 시트다.
   share_plus: 13.3.0
-  # Browser Web Share API bindings used by the share adapter.
+  # 공유 어댑터에서 사용하는 브라우저 Web Share API 바인딩이다.
   web: 1.1.1
   intl: ^0.20.2
-  # flutter_local_notifications 22.3.0 requires the 0.11 timezone API.
-  # Keep all planner wall-time/DST calculations on this package.
+  # flutter_local_notifications 22.3.0에는 timezone 0.11 API가 필요하다.
+  # 플래너의 모든 현지 시각/DST 계산은 이 패키지에서 처리한다.
   timezone: 0.11.1
-  # Local-only reminder scheduling. Server push (Firebase/APNs/VAPID) is
-  # intentionally not bundled until external provider configuration exists.
+  # 로컬 전용 미리 알림 예약 기능이다. 외부 공급자가 설정될 때까지 서버 푸시
+  # (Firebase/APNs/VAPID)는 의도적으로 포함하지 않는다.
   flutter_local_notifications: 22.3.0
-  # Used by the reminder identity adapter to derive stable, non-sensitive
-  # platform notification IDs without exposing event content.
+  # 일정 내용을 노출하지 않고 안정적이며 민감하지 않은 플랫폼 알림 ID를
+  # 도출하기 위해 미리 알림 식별자 어댑터에서 사용한다.
   crypto: 3.0.7
-  # Durable local notification-ID registry; async API avoids a stale cache
-  # when more than one isolate/process observes the account key.
+  # 영구 로컬 알림 ID 레지스트리다. 둘 이상의 isolate/프로세스가 계정 키를
+  # 관찰할 때 비동기 API가 오래된 캐시를 방지한다.
   shared_preferences: 2.5.5
 
 dev_dependencies:

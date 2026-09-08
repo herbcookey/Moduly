@@ -1,14 +1,13 @@
--- Feature G: bounded, group-scoped event search.
+-- 기능 G: 범위를 제한한 그룹 단위 일정 검색이다.
 --
--- Search is a separate read contract so existing calendar clients keep the
--- events_for_range_v2 signature and cursor semantics.  Results are expanded
--- through the recurrence helper, which means segment and occurrence override
--- text is searched exactly as it is presented to a calendar caller.
+-- 기존 캘린더 클라이언트가 events_for_range_v2 시그니처와 커서 의미를 유지하도록
+-- 검색을 별도 조회 계약으로 둔다. 결과는 반복 도우미를 통해 확장하므로 구간 및
+-- 개별 발생 재정의 텍스트를 캘린더 호출자에게 표시되는 그대로 검색한다.
 
 begin;
 
--- The creator predicate is selective for the common non-recurring path.  The
--- range/occurrence helper remains the source of truth for effective rows.
+-- 작성자 조건자는 일반적인 비반복 경로에서 선택도를 높인다. 유효 행의 최종
+-- 기준은 계속 범위/발생 도우미다.
 create index if not exists events_group_creator_start_id_live_idx
   on public.events (group_id, created_by, starts_at, id)
   where deleted_at is null;
@@ -51,9 +50,9 @@ declare
   v_last record;
   v_row record;
 begin
-  -- Authentication and group authorization intentionally precede all result
-  -- production or occurrence expansion.  Missing, archived, and inaccessible
-  -- groups share the same error to avoid an existence oracle.
+  -- 의도적으로 인증과 그룹 권한 검사를 모든 결과 생성 및 발생 확장보다 먼저
+  -- 수행한다. 존재 여부를 알아내는 수단이 되지 않도록 누락되었거나 보관되었거나
+  -- 접근할 수 없는 그룹은 같은 오류를 사용한다.
   if v_actor is null then
     raise exception using errcode = '28000', message = 'authentication is required';
   end if;
@@ -131,9 +130,9 @@ begin
     raise exception using errcode = '42501', message = 'participant is not an active member of this group';
   end if;
 
-  -- The cursor is exactly the strict v2 JSON tuple
-  -- {v,starts_at,event_id,occurrence_key} used by the calendar RPC.  It is
-  -- deliberately opaque to clients, and unknown JSON fields are rejected.
+  -- 커서는 캘린더 RPC가 사용하는 엄격한 v2 JSON 튜플
+  -- {v,starts_at,event_id,occurrence_key}와 정확히 같다. 클라이언트에는
+  -- 의도적으로 불투명하며 알 수 없는 JSON 필드는 거부한다.
   if p_cursor is not null then
     if pg_catalog.length(p_cursor) > 4096
        or pg_catalog.btrim(p_cursor) = ''
@@ -296,7 +295,7 @@ end;
 $$;
 
 comment on function public.search_events_v1(uuid, timestamptz, timestamptz, text, text, uuid, uuid, integer, text)
-  is 'Bounded, group-scoped literal Unicode event search with creator/participant filters and v2 keyset cursors.';
+  is '작성자/참여자 필터와 v2 키셋 커서를 사용하는 범위 제한 그룹 단위 리터럴 유니코드 일정 검색이다.';
 
 revoke execute on function public.search_events_v1(uuid, timestamptz, timestamptz, text, text, uuid, uuid, integer, text)
   from public, anon, authenticated;

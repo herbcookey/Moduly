@@ -246,7 +246,7 @@ PlannerMember _owner(String id) =>
     PlannerMember(id: id, name: id, email: '$id@example.com', isOwner: true);
 
 void main() {
-  test('loadGroups ignores a result that completes after sign-out', () async {
+  test('loadGroups가 로그아웃 후 완료된 결과를 무시한다', () async {
     final auth = _ControlledAuth();
     final repository = _ControlledScheduleRepository();
     final controller = PlannerController(auth: auth, repository: repository);
@@ -284,7 +284,7 @@ void main() {
     expect(controller.events, isEmpty);
   });
 
-  test('only the newest overlapping loadGroups call may commit', () async {
+  test('겹치는 loadGroups 호출 중 최신 호출만 커밋할 수 있다', () async {
     final auth = _ControlledAuth();
     final repository = _ControlledScheduleRepository();
     final controller = PlannerController(auth: auth, repository: repository);
@@ -308,132 +308,120 @@ void main() {
     expect(controller.isLoading, isFalse);
   });
 
-  test(
-    'a removed selection clears all group-scoped caches on refresh',
-    () async {
-      final auth = _ControlledAuth();
-      final repository = _ControlledScheduleRepository();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
-      controller.groups = const <PlannerGroup>[_groupA];
-      controller.selectedGroup = _groupA;
-      controller.members = <PlannerMember>[_owner(_alice.id)];
-      controller.invites = <InviteCode>[
-        InviteCode(
-          id: 'invite-1',
-          groupId: _groupA.id,
-          expiresAt: DateTime.now().toUtc().add(const Duration(days: 1)),
-          maxUses: 1,
-          usesCount: 0,
-          version: 1,
-        ),
-      ];
-      controller.events = <PlannerEvent>[
-        PlannerEvent(
-          id: 'event-1',
-          groupId: _groupA.id,
-          title: 'Private',
-          startAt: DateTime.utc(2026, 1, 1, 9),
-          endAt: DateTime.utc(2026, 1, 1, 10),
-          ownerId: _alice.id,
-        ),
-      ];
+  test('제거된 선택 항목이 새로 고침 때 모든 그룹 범위 캐시를 지운다', () async {
+    final auth = _ControlledAuth();
+    final repository = _ControlledScheduleRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_groupA];
+    controller.selectedGroup = _groupA;
+    controller.members = <PlannerMember>[_owner(_alice.id)];
+    controller.invites = <InviteCode>[
+      InviteCode(
+        id: 'invite-1',
+        groupId: _groupA.id,
+        expiresAt: DateTime.now().toUtc().add(const Duration(days: 1)),
+        maxUses: 1,
+        usesCount: 0,
+        version: 1,
+      ),
+    ];
+    controller.events = <PlannerEvent>[
+      PlannerEvent(
+        id: 'event-1',
+        groupId: _groupA.id,
+        title: 'Private',
+        startAt: DateTime.utc(2026, 1, 1, 9),
+        endAt: DateTime.utc(2026, 1, 1, 10),
+        ownerId: _alice.id,
+      ),
+    ];
 
-      final refresh = controller.loadGroups();
-      repository.groupLoads.single.complete(const <PlannerGroup>[]);
-      await refresh;
+    final refresh = controller.loadGroups();
+    repository.groupLoads.single.complete(const <PlannerGroup>[]);
+    await refresh;
 
-      expect(controller.groups, isEmpty);
-      expect(controller.selectedGroup, isNull);
-      expect(controller.members, isEmpty);
-      expect(controller.invites, isEmpty);
-      expect(controller.events, isEmpty);
-      expect(controller.isLoading, isFalse);
-    },
-  );
+    expect(controller.groups, isEmpty);
+    expect(controller.selectedGroup, isNull);
+    expect(controller.members, isEmpty);
+    expect(controller.invites, isEmpty);
+    expect(controller.events, isEmpty);
+    expect(controller.isLoading, isFalse);
+  });
 
-  test(
-    'selectGroup commits only the latest overlapping group switch',
-    () async {
-      final auth = _ControlledAuth();
-      final repository = _ControlledScheduleRepository();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
-      controller.groups = const <PlannerGroup>[_groupA, _groupB];
-      repository.memberLoads[_groupA.id] = Completer<List<PlannerMember>>();
-      repository.immediateMembers[_groupB.id] = <PlannerMember>[
-        _owner(_alice.id),
-      ];
+  test('selectGroup이 겹치는 그룹 전환 중 최신 항목만 커밋한다', () async {
+    final auth = _ControlledAuth();
+    final repository = _ControlledScheduleRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_groupA, _groupB];
+    repository.memberLoads[_groupA.id] = Completer<List<PlannerMember>>();
+    repository.immediateMembers[_groupB.id] = <PlannerMember>[
+      _owner(_alice.id),
+    ];
 
-      final first = controller.selectGroup(_groupA.id);
-      await Future<void>.delayed(Duration.zero);
-      final second = controller.selectGroup(_groupB.id);
-      await second;
+    final first = controller.selectGroup(_groupA.id);
+    await Future<void>.delayed(Duration.zero);
+    final second = controller.selectGroup(_groupB.id);
+    await second;
 
-      repository.memberLoads[_groupA.id]!.complete(<PlannerMember>[
-        _owner(_alice.id),
-        const PlannerMember(
-          id: 'member-a',
-          name: 'A member',
-          email: 'a@example.com',
-        ),
-      ]);
-      await first;
+    repository.memberLoads[_groupA.id]!.complete(<PlannerMember>[
+      _owner(_alice.id),
+      const PlannerMember(
+        id: 'member-a',
+        name: 'A member',
+        email: 'a@example.com',
+      ),
+    ]);
+    await first;
 
-      expect(controller.selectedGroup?.id, _groupB.id);
-      expect(controller.members.map((member) => member.id), <String>[
-        _alice.id,
-      ]);
-      expect(controller.events, isEmpty);
-    },
-  );
+    expect(controller.selectedGroup?.id, _groupB.id);
+    expect(controller.members.map((member) => member.id), <String>[_alice.id]);
+    expect(controller.events, isEmpty);
+  });
 
-  test(
-    'selectGroup starts lifecycle watchers while metadata reads are pending',
-    () async {
-      final auth = _ControlledAuth();
-      final repository = _LifecycleControlledRepository();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() async {
-        controller.dispose();
-        await repository.close();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
-      controller.groups = const <PlannerGroup>[_groupA];
+  test('메타데이터 읽기가 대기 중일 때 selectGroup이 수명 주기 감시를 시작한다', () async {
+    final auth = _ControlledAuth();
+    final repository = _LifecycleControlledRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() async {
+      controller.dispose();
+      await repository.close();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_groupA];
 
-      final selection = controller.selectGroup(_groupA.id);
-      await Future<void>.delayed(Duration.zero);
+    final selection = controller.selectGroup(_groupA.id);
+    await Future<void>.delayed(Duration.zero);
 
-      expect(repository.eventsStarted, isTrue);
-      expect(repository.lifecycleStarted, isTrue);
-      expect(controller.selectedGroup?.id, _groupA.id);
+    expect(repository.eventsStarted, isTrue);
+    expect(repository.lifecycleStarted, isTrue);
+    expect(controller.selectedGroup?.id, _groupA.id);
 
-      // A lifecycle tombstone must be observed even though the member REST
-      // projection has not returned yet.
-      repository.lifecycle.add(null);
-      await Future<void>.delayed(Duration.zero);
-      await Future<void>.delayed(Duration.zero);
-      expect(controller.selectedGroup, isNull);
-      expect(controller.events, isEmpty);
+    // 멤버 REST 투영이 아직 반환되지 않았어도 수명 주기 차단 표식을 관찰해야 한다.
+    repository.lifecycle.add(null);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.selectedGroup, isNull);
+    expect(controller.events, isEmpty);
 
-      repository.membersLoad.complete(const <PlannerMember>[]);
-      await selection;
-    },
-  );
+    repository.membersLoad.complete(const <PlannerMember>[]);
+    await selection;
+  });
 
-  test('selectGroup ignores a cross-group lifecycle row', () async {
+  test('selectGroup이 다른 그룹의 수명 주기 행을 무시한다', () async {
     final auth = _ControlledAuth();
     final repository = _LifecycleControlledRepository();
     final controller = PlannerController(auth: auth, repository: repository);
@@ -462,7 +450,7 @@ void main() {
     await selection;
   });
 
-  test('auth user changes invalidate an in-flight group load', () async {
+  test('인증 사용자 변경이 진행 중인 그룹 로드를 무효화한다', () async {
     final auth = _ControlledAuth();
     final repository = _ControlledScheduleRepository();
     final controller = PlannerController(auth: auth, repository: repository);
@@ -493,187 +481,172 @@ void main() {
     expect(controller.groups.map((group) => group.id), <String>[_groupB.id]);
   });
 
-  test(
-    'stale createGroup completion cannot restore data after sign-out',
-    () async {
-      final auth = _ControlledAuth();
-      final repository = _ControlledScheduleRepository()
-        ..createGroupLoad = Completer<PlannerGroup>()
-        ..createGroupResult = _groupB;
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
+  test('오래된 createGroup 완료가 로그아웃 후 데이터를 복원할 수 없다', () async {
+    final auth = _ControlledAuth();
+    final repository = _ControlledScheduleRepository()
+      ..createGroupLoad = Completer<PlannerGroup>()
+      ..createGroupResult = _groupB;
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
 
-      final creating = controller.createGroup('B', 'description');
-      await Future<void>.delayed(Duration.zero);
-      auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
-      await Future<void>.delayed(Duration.zero);
-      repository.createGroupLoad!.complete(_groupB);
-      await creating;
+    final creating = controller.createGroup('B', 'description');
+    await Future<void>.delayed(Duration.zero);
+    auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
+    await Future<void>.delayed(Duration.zero);
+    repository.createGroupLoad!.complete(_groupB);
+    await creating;
 
-      expect(controller.user, isNull);
-      expect(controller.groups, isEmpty);
-      expect(controller.selectedGroup, isNull);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+    expect(controller.user, isNull);
+    expect(controller.groups, isEmpty);
+    expect(controller.selectedGroup, isNull);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test(
-    'stale joinGroup completion cannot restore data after sign-out',
-    () async {
-      final auth = _ControlledAuth();
-      final repository = _ControlledScheduleRepository()
-        ..joinGroupLoad = Completer<PlannerGroup>()
-        ..joinGroupResult = _groupB;
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
+  test('오래된 joinGroup 완료가 로그아웃 후 데이터를 복원할 수 없다', () async {
+    final auth = _ControlledAuth();
+    final repository = _ControlledScheduleRepository()
+      ..joinGroupLoad = Completer<PlannerGroup>()
+      ..joinGroupResult = _groupB;
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
 
-      final joining = controller.joinGroup('invite-token');
-      await Future<void>.delayed(Duration.zero);
-      auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
-      await Future<void>.delayed(Duration.zero);
-      repository.joinGroupLoad!.complete(_groupB);
-      await joining;
+    final joining = controller.joinGroup('invite-token');
+    await Future<void>.delayed(Duration.zero);
+    auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
+    await Future<void>.delayed(Duration.zero);
+    repository.joinGroupLoad!.complete(_groupB);
+    await joining;
 
-      expect(controller.user, isNull);
-      expect(controller.groups, isEmpty);
-      expect(controller.selectedGroup, isNull);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+    expect(controller.user, isNull);
+    expect(controller.groups, isEmpty);
+    expect(controller.selectedGroup, isNull);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test(
-    'createGroup rejects duplicate submits and preserves a new session guard',
-    () async {
-      final auth = _ControlledAuth();
-      final firstLoad = Completer<PlannerGroup>();
-      final secondLoad = Completer<PlannerGroup>();
-      final repository = _ControlledScheduleRepository()
-        ..createGroupLoads.addAll(<Completer<PlannerGroup>>[
-          firstLoad,
-          secondLoad,
-        ]);
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
+  test('createGroup이 중복 제출을 거부하고 새 세션 보호값을 보존한다', () async {
+    final auth = _ControlledAuth();
+    final firstLoad = Completer<PlannerGroup>();
+    final secondLoad = Completer<PlannerGroup>();
+    final repository = _ControlledScheduleRepository()
+      ..createGroupLoads.addAll(<Completer<PlannerGroup>>[
+        firstLoad,
+        secondLoad,
+      ]);
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
 
-      final first = controller.createGroup('First', '');
-      await Future<void>.delayed(Duration.zero);
-      expect(controller.isSaving, isTrue);
-      await expectLater(
-        controller.createGroup('Duplicate', ''),
-        throwsA(isA<ScheduleConflictException>()),
-      );
-      expect(repository.createGroupCalls, 1);
+    final first = controller.createGroup('First', '');
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.isSaving, isTrue);
+    await expectLater(
+      controller.createGroup('Duplicate', ''),
+      throwsA(isA<ScheduleConflictException>()),
+    );
+    expect(repository.createGroupCalls, 1);
 
-      // A sign-out clears the ownership token. A new session may start its
-      // own group operation while the stale first request is still pending.
-      await controller.signOut();
-      controller.user = _bob;
-      final next = controller.createGroup('Second', '');
-      await Future<void>.delayed(Duration.zero);
-      expect(repository.createGroupCalls, 2);
+    // 로그아웃은 소유권 토큰을 지운다. 오래된 첫 요청이 아직 대기 중이어도 새
+    // 세션은 자체 그룹 작업을 시작할 수 있다.
+    await controller.signOut();
+    controller.user = _bob;
+    final next = controller.createGroup('Second', '');
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.createGroupCalls, 2);
 
-      firstLoad.complete(_groupA);
-      await first;
-      // The stale first finally block must not clear the second operation's
-      // saving state or ownership token.
-      expect(controller.isSaving, isTrue);
+    firstLoad.complete(_groupA);
+    await first;
+    // 오래된 첫 번째 finally 블록이 두 번째 작업의 저장 상태나 소유권 토큰을
+    // 지우면 안 된다.
+    expect(controller.isSaving, isTrue);
 
-      secondLoad.complete(_groupB);
-      await next;
-      expect(controller.selectedGroup?.id, _groupB.id);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+    secondLoad.complete(_groupB);
+    await next;
+    expect(controller.selectedGroup?.id, _groupB.id);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test(
-    'joinGroup rejects duplicate submits while the first is pending',
-    () async {
-      final auth = _ControlledAuth();
-      final load = Completer<PlannerGroup>();
-      final repository = _ControlledScheduleRepository()
-        ..joinGroupLoads.add(load);
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
+  test('첫 요청이 대기 중이면 joinGroup이 중복 제출을 거부한다', () async {
+    final auth = _ControlledAuth();
+    final load = Completer<PlannerGroup>();
+    final repository = _ControlledScheduleRepository()
+      ..joinGroupLoads.add(load);
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
 
-      final first = controller.joinGroup('invite-token');
-      await Future<void>.delayed(Duration.zero);
-      await expectLater(
-        controller.joinGroup('invite-token'),
-        throwsA(isA<ScheduleConflictException>()),
-      );
-      expect(repository.joinGroupCalls, 1);
+    final first = controller.joinGroup('invite-token');
+    await Future<void>.delayed(Duration.zero);
+    await expectLater(
+      controller.joinGroup('invite-token'),
+      throwsA(isA<ScheduleConflictException>()),
+    );
+    expect(repository.joinGroupCalls, 1);
 
-      load.complete(_groupB);
-      await first;
-      expect(controller.selectedGroup?.id, _groupB.id);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+    load.complete(_groupB);
+    await first;
+    expect(controller.selectedGroup?.id, _groupB.id);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test(
-    'stale saveEvent completion cannot restore data after sign-out',
-    () async {
-      final auth = _ControlledAuth();
-      final repository = _ControlledScheduleRepository()
-        ..createEventLoad = Completer<PlannerEvent>();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
-      controller.selectedGroup = _groupA;
+  test('오래된 saveEvent 완료가 로그아웃 후 데이터를 복원할 수 없다', () async {
+    final auth = _ControlledAuth();
+    final repository = _ControlledScheduleRepository()
+      ..createEventLoad = Completer<PlannerEvent>();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.selectedGroup = _groupA;
 
-      final saving = controller.saveEvent(
-        draft: EventDraft(
-          title: 'Private',
-          startAt: DateTime.utc(2026, 1, 1, 9),
-          endAt: DateTime.utc(2026, 1, 1, 10),
-        ),
-      );
-      await Future<void>.delayed(Duration.zero);
-      auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
-      await Future<void>.delayed(Duration.zero);
-      repository.createEventLoad!.complete(
-        PlannerEvent(
-          id: 'private-event',
-          groupId: _groupA.id,
-          title: 'Private',
-          startAt: DateTime.utc(2026, 1, 1, 9),
-          endAt: DateTime.utc(2026, 1, 1, 10),
-          ownerId: _alice.id,
-        ),
-      );
-      await saving;
+    final saving = controller.saveEvent(
+      draft: EventDraft(
+        title: 'Private',
+        startAt: DateTime.utc(2026, 1, 1, 9),
+        endAt: DateTime.utc(2026, 1, 1, 10),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
+    await Future<void>.delayed(Duration.zero);
+    repository.createEventLoad!.complete(
+      PlannerEvent(
+        id: 'private-event',
+        groupId: _groupA.id,
+        title: 'Private',
+        startAt: DateTime.utc(2026, 1, 1, 9),
+        endAt: DateTime.utc(2026, 1, 1, 10),
+        ownerId: _alice.id,
+      ),
+    );
+    await saving;
 
-      expect(controller.user, isNull);
-      expect(controller.events, isEmpty);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+    expect(controller.user, isNull);
+    expect(controller.events, isEmpty);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test('stale profile update cannot restore data after sign-out', () async {
+  test('오래된 프로필 갱신이 로그아웃 후 데이터를 복원하지 못한다', () async {
     final auth = _ControlledAuth()..displayNameLoad = Completer<PlannerUser>();
     final controller = PlannerController(
       auth: auth,
@@ -703,76 +676,70 @@ void main() {
     expect(controller.isSaving, isFalse);
   });
 
-  test(
-    'signedIn followed by signedOut leaves the controller signed out',
-    () async {
-      final auth = _ControlledAuth();
-      final repository = _ControlledScheduleRepository();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
+  test('signedIn 뒤에 signedOut이 오면 컨트롤러가 로그아웃 상태를 유지한다', () async {
+    final auth = _ControlledAuth();
+    final repository = _ControlledScheduleRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
 
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
-      );
-      for (var i = 0; i < 3; i++) {
-        await Future<void>.delayed(Duration.zero);
-      }
-      auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
-      for (var i = 0; i < 3; i++) {
-        await Future<void>.delayed(Duration.zero);
-      }
-      for (final load in repository.groupLoads) {
-        if (!load.isCompleted) load.complete(const <PlannerGroup>[]);
-      }
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
+    );
+    for (var i = 0; i < 3; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
+    for (var i = 0; i < 3; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    for (final load in repository.groupLoads) {
+      if (!load.isCompleted) load.complete(const <PlannerGroup>[]);
+    }
 
-      expect(controller.user, isNull);
-      expect(controller.groups, isEmpty);
-      expect(controller.selectedGroup, isNull);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-    },
-  );
+    expect(controller.user, isNull);
+    expect(controller.groups, isEmpty);
+    expect(controller.selectedGroup, isNull);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+  });
 
-  test(
-    'signOut clears private state and keeps an actionable failure',
-    () async {
-      final auth = _ControlledAuth()
-        ..signOutError = const AuthException('network');
-      final repository = _ControlledScheduleRepository();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
-      controller.groups = const <PlannerGroup>[_groupA];
-      controller.selectedGroup = _groupA;
-      controller.events = <PlannerEvent>[
-        PlannerEvent(
-          id: 'private-event',
-          groupId: _groupA.id,
-          title: 'Private',
-          startAt: DateTime.utc(2026, 1, 1, 9),
-          endAt: DateTime.utc(2026, 1, 1, 10),
-          ownerId: _alice.id,
-        ),
-      ];
+  test('signOut이 비공개 상태를 지우고 조치 가능한 실패를 유지한다', () async {
+    final auth = _ControlledAuth()
+      ..signOutError = const AuthException('network');
+    final repository = _ControlledScheduleRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_groupA];
+    controller.selectedGroup = _groupA;
+    controller.events = <PlannerEvent>[
+      PlannerEvent(
+        id: 'private-event',
+        groupId: _groupA.id,
+        title: 'Private',
+        startAt: DateTime.utc(2026, 1, 1, 9),
+        endAt: DateTime.utc(2026, 1, 1, 10),
+        ownerId: _alice.id,
+      ),
+    ];
 
-      await expectLater(controller.signOut(), throwsA(isA<AuthException>()));
-      expect(controller.user, isNull);
-      expect(controller.groups, isEmpty);
-      expect(controller.selectedGroup, isNull);
-      expect(controller.events, isEmpty);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-      expect(controller.errorMessage, authSessionErrorMessage);
-    },
-  );
+    await expectLater(controller.signOut(), throwsA(isA<AuthException>()));
+    expect(controller.user, isNull);
+    expect(controller.groups, isEmpty);
+    expect(controller.selectedGroup, isNull);
+    expect(controller.events, isEmpty);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+    expect(controller.errorMessage, authSessionErrorMessage);
+  });
 
-  test('isOffline resets after a later successful group refresh', () async {
+  test('이후 그룹 새로 고침에 성공하면 isOffline이 초기화된다', () async {
     final auth = _ControlledAuth();
     final repository = _ControlledScheduleRepository();
     final controller = PlannerController(auth: auth, repository: repository);
@@ -794,7 +761,7 @@ void main() {
     expect(controller.isOffline, isFalse);
   });
 
-  test('duplicate createInviteCode calls are rejected while busy', () async {
+  test('작업 중에는 중복 createInviteCode 호출을 거부한다', () async {
     final auth = _ControlledAuth();
     final repository = _ControlledScheduleRepository();
     final controller = PlannerController(auth: auth, repository: repository);
@@ -833,7 +800,7 @@ void main() {
     expect(controller.isSaving, isFalse);
   });
 
-  test('PlannerEvent.copyWith can clear all-day date metadata', () {
+  test('PlannerEvent.copyWith가 종일 일정 날짜 메타데이터를 지울 수 있다', () {
     final event = PlannerEvent(
       id: 'event-1',
       groupId: _groupA.id,
@@ -852,48 +819,45 @@ void main() {
     expect(cleared.allDayEndDate, isNull);
   });
 
-  test(
-    'saveEvent clears local all-day metadata when switching to timed',
-    () async {
-      final auth = _ControlledAuth();
-      final repository = _ControlledScheduleRepository();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settleControllerBootstrap();
-      controller.user = _alice;
-      controller.groups = const <PlannerGroup>[_groupA];
-      controller.selectedGroup = _groupA;
-      final existing = PlannerEvent(
-        id: 'event-1',
-        groupId: _groupA.id,
-        title: 'All day',
-        startAt: DateTime.utc(2026, 1, 1),
-        endAt: DateTime.utc(2026, 1, 2),
-        ownerId: _alice.id,
-        allDay: true,
-        allDayStartDate: DateTime(2026, 1, 1),
-        allDayEndDate: DateTime(2026, 1, 2),
-      );
-      controller.events = <PlannerEvent>[existing];
+  test('시간 지정 일정으로 전환할 때 saveEvent가 로컬 종일 메타데이터를 지운다', () async {
+    final auth = _ControlledAuth();
+    final repository = _ControlledScheduleRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_groupA];
+    controller.selectedGroup = _groupA;
+    final existing = PlannerEvent(
+      id: 'event-1',
+      groupId: _groupA.id,
+      title: 'All day',
+      startAt: DateTime.utc(2026, 1, 1),
+      endAt: DateTime.utc(2026, 1, 2),
+      ownerId: _alice.id,
+      allDay: true,
+      allDayStartDate: DateTime(2026, 1, 1),
+      allDayEndDate: DateTime(2026, 1, 2),
+    );
+    controller.events = <PlannerEvent>[existing];
 
-      await controller.saveEvent(
-        existing: existing,
-        draft: EventDraft(
-          title: 'Timed',
-          startAt: DateTime.utc(2026, 1, 1, 9),
-          endAt: DateTime.utc(2026, 1, 1, 10),
-          timezone: 'UTC',
-        ),
-      );
+    await controller.saveEvent(
+      existing: existing,
+      draft: EventDraft(
+        title: 'Timed',
+        startAt: DateTime.utc(2026, 1, 1, 9),
+        endAt: DateTime.utc(2026, 1, 1, 10),
+        timezone: 'UTC',
+      ),
+    );
 
-      expect(repository.updatedEvent?.allDay, isFalse);
-      expect(repository.updatedEvent?.allDayStartDate, isNull);
-      expect(repository.updatedEvent?.allDayEndDate, isNull);
-      expect(controller.events.single.allDayStartDate, isNull);
-      expect(controller.events.single.allDayEndDate, isNull);
-    },
-  );
+    expect(repository.updatedEvent?.allDay, isFalse);
+    expect(repository.updatedEvent?.allDayStartDate, isNull);
+    expect(repository.updatedEvent?.allDayEndDate, isNull);
+    expect(controller.events.single.allDayStartDate, isNull);
+    expect(controller.events.single.allDayEndDate, isNull);
+  });
 }

@@ -1,4 +1,4 @@
-# Miscellaneous
+# 기타 파일
 *.class
 *.log
 *.pyc
@@ -12,18 +12,17 @@
 .swiftpm/
 migrate_working_dir/
 
-# IntelliJ related
+# IntelliJ 관련 파일
 *.iml
 *.ipr
 *.iws
 .idea/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
+# .vscode 폴더에는 VS Code에서 설정한 실행 구성과 작업이 들어 있다. 버전
+# 관리에 포함할 수도 있으므로 이 줄은 기본적으로 주석 처리되어 있다.
 #.vscode/
 
-# Flutter/Dart/Pub related
+# Flutter/Dart/Pub 관련 파일
 **/doc/api/
 **/ios/Flutter/.last_build_id
 **/Signing.xcconfig
@@ -40,25 +39,25 @@ migrate_working_dir/
 **/Flutter/ephemeral/
 **/Generated.xcconfig
 
-# Local Supabase and Flutter configuration (keep the checked-in template).
+# 로컬 Supabase 및 Flutter 설정(커밋된 템플릿은 유지한다).
 **/.env
 **/.env.*
 !.env.example
 **/supabase/.temp/
 **/supabase/.branches/
 
-# Symbolication related
+# 기호화 관련 파일
 app.*.symbols
 
-# Obfuscation related
+# 난독화 관련 파일
 app.*.map.json
 
-# Android Studio will place build artifacts here
+# Android Studio는 여기에 빌드 산출물을 둔다.
 /android/app/debug
 /android/app/profile
 /android/app/release
 
-# Release signing material and certificates (never commit passwords or private keys).
+# 릴리스 서명 자료와 인증서(비밀번호나 비밀 키는 절대 커밋하지 않는다).
 **/key.properties
 **/*.jks
 **/*.keystore

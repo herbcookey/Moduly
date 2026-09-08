@@ -245,10 +245,9 @@ class _TransferGroupDialogState extends State<TransferGroupDialog> {
           : '소유권을 이전하지 못했어요. 최신 멤버 목록을 확인해 주세요.';
       setState(() {
         _isSubmitting = false;
-        // Keep the selected target and the exact confirmation step visible
-        // after a conflict. The parent controller reloads the group before
-        // this callback returns, so the same confirmation can safely retry
-        // with the freshly resolved version.
+        // 충돌 후에도 선택한 대상과 정확한 확인 단계를 계속 표시한다. 이 콜백이
+        // 반환되기 전에 상위 컨트롤러가 그룹을 다시 불러오므로, 같은 확인 절차에서
+        // 새로 확인한 버전으로 안전하게 재시도할 수 있다.
         if (error is! ScheduleConflictException) _confirming = false;
         _error = message;
       });

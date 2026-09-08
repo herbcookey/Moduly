@@ -1,6 +1,6 @@
--- Event participant assignments.  This migration is additive and keeps the
--- existing events.member/creator contract while making assignments a normal
--- relation that can be secured, queried, and replaced atomically.
+-- 일정 참여자 할당이다. 이 마이그레이션은 기존 기능에 추가만 하며 기존
+-- events.member/creator 계약을 유지하면서 할당을 보호하고 조회하고 원자적으로
+-- 교체할 수 있는 일반 관계로 만든다.
 
 begin;
 
@@ -14,26 +14,23 @@ create table if not exists public.event_members (
 );
 
 comment on table public.event_members is
-  'Current participant assignments.  Rows for archived/soft-deleted events may remain for cascade/history, but are hidden by RLS.';
+  '현재 참여자 할당이다. 보관/소프트 삭제된 일정의 행은 연쇄 작업/이력을 위해 남을 수 있지만 RLS가 숨긴다.';
 comment on column public.event_members.created_at is
-  'Assignment creation time; creator backfills use the event creation time.';
+  '할당 생성 시각이다. 작성자 기존 데이터 채우기에는 일정 생성 시각을 사용한다.';
 
--- The primary key is event-leading for list reads.  This second index keeps
--- account deletion, user-scoped cleanup, and policy joins from scanning the
--- entire child table.
+-- 목록 조회를 위해 기본 키는 일정을 선두에 둔다. 두 번째 인덱스는 계정 삭제,
+-- 사용자 범위 정리 및 정책 조인이 전체 하위 테이블을 스캔하지 않게 한다.
 create index if not exists event_members_user_event_idx
   on public.event_members (user_id, event_id);
 
--- Backfill before adding integrity/transition triggers. Historical events are
--- intentionally included even when their group/event is terminal or the
--- creator is now inactive; RLS hides such rows and future deactivation prunes
--- current assignments. A normal migration reapply must not restore a creator
--- assignment that lifecycle cleanup deliberately removed, so the backfill is
--- guarded by an installation-complete sentinel checked before any trigger is
--- dropped/recreated. The sentinel is the feature's existing events AFTER
--- INSERT trigger plus the child table object—not a spoofable row/data
--- predicate. A first run or recoverable partial install (table without that
--- trigger) still performs the historical backfill.
+-- 무결성/전환 트리거를 추가하기 전에 기존 데이터를 채운다. 그룹/일정이 종료
+-- 상태이거나 작성자가 현재 비활성이어도 과거 일정은 의도적으로 포함한다. RLS가
+-- 해당 행을 숨기고 이후 비활성화가 현재 할당을 정리한다. 일반적인 마이그레이션
+-- 재적용에서 수명 주기 정리가 의도적으로 제거한 작성자 할당을 복원해서는 안 된다.
+-- 따라서 트리거를 삭제/재생성하기 전에 설치 완료 표식을 확인해 기존 데이터
+-- 채우기를 보호한다. 표식은 조작 가능한 행/데이터 조건자가 아니라 이 기능의 기존
+-- events AFTER INSERT 트리거와 하위 테이블 객체다. 최초 실행이나 복구 가능한 부분
+-- 설치(해당 트리거 없는 테이블)에서는 과거 데이터 채우기를 계속 수행한다.
 do $$
 declare
   v_feature_installed boolean;
@@ -112,8 +109,8 @@ using (
   )
 );
 
--- RLS is defense in depth; ACLs below also ensure no client can bypass the
--- replacement RPC with direct child INSERT/UPDATE/DELETE statements.
+-- RLS는 심층 방어 역할을 한다. 아래 ACL도 클라이언트가 직접 하위 INSERT/UPDATE/
+-- DELETE 문으로 교체 RPC를 우회하지 못하게 한다.
 create policy event_members_write_deny
 on public.event_members
 for all to authenticated
@@ -123,15 +120,14 @@ with check (false);
 revoke all on table public.event_members from public, anon, authenticated;
 grant select on table public.event_members to authenticated;
 
--- The child table is deliberately not added to supabase_realtime.  Realtime
--- DELETE payload authorization cannot verify access to the deleted row, so a
--- child publication could disclose event/user UUIDs.  Child transition
--- triggers instead bump the parent event row, which is already published and
--- whose RLS policy is established.
+-- 하위 테이블은 의도적으로 supabase_realtime에 추가하지 않는다. Realtime DELETE
+-- 페이로드 권한 검사로는 삭제된 행에 대한 접근을 확인할 수 없어 하위 publication이
+-- 일정/사용자 UUID를 노출할 수 있다. 대신 하위 전환 트리거가 이미 게시되었고 RLS
+-- 정책이 설정된 상위 일정 행의 버전을 올린다.
 
--- Trigger-only helper: INSERT transition rows can come from the RPCs, setup,
--- or an auth-user cascade.  Internal mutators set the transaction-local marker
--- while changing children and explicitly bump events once afterward.
+-- 트리거 전용 도우미다. INSERT 전환 행은 RPC, 설정 또는 인증 사용자 연쇄 작업에서
+-- 올 수 있다. 내부 변경자는 하위 행을 바꾸는 동안 트랜잭션 로컬 표시를 설정하고
+-- 이후 명시적으로 events 버전을 한 번 올린다.
 create or replace function public.bump_events_from_event_members_insert()
 returns trigger
 language plpgsql
@@ -143,8 +139,8 @@ begin
     return null;
   end if;
 
-  -- Lock all affected parent groups first, in deterministic order.  This
-  -- matches every group-scoped RPC and avoids event->group deadlocks.
+  -- 영향을 받는 모든 상위 그룹을 결정적인 순서로 먼저 잠근다. 모든 그룹 범위
+  -- RPC와 순서를 맞추고 일정->그룹 교착 상태를 피한다.
   perform 1
   from public.groups g
   join public.events e on e.group_id = g.id
@@ -208,9 +204,9 @@ begin
 end;
 $$;
 
--- Assignment writes are RPC-only, but this trigger also protects privileged
--- setup paths from cross-group/inactive rows.  It is installed after the
--- historical backfill so legacy inactive creator rows remain preserved.
+-- 할당 쓰기는 RPC 전용이지만, 이 트리거는 권한 있는 설정 경로도 교차 그룹/비활성
+-- 행으로부터 보호한다. 과거 데이터 채우기 뒤에 설치하여 이전의 비활성 작성자 행을
+-- 계속 보존한다.
 create or replace function public.enforce_event_member_integrity()
 returns trigger
 language plpgsql
@@ -239,7 +235,7 @@ begin
       message = 'event was changed, deleted, or unavailable';
   end if;
 
-  -- Parent group is always locked before checking membership state.
+  -- 멤버십 상태를 확인하기 전에 항상 상위 그룹을 잠근다.
   select g.*
     into v_group
   from public.groups g
@@ -283,12 +279,11 @@ after delete on public.event_members
 referencing old table as old_rows
 for each statement execute function public.bump_events_from_event_members_delete();
 
--- Legacy/Data API event INSERTs still need a creator assignment.  The trigger
--- runs after the existing event integrity/audit triggers and uses the same
--- transaction-local marker as the participant-aware RPCs: direct inserts seed
--- one row without changing the event's initial version, while create_event_
--- with_members sets the marker before its event INSERT and writes the caller's
--- canonical list explicitly (including an intentional empty list).
+-- 이전/Data API 일정 INSERT에도 작성자 할당이 필요하다. 트리거는 기존 일정 무결성/
+-- 감사 트리거 뒤에 실행되며 참여자를 인식하는 RPC와 같은 트랜잭션 로컬 표시를
+-- 사용한다. 직접 삽입은 일정의 초기 버전을 바꾸지 않고 행 하나를 채우며,
+-- create_event_with_members는 일정 INSERT 전에 표시를 설정하고 의도적인 빈 목록을
+-- 포함한 호출자의 정규 목록을 명시적으로 쓴다.
 create or replace function public.seed_event_creator_member()
 returns trigger
 language plpgsql
@@ -314,8 +309,8 @@ create trigger events_seed_creator_member
 after insert on public.events
 for each row execute function public.seed_event_creator_member();
 
--- Shared response contract for all participant-aware event RPCs.  It mirrors
--- the events row and adds a canonical, sorted UUID array for the client.
+-- 모든 참여자 인식 일정 RPC가 공유하는 응답 계약이다. events 행과 같은 형태에
+-- 클라이언트용으로 정규화해 정렬한 UUID 배열을 추가한다.
 
 create or replace function public.create_event_with_members(
   p_group_id uuid,
@@ -372,8 +367,8 @@ begin
     raise exception using errcode = '22023', message = 'member_ids cannot contain null';
   end if;
 
-  -- Group-first lock order is shared by event writes and membership lifecycle
-  -- RPCs.  The creator must be an active member of a live group.
+  -- 그룹 우선 잠금 순서는 일정 쓰기와 멤버십 수명 주기 RPC가 공유한다. 작성자는
+  -- 운영 중인 그룹의 활성 멤버여야 한다.
   select g.* into v_group
   from public.groups g
   where g.id = p_group_id
@@ -391,8 +386,8 @@ begin
     raise exception using errcode = '42501', message = 'only an active group member can create events';
   end if;
 
-  -- A NULL list defaults to the creator.  An explicit empty array is a real
-  -- empty assignment set; replacement/update RPCs also accept it to clear.
+  -- NULL 목록은 기본적으로 작성자를 사용한다. 명시적인 빈 배열은 실제 빈 할당
+  -- 집합이며 교체/갱신 RPC도 목록을 비우기 위해 이를 허용한다.
   if p_member_ids is null then
     v_target_ids := array[v_actor_id]::uuid[];
   else
@@ -421,9 +416,8 @@ begin
     raise exception using errcode = '42501', message = 'all event members must be active members of the group';
   end if;
 
-  -- Suppress the legacy INSERT trigger while this combined RPC writes its
-  -- exact caller-supplied list.  The marker is transaction-local and rollback
-  -- clears it if either the event or child insert fails.
+  -- 이 결합 RPC가 호출자가 제공한 정확한 목록을 쓰는 동안 이전 INSERT 트리거를
+  -- 억제한다. 표시는 트랜잭션 로컬이며 일정 또는 하위 삽입이 실패하면 롤백이 지운다.
   perform pg_catalog.set_config('moduly.event_members_mutation_context', 'internal', true);
   insert into public.events (
     group_id, created_by, title, description, starts_at, ends_at, timezone,
@@ -434,9 +428,9 @@ begin
     p_all_day_start, p_all_day_end, coalesce(p_color_value, 4282874742), 1
   ) returning * into v_event;
 
-  -- Child triggers are still active for validation, but this internal marker
-  -- keeps creation's initial event version at 1.  The event INSERT itself is
-  -- the realtime signal; the response carries the canonical member list.
+  -- 하위 트리거는 검증을 위해 계속 활성 상태지만, 이 내부 표시가 생성 시 일정
+  -- 초기 버전을 1로 유지한다. 일정 INSERT 자체가 Realtime 신호이며 응답에는
+  -- 정규 멤버 목록을 담는다.
   insert into public.event_members (event_id, user_id)
   select v_event.id, supplied.user_id
   from unnest(v_target_ids) as supplied(user_id)
@@ -532,7 +526,7 @@ begin
     raise exception using errcode = '40001', message = 'event was changed, deleted, or is unavailable';
   end if;
 
-  -- Lock the event after its parent group; body edits remain creator-only.
+  -- 상위 그룹 다음에 일정을 잠근다. 본문 편집은 계속 작성자 전용이다.
   select e.* into v_event
   from public.events e
   where e.id = p_event_id
@@ -577,8 +571,8 @@ begin
     raise exception using errcode = '42501', message = 'all event members must be active members of the group';
   end if;
 
-  -- Capture the current list under the event lock so a failed validation or
-  -- stale event version can never partially replace it.
+  -- 일정 잠금 아래에서 현재 목록을 캡처하여 검증 실패나 오래된 일정 버전이
+  -- 목록을 부분적으로 교체하지 못하게 한다.
   perform 1
   from public.event_members em
   where em.event_id = p_event_id
@@ -589,9 +583,8 @@ begin
   from public.event_members em
   where em.event_id = p_event_id;
 
-  -- The body update is the one logical version transition for this combined
-  -- save.  Child transition triggers are suppressed only for the following
-  -- internal DML and still enforce active-target integrity.
+  -- 본문 갱신이 이 결합 저장의 논리적 버전 전환 한 번이다. 하위 전환 트리거는
+  -- 다음 내부 DML에 대해서만 억제하며 활성 대상 무결성은 계속 강제한다.
   update public.events e
   set title = p_title,
       description = coalesce(p_description, ''),
@@ -715,9 +708,9 @@ begin
     raise exception using errcode = '40001', message = 'event was changed, deleted, or is unavailable';
   end if;
 
-  -- Participant-list authority is intentionally broader than event-body
-  -- authority: creator OR current group owner.  Both still need a live active
-  -- membership; groups.owner_id is backed by an invariant owner row.
+  -- 참여자 목록 권한은 의도적으로 일정 본문 권한보다 넓다. 작성자 또는 현재 그룹
+  -- 소유자가 사용할 수 있다. 둘 다 운영 중인 활성 멤버십이 필요하며,
+  -- groups.owner_id는 불변 소유자 행이 뒷받침한다.
   if v_event.created_by <> v_actor_id and v_group.owner_id <> v_actor_id then
     raise exception using errcode = '42501', message = 'only the event creator or group owner can replace members';
   end if;
@@ -774,8 +767,8 @@ begin
     on conflict (event_id, user_id) do nothing;
     perform pg_catalog.set_config('moduly.event_members_mutation_context', '', true);
 
-    -- List-only replacement is itself an event mutation.  The child triggers
-    -- were suppressed above, so this is exactly one version/update transition.
+    -- 목록만 교체하는 작업도 일정 변경이다. 위에서 하위 트리거를 억제했으므로
+    -- 여기서 정확히 한 번 버전/갱신 전환을 수행한다.
     update public.events e
     set version = e.version + 1
     where e.id = p_event_id
@@ -803,10 +796,10 @@ begin
 end;
 $$;
 
--- Prune current assignments when an ordinary membership becomes inactive or
--- leaves.  Both functions already lock the group first; the transaction-local
--- marker suppresses child transition bumps while the CTE updates each affected
--- event exactly once.  Reactivation never restores removed assignments.
+-- 일반 멤버십이 비활성화되거나 탈퇴하면 현재 할당을 정리한다. 두 함수 모두 이미
+-- 그룹을 먼저 잠근다. CTE가 영향을 받은 각 일정을 정확히 한 번 갱신하는 동안
+-- 트랜잭션 로컬 표시가 하위 전환에 따른 버전 증가를 억제한다. 재활성화해도 제거된
+-- 할당은 복원하지 않는다.
 create or replace function public.leave_group(p_group_id uuid)
 returns void
 language plpgsql
@@ -961,9 +954,9 @@ begin
 end;
 $$;
 
--- Keep direct child writes unavailable and make every new SECURITY DEFINER
--- callable only by authenticated clients.  Trigger-only functions stay
--- non-callable even though they live in public for PostgreSQL trigger lookup.
+-- 직접 하위 쓰기를 계속 허용하지 않으며 모든 새 SECURITY DEFINER는 인증된
+-- 클라이언트만 호출할 수 있게 한다. 트리거 전용 함수는 PostgreSQL 트리거 조회를
+-- 위해 public에 있어도 계속 직접 호출할 수 없다.
 revoke execute on function public.bump_events_from_event_members_insert()
   from public, anon, authenticated;
 revoke execute on function public.bump_events_from_event_members_delete()

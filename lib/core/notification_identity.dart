@@ -4,9 +4,8 @@ import 'package:crypto/crypto.dart';
 
 import '../models/notification_models.dart';
 
-/// A notification identity is independent of presentation text.  Changing a
-/// title/note therefore does not leave a second notification behind, while a
-/// changed offset/channel gets a new key and the old key can be cancelled.
+/// 알림 식별자는 표시 텍스트와 무관하다. 따라서 제목/메모를 바꿔도 알림이 하나 더
+/// 남지 않으며, 간격/채널이 바뀌면 새 키를 받고 이전 키는 취소할 수 있다.
 class ReminderIdentity {
   const ReminderIdentity({
     required this.userId,
@@ -24,8 +23,8 @@ class ReminderIdentity {
   final NotificationOffsetUnit offsetUnit;
   final NotificationChannel channel;
 
-  /// Length-framed fields avoid ambiguous concatenations (`ab|c` vs `a|bc`)
-  /// and keep this digest free of user-visible content.
+  /// 길이 정보를 붙인 필드는 모호한 연결(`ab|c`와 `a|bc`)을 피하고 이 다이제스트에
+  /// 사용자 표시 내용이 포함되지 않게 한다.
   String get framedKey => <String>[
     'v1',
     _frame(userId),
@@ -65,10 +64,9 @@ class NotificationIdEntry {
   final String key;
 }
 
-/// Persistence is intentionally abstract.  A platform may back this with a
-/// small durable key-value store, while tests/local demo use memory.  The
-/// allocator always scopes rows by user and never stores title/note/token
-/// material.
+/// 영속성은 의도적으로 추상화한다. 플랫폼은 작은 영구 키-값 저장소를 사용할 수 있고
+/// 테스트/로컬 데모는 메모리를 사용한다. 할당기는 항상 사용자를 기준으로 행 범위를
+/// 제한하며 제목/메모/토큰 자료는 저장하지 않는다.
 abstract interface class NotificationIdRegistry {
   Future<Map<int, String>> load(String userId);
   Future<void> save(String userId, Map<int, String> entries);
@@ -87,9 +85,9 @@ class InMemoryNotificationIdRegistry implements NotificationIdRegistry {
   }
 }
 
-/// Stable positive 31-bit platform IDs with persisted collision resolution.
-/// The linear probe is deterministic for a given registry snapshot and keeps
-/// a hard cap so a corrupt/hostile registry cannot create an unbounded loop.
+/// 충돌 해결 결과를 저장하는 안정적인 양의 31비트 플랫폼 ID다. 선형 탐색은 주어진
+/// 레지스트리 스냅샷에서 결정론적으로 동작하며, 손상되거나 악의적인 레지스트리가
+/// 무한 루프를 만들지 못하도록 엄격한 상한을 둔다.
 class NotificationIdAllocator {
   NotificationIdAllocator({
     NotificationIdRegistry? registry,
@@ -126,8 +124,8 @@ class NotificationIdAllocator {
           final owner = nextEntries[id];
           if (owner == null || owner == key) {
             nextEntries[id] = key;
-            // Publish ownership only after durable storage accepts the complete
-            // copy. A failed write leaves both cache and registry unchanged.
+            // 영구 저장소가 전체 복사본을 받아들인 뒤에만 소유권을 공개한다.
+            // 쓰기가 실패하면 캐시와 레지스트리를 모두 변경하지 않는다.
             await registry.save(normalizedUserId, nextEntries);
             _loaded[normalizedUserId] = nextEntries;
             return id;
@@ -166,13 +164,12 @@ class NotificationIdAllocator {
         _loaded.remove(normalizedUserId);
       });
 
-  /// Retains only allocator entries whose numeric IDs are in [ids].
+  /// 숫자 ID가 [ids]에 있는 할당기 항목만 유지한다.
   ///
-  /// The operation is transactional from the allocator's point of view: the
-  /// in-memory snapshot is replaced only after the registry accepts the new
-  /// map. Callers should invoke this only after an authoritative reconcile
-  /// has successfully cancelled every stale platform request. Unknown IDs
-  /// are not created, so native pending requests do not pollute ownership.
+  /// 할당기 관점에서 이 작업은 트랜잭션 방식이다. 레지스트리가 새 맵을 받아들인
+  /// 뒤에만 메모리 스냅샷을 교체한다. 호출자는 신뢰할 수 있는 조정이 오래된
+  /// 플랫폼 요청을 모두 성공적으로 취소한 뒤에만 이를 호출해야 한다. 알 수 없는
+  /// ID는 만들지 않으므로 네이티브 대기 요청이 소유권 정보를 오염시키지 않는다.
   Future<void> retainIds(String userId, Iterable<int> ids) =>
       _serializedForUser(userId, (normalizedUserId) async {
         final keep = ids.toSet();
@@ -204,9 +201,9 @@ class NotificationIdAllocator {
       (_) => operation(normalized),
       onError: (Object _, StackTrace _) => operation(normalized),
     );
-    // Keep queue tails resolved so one failed persistence operation does not
-    // poison later retries. Per-user queues also serialize direct callers
-    // that race on the same collision bucket.
+    // 영속화 작업 하나가 실패해도 이후 재시도를 망치지 않도록 대기열 끝은 완료된
+    // 상태로 유지한다. 사용자별 대기열은 같은 충돌 버킷에서 경합하는 직접
+    // 호출자도 순차 처리한다.
     _userQueues[normalized] = next.then<void>(
       (_) {},
       onError: (Object _, StackTrace _) {},

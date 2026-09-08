@@ -1,6 +1,5 @@
-// The app already relies on http through supabase_flutter; this test injects
-// a deterministic transport without promoting that transitive package to a
-// runtime dependency.
+// 앱은 이미 supabase_flutter를 통해 http에 의존한다. 이 테스트는 해당 전이
+// 패키지를 런타임 의존성으로 승격하지 않고 결정적인 전송 계층을 주입한다.
 // ignore_for_file: depend_on_referenced_packages, use_null_aware_elements
 
 import 'dart:async';
@@ -98,8 +97,8 @@ Map<String, dynamic> _rpcGroupRow({
 };
 
 void main() {
-  group('group model and timezone validation', () {
-    test('PlannerGroup copyWith retains lifecycle fields and equality', () {
+  group('그룹 모델 및 시간대 검증', () {
+    test('PlannerGroup copyWith가 수명 주기 필드와 동등성을 유지한다', () {
       final archivedAt = DateTime.utc(2026, 9, 7, 1);
       final group = PlannerGroup(
         id: 'g',
@@ -118,7 +117,7 @@ void main() {
       expect(copy.isArchived, isTrue);
     });
 
-    test('accepts exact IANA names and rejects whitespace/unknown names', () {
+    test('정확한 IANA 이름을 허용하고 공백이나 알 수 없는 이름을 거부한다', () {
       expect(isValidIanaTimezone('America/Los_Angeles'), isTrue);
       expect(isValidIanaTimezone('UTC'), isTrue);
       expect(isValidIanaTimezone(' America/Los_Angeles'), isFalse);
@@ -130,33 +129,30 @@ void main() {
     });
   });
 
-  group('LocalScheduleRepository group lifecycle', () {
-    test(
-      'creates selected timezone and filters by active membership',
-      () async {
-        final repository = LocalScheduleRepository();
-        final group = await repository.createGroup(
+  group('LocalScheduleRepository 그룹 수명 주기', () {
+    test('선택한 시간대를 만들고 활성 멤버십을 기준으로 필터링한다', () async {
+      final repository = LocalScheduleRepository();
+      final group = await repository.createGroup(
+        _owner.id,
+        'New',
+        '',
+        timezone: 'America/Los_Angeles',
+      );
+      expect(group.timezone, 'America/Los_Angeles');
+      expect((await repository.groupsForUser(_owner.id)), contains(group));
+      expect((await repository.groupsForUser('not-a-member')), isEmpty);
+      await expectLater(
+        repository.createGroup(
           _owner.id,
-          'New',
+          'Bad',
           '',
-          timezone: 'America/Los_Angeles',
-        );
-        expect(group.timezone, 'America/Los_Angeles');
-        expect((await repository.groupsForUser(_owner.id)), contains(group));
-        expect((await repository.groupsForUser('not-a-member')), isEmpty);
-        await expectLater(
-          repository.createGroup(
-            _owner.id,
-            'Bad',
-            '',
-            timezone: 'Not/A_Timezone',
-          ),
-          throwsA(isA<FormatException>()),
-        );
-      },
-    );
+          timezone: 'Not/A_Timezone',
+        ),
+        throwsA(isA<FormatException>()),
+      );
+    });
 
-    test('edits only the owner and rejects stale versions', () async {
+    test('소유자만 수정하고 오래된 버전을 거부한다', () async {
       final repository = LocalScheduleRepository();
       final group = await repository.createGroup(_owner.id, 'Before', '');
       final updated = await repository.updateGroupIfVersion(
@@ -193,7 +189,7 @@ void main() {
       );
     });
 
-    test('ordinary members can leave but owners cannot', () async {
+    test('일반 멤버는 탈퇴할 수 있지만 소유자는 탈퇴할 수 없다', () async {
       final repository = LocalScheduleRepository();
       final group = await repository.createGroup(_owner.id, 'Group', '');
       final invite = await repository.createInviteCodeWithOptions(group.id);
@@ -213,7 +209,7 @@ void main() {
       );
     });
 
-    test('transfers atomically to one active owner', () async {
+    test('한 명의 활성 소유자에게 원자적으로 이전한다', () async {
       final repository = LocalScheduleRepository();
       final group = await repository.createGroup(_owner.id, 'Group', '');
       final invite = await repository.createInviteCodeWithOptions(group.id);
@@ -248,7 +244,7 @@ void main() {
       );
     });
 
-    test('archive is terminal and filters groups/events/invites', () async {
+    test('보관이 종료 상태이며 그룹, 일정, 초대를 걸러낸다', () async {
       final repository = LocalScheduleRepository();
       final group = await repository.createGroup(_owner.id, 'Group', '');
       await repository.createInviteCodeWithOptions(group.id);
@@ -288,7 +284,7 @@ void main() {
     });
   });
 
-  test('Supabase group RPC payloads never include actor spoof fields', () {
+  test('Supabase 그룹 RPC 페이로드에 사용자 위조 필드가 포함되지 않는다', () {
     final source = File(
       'lib/repositories/schedule_repository.dart',
     ).readAsStringSync();
@@ -299,35 +295,32 @@ void main() {
     expect(source, isNot(contains("'p_actor_id'")));
   });
 
-  group('Supabase optimistic group RPC response validation', () {
-    test(
-      'update accepts one complete active row and never refetches',
-      () async {
-        final transport = _RpcResponseClient(_rpcGroupRow());
-        final client = _rpcClient(transport);
-        final repository = SupabaseScheduleRepository(client);
-        addTearDown(client.dispose);
+  group('Supabase 낙관적 그룹 RPC 응답 검증', () {
+    test('갱신이 완전한 활성 행 하나를 허용하고 다시 조회하지 않는다', () async {
+      final transport = _RpcResponseClient(_rpcGroupRow());
+      final client = _rpcClient(transport);
+      final repository = SupabaseScheduleRepository(client);
+      addTearDown(client.dispose);
 
-        final updated = await repository.updateGroupIfVersion(
-          actorId: _owner.id,
-          groupId: 'group-1',
-          name: 'Group',
-          description: 'Description',
-          timezone: 'UTC',
-          expectedVersion: 1,
-        );
-        expect(updated.id, 'group-1');
-        expect(updated.version, 2);
-        expect(
-          transport.requests.where(
-            (request) => request.url.path.contains('/groups'),
-          ),
-          isEmpty,
-        );
-      },
-    );
+      final updated = await repository.updateGroupIfVersion(
+        actorId: _owner.id,
+        groupId: 'group-1',
+        name: 'Group',
+        description: 'Description',
+        timezone: 'UTC',
+        expectedVersion: 1,
+      );
+      expect(updated.id, 'group-1');
+      expect(updated.version, 2);
+      expect(
+        transport.requests.where(
+          (request) => request.url.path.contains('/groups'),
+        ),
+        isEmpty,
+      );
+    });
 
-    test('update requires the current owner in the returned row', () async {
+    test('갱신 응답 행에 현재 소유자가 있어야 한다', () async {
       final transport = _RpcResponseClient(
         _rpcGroupRow(ownerId: 'different-owner'),
       );
@@ -369,7 +362,7 @@ void main() {
       );
     });
 
-    test('transfer requires the target owner in the returned row', () async {
+    test('이전 응답 행에 대상 소유자가 있어야 한다', () async {
       final transport = _RpcResponseClient(
         _rpcGroupRow(ownerId: 'other-owner'),
       );
@@ -394,71 +387,63 @@ void main() {
       );
     });
 
-    test(
-      'transfer accepts a complete active row for the requested owner',
-      () async {
-        final transport = _RpcResponseClient(
-          _rpcGroupRow(ownerId: 'new-owner'),
-        );
-        final client = _rpcClient(transport);
-        final repository = SupabaseScheduleRepository(client);
-        addTearDown(client.dispose);
+    test('이전이 요청한 소유자의 완전한 활성 행을 허용한다', () async {
+      final transport = _RpcResponseClient(_rpcGroupRow(ownerId: 'new-owner'));
+      final client = _rpcClient(transport);
+      final repository = SupabaseScheduleRepository(client);
+      addTearDown(client.dispose);
 
-        final transferred = await repository.transferGroupOwnership(
-          actorId: _owner.id,
-          groupId: 'group-1',
-          newOwnerId: 'new-owner',
-          expectedVersion: 1,
-        );
-        expect(transferred.ownerId, 'new-owner');
-        expect(transferred.version, 2);
-      },
-    );
+      final transferred = await repository.transferGroupOwnership(
+        actorId: _owner.id,
+        groupId: 'group-1',
+        newOwnerId: 'new-owner',
+        expectedVersion: 1,
+      );
+      expect(transferred.ownerId, 'new-owner');
+      expect(transferred.version, 2);
+    });
 
-    test(
-      'empty, multi-row, partial, stale, or archived responses conflict',
-      () async {
-        final transport = _RpcResponseClient(<String, dynamic>{});
-        final client = _rpcClient(transport);
-        final repository = SupabaseScheduleRepository(client);
-        addTearDown(client.dispose);
+    test('빈 행, 여러 행, 불완전함, 오래됨, 보관됨 응답은 충돌 처리된다', () async {
+      final transport = _RpcResponseClient(<String, dynamic>{});
+      final client = _rpcClient(transport);
+      final repository = SupabaseScheduleRepository(client);
+      addTearDown(client.dispose);
 
-        final malformed = <Object?>[
-          null,
-          const <Object?>[],
-          <Object?>[_rpcGroupRow(), _rpcGroupRow()],
-          <String, dynamic>{..._rpcGroupRow(), 'description': null},
-          _rpcGroupRow(id: 'other-group'),
-          _rpcGroupRow(version: 1),
-          _rpcGroupRow()..['version'] = 2.5,
-          _rpcGroupRow(deletedAt: '2026-09-07T00:00:00Z'),
-          _rpcGroupRow(archivedAt: '2026-09-07T00:00:00Z'),
-        ];
-        for (final payload in malformed) {
-          transport.payload = payload;
-          await expectLater(
-            repository.updateGroupIfVersion(
-              actorId: _owner.id,
-              groupId: 'group-1',
-              name: 'Group',
-              description: 'Description',
-              timezone: 'UTC',
-              expectedVersion: 1,
-            ),
-            throwsA(isA<ScheduleConflictException>()),
-          );
-        }
-        expect(
-          transport.requests.where(
-            (request) => request.url.path.contains('/groups'),
+      final malformed = <Object?>[
+        null,
+        const <Object?>[],
+        <Object?>[_rpcGroupRow(), _rpcGroupRow()],
+        <String, dynamic>{..._rpcGroupRow(), 'description': null},
+        _rpcGroupRow(id: 'other-group'),
+        _rpcGroupRow(version: 1),
+        _rpcGroupRow()..['version'] = 2.5,
+        _rpcGroupRow(deletedAt: '2026-09-07T00:00:00Z'),
+        _rpcGroupRow(archivedAt: '2026-09-07T00:00:00Z'),
+      ];
+      for (final payload in malformed) {
+        transport.payload = payload;
+        await expectLater(
+          repository.updateGroupIfVersion(
+            actorId: _owner.id,
+            groupId: 'group-1',
+            name: 'Group',
+            description: 'Description',
+            timezone: 'UTC',
+            expectedVersion: 1,
           ),
-          isEmpty,
+          throwsA(isA<ScheduleConflictException>()),
         );
-      },
-    );
+      }
+      expect(
+        transport.requests.where(
+          (request) => request.url.path.contains('/groups'),
+        ),
+        isEmpty,
+      );
+    });
   });
 
-  test('lifecycle read rejects a cross-group row', () async {
+  test('수명 주기 읽기가 다른 그룹의 행을 거부한다', () async {
     final transport = _LifecycleReadClient();
     final client = _rpcClient(transport);
     final repository = SupabaseScheduleRepository(
@@ -473,9 +458,8 @@ void main() {
         .listen(values.add, onError: (Object error) => errors.add(error));
     addTearDown(subscription.cancel);
 
-    // The realtime stream also performs initial projection reads, so wait for
-    // the authoritative check to finish rather than assuming a fixed request
-    // order in the injected transport.
+    // Realtime 스트림도 초기 투영 읽기를 수행하므로 주입된 전송 계층의 고정된
+    // 요청 순서를 가정하지 말고 권위 있는 검사가 끝날 때까지 기다린다.
     for (
       var attempt = 0;
       attempt < 20 && errors.whereType<StateError>().isEmpty;
@@ -488,154 +472,145 @@ void main() {
     expect(values, isEmpty);
   });
 
-  test(
-    'controller rejects duplicate edit and discards stale completion',
-    () async {
-      final auth = _StaticAuth(_owner);
-      final repository = _ControllerRepository();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await Future<void>.delayed(Duration.zero);
-      controller.user = _owner;
-      controller.groups = <PlannerGroup>[repository.group];
-      controller.selectedGroup = repository.group;
-      controller.members = <PlannerMember>[
-        PlannerMember(
-          id: _owner.id,
-          name: 'Owner',
-          email: _owner.email,
-          isOwner: true,
-        ),
-      ];
+  test('컨트롤러가 중복 편집을 거부하고 오래된 완료를 버린다', () async {
+    final auth = _StaticAuth(_owner);
+    final repository = _ControllerRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await Future<void>.delayed(Duration.zero);
+    controller.user = _owner;
+    controller.groups = <PlannerGroup>[repository.group];
+    controller.selectedGroup = repository.group;
+    controller.members = <PlannerMember>[
+      PlannerMember(
+        id: _owner.id,
+        name: 'Owner',
+        email: _owner.email,
+        isOwner: true,
+      ),
+    ];
 
-      final pending = Completer<PlannerGroup>();
-      repository.updateLoad = pending;
-      final first = controller.updateGroup(
-        name: 'Edited',
+    final pending = Completer<PlannerGroup>();
+    repository.updateLoad = pending;
+    final first = controller.updateGroup(
+      name: 'Edited',
+      description: '',
+      timezone: 'UTC',
+    );
+    await Future<void>.delayed(Duration.zero);
+    await expectLater(
+      controller.updateGroup(
+        name: 'Duplicate',
         description: '',
         timezone: 'UTC',
-      );
-      await Future<void>.delayed(Duration.zero);
-      await expectLater(
-        controller.updateGroup(
-          name: 'Duplicate',
-          description: '',
-          timezone: 'UTC',
-        ),
-        throwsA(isA<ScheduleConflictException>()),
-      );
-      await controller.signOut();
-      pending.complete(repository.group.copyWith(name: 'Stale', version: 2));
-      await first;
-      expect(controller.user, isNull);
-      expect(controller.selectedGroup, isNull);
-      expect(controller.groups, isEmpty);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+      ),
+      throwsA(isA<ScheduleConflictException>()),
+    );
+    await controller.signOut();
+    pending.complete(repository.group.copyWith(name: 'Stale', version: 2));
+    await first;
+    expect(controller.user, isNull);
+    expect(controller.selectedGroup, isNull);
+    expect(controller.groups, isEmpty);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test(
-    'conflict reload does not overwrite a newer same-context operation error',
-    () async {
-      final auth = _NullAuth();
-      final repository = _ConflictReloadRepository();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      controller.user = _owner;
-      controller.groups = <PlannerGroup>[repository.group];
-      controller.selectedGroup = repository.group;
-      controller.members = <PlannerMember>[
-        PlannerMember(
-          id: _owner.id,
-          name: 'Owner',
-          email: _owner.email,
-          isOwner: true,
-        ),
-      ];
+  test('충돌 다시 불러오기가 같은 컨텍스트의 최신 작업 오류를 덮어쓰지 않는다', () async {
+    final auth = _NullAuth();
+    final repository = _ConflictReloadRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    controller.user = _owner;
+    controller.groups = <PlannerGroup>[repository.group];
+    controller.selectedGroup = repository.group;
+    controller.members = <PlannerMember>[
+      PlannerMember(
+        id: _owner.id,
+        name: 'Owner',
+        email: _owner.email,
+        isOwner: true,
+      ),
+    ];
 
-      final first = controller.updateGroup(
-        name: 'Edited',
-        description: '',
-        timezone: 'UTC',
-        expectedVersion: repository.group.version,
-      );
-      // Let the conflict handler enter its gated groups refresh.
-      await Future<void>.delayed(Duration.zero);
-      expect(repository.groupReads, 1);
+    final first = controller.updateGroup(
+      name: 'Edited',
+      description: '',
+      timezone: 'UTC',
+      expectedVersion: repository.group.version,
+    );
+    // 충돌 처리기가 제어된 그룹 새로 고침에 진입하게 한다.
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.groupReads, 1);
 
-      await expectLater(
-        controller.updateDisplayName('New display name'),
-        throwsA(isA<AuthException>()),
-      );
-      expect(controller.errorMessage, '이름을 변경할 계정이 없습니다.');
+    await expectLater(
+      controller.updateDisplayName('New display name'),
+      throwsA(isA<AuthException>()),
+    );
+    expect(controller.errorMessage, '이름을 변경할 계정이 없습니다.');
 
-      repository.releaseReload.complete();
-      await expectLater(first, throwsA(isA<ScheduleConflictException>()));
-      // The newer operation's diagnostic remains visible after the older
-      // conflict reload continuation settles.
-      expect(controller.errorMessage, '이름을 변경할 계정이 없습니다.');
-    },
-  );
+    repository.releaseReload.complete();
+    await expectLater(first, throwsA(isA<ScheduleConflictException>()));
+    // 이전 충돌 다시 불러오기 후속 작업이 끝난 뒤에도 새 작업의 진단 메시지가
+    // 계속 표시된다.
+    expect(controller.errorMessage, '이름을 변경할 계정이 없습니다.');
+  });
 
-  test(
-    'invite completion replaces a lifecycle-refreshed row instead of duplicating it',
-    () async {
-      final auth = _NullAuth();
-      final repository = _InviteRaceRepository();
-      final controller = PlannerController(auth: auth, repository: repository);
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      controller.user = _owner;
-      controller.groups = <PlannerGroup>[repository.group];
-      controller.selectedGroup = repository.group;
-      controller.members = <PlannerMember>[
-        const PlannerMember(
-          id: 'owner',
-          name: 'Owner',
-          email: 'owner@example.com',
-          isOwner: true,
-        ),
-      ];
+  test('초대 완료가 수명 주기로 새로 고친 행을 중복하지 않고 교체한다', () async {
+    final auth = _NullAuth();
+    final repository = _InviteRaceRepository();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    controller.user = _owner;
+    controller.groups = <PlannerGroup>[repository.group];
+    controller.selectedGroup = repository.group;
+    controller.members = <PlannerMember>[
+      const PlannerMember(
+        id: 'owner',
+        name: 'Owner',
+        email: 'owner@example.com',
+        isOwner: true,
+      ),
+    ];
 
-      // This is the row a concurrent lifecycle metadata refresh has already
-      // inserted while the create RPC is still in flight.
-      controller.invites = <InviteCode>[repository.lifecycleInvite];
-      final creation = controller.createInviteCode();
-      await Future<void>.delayed(Duration.zero);
-      repository.release.complete(repository.mutationInvite);
+    // 생성 RPC가 아직 진행 중인 동안 동시에 실행된 수명 주기 메타데이터
+    // 새로 고침이 이미 삽입한 행이다.
+    controller.invites = <InviteCode>[repository.lifecycleInvite];
+    final creation = controller.createInviteCode();
+    await Future<void>.delayed(Duration.zero);
+    repository.release.complete(repository.mutationInvite);
 
-      final returned = await creation;
-      expect(returned.id, repository.lifecycleInvite.id);
-      expect(
-        controller.invites.where((invite) => invite.id == returned.id),
-        hasLength(1),
-      );
-      // The creation RPC may return plaintext once, but controller list state
-      // is always a sanitized copy so later refreshes cannot expose the token.
-      expect(controller.invites.single.token, isNull);
-      expect(controller.invites.single.id, returned.id);
-      expect(controller.invites.single.groupId, returned.groupId);
-      expect(controller.invites.single.expiresAt, returned.expiresAt);
-      expect(controller.invites.single.maxUses, returned.maxUses);
-      expect(controller.invites.single.usesCount, returned.usesCount);
-      expect(controller.invites.single.version, returned.version);
-      expect(controller.invites.single.revokedAt, returned.revokedAt);
-      expect(controller.invites.single.createdAt, returned.createdAt);
-      expect(controller.invites.single.updatedAt, returned.updatedAt);
-      expect(
-        controller.invites.single.version,
-        repository.mutationInvite.version,
-      );
-    },
-  );
+    final returned = await creation;
+    expect(returned.id, repository.lifecycleInvite.id);
+    expect(
+      controller.invites.where((invite) => invite.id == returned.id),
+      hasLength(1),
+    );
+    // 생성 RPC는 평문을 한 번 반환할 수 있지만 컨트롤러 목록 상태는 항상
+    // 정제된 복사본이므로 이후 새로 고침에서 토큰을 노출할 수 없다.
+    expect(controller.invites.single.token, isNull);
+    expect(controller.invites.single.id, returned.id);
+    expect(controller.invites.single.groupId, returned.groupId);
+    expect(controller.invites.single.expiresAt, returned.expiresAt);
+    expect(controller.invites.single.maxUses, returned.maxUses);
+    expect(controller.invites.single.usesCount, returned.usesCount);
+    expect(controller.invites.single.version, returned.version);
+    expect(controller.invites.single.revokedAt, returned.revokedAt);
+    expect(controller.invites.single.createdAt, returned.createdAt);
+    expect(controller.invites.single.updatedAt, returned.updatedAt);
+    expect(
+      controller.invites.single.version,
+      repository.mutationInvite.version,
+    );
+  });
 }
 
 class _StaticAuth extends AuthRepository {
@@ -671,9 +646,8 @@ class _ConflictReloadRepository extends LocalScheduleRepository {
   @override
   Future<List<PlannerGroup>> groupsForUser(String userId) async {
     groupReads += 1;
-    // The test seeds controller state directly, so this first read is the
-    // conflict-triggered reload. Keep it pending until a newer operation has
-    // established its diagnostic.
+    // 테스트가 컨트롤러 상태를 직접 시드하므로 이 첫 읽기는 충돌이 일으킨 다시
+    // 불러오기다. 새 작업이 진단 메시지를 설정할 때까지 대기 상태로 둔다.
     if (groupReads >= 1) await releaseReload.future;
     return userId == group.ownerId
         ? <PlannerGroup>[group.copyWith(version: 2)]

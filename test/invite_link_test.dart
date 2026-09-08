@@ -11,7 +11,7 @@ void main() {
   );
   const token = '7K9MW3PXQ2RT';
 
-  test('builds and parses the configured canonical web link', () {
+  test('설정된 정규 웹 링크를 만들고 파싱한다', () {
     final uri = InviteLinkParser.build(token, config: config, isRelease: false);
     expect(uri?.toString(), 'https://planner.example.test/invite/$token');
     expect(
@@ -20,7 +20,7 @@ void main() {
     );
   });
 
-  test('accepts native invite scheme with one strict token segment', () {
+  test('엄격한 토큰 세그먼트 하나가 있는 네이티브 초대 스킴을 허용한다', () {
     final parsed = InviteLinkParser.parse(
       Uri.parse('moduly://invite/$token'),
       config: config,
@@ -30,30 +30,27 @@ void main() {
     expect(parsed.source, InviteLinkSource.native);
   });
 
-  test(
-    'normalizes lower-case short and legacy tokens at the link boundary',
-    () {
-      expect(
-        InviteLinkParser.parse(
-          Uri.parse('https://planner.example.test/invite/7k9mw3pxq2rt'),
-          config: config,
-          isRelease: false,
-        ).token,
-        token,
-      );
-      const legacy = 'ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789';
-      expect(
-        InviteLinkParser.parse(
-          Uri.parse('https://planner.example.test/invite/$legacy'),
-          config: config,
-          isRelease: false,
-        ).token,
-        legacy.toLowerCase(),
-      );
-    },
-  );
+  test('링크 경계에서 소문자 짧은 토큰과 기존 토큰을 정규화한다', () {
+    expect(
+      InviteLinkParser.parse(
+        Uri.parse('https://planner.example.test/invite/7k9mw3pxq2rt'),
+        config: config,
+        isRelease: false,
+      ).token,
+      token,
+    );
+    const legacy = 'ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789';
+    expect(
+      InviteLinkParser.parse(
+        Uri.parse('https://planner.example.test/invite/$legacy'),
+        config: config,
+        isRelease: false,
+      ).token,
+      legacy.toLowerCase(),
+    );
+  });
 
-  test('rejects path/query/origin abuse without echoing a token', () {
+  test('토큰을 되돌려 주지 않고 경로, 검색어, 출처 악용을 거부한다', () {
     final values = <Uri>[
       Uri.parse('https://planner.example.test/invite/$token/'),
       Uri.parse('https://planner.example.test/invite/$token/extra'),
@@ -81,58 +78,48 @@ void main() {
     );
   });
 
-  test(
-    'rejects encoded slash, malformed percent, controls, and wrong current origin',
-    () {
-      final values = <String>[
-        'https://planner.example.test/invite/$token%2Frest',
-        'https://planner.example.test/invite/$token%',
-        'https://planner.example.test/invite/$token%ZZ',
-        'https://planner.example.test/invite/$token%0A',
-        'https://planner.example.test/invite/$token?x=%ZZ',
-      ];
-      for (final raw in values) {
-        final uri = Uri.tryParse(raw);
-        expect(
-          uri == null ||
-              InviteLinkParser.tryParse(
-                    uri,
-                    config: config,
-                    isRelease: false,
-                  ) ==
-                  null,
-          isTrue,
-          reason: raw,
-        );
-      }
+  test('인코딩된 슬래시, 잘못된 퍼센트, 제어 문자, 잘못된 현재 출처를 거부한다', () {
+    final values = <String>[
+      'https://planner.example.test/invite/$token%2Frest',
+      'https://planner.example.test/invite/$token%',
+      'https://planner.example.test/invite/$token%ZZ',
+      'https://planner.example.test/invite/$token%0A',
+      'https://planner.example.test/invite/$token?x=%ZZ',
+    ];
+    for (final raw in values) {
+      final uri = Uri.tryParse(raw);
       expect(
-        InviteLinkParser.tryParse(
-          Uri.parse('https://planner.example.test/invite/$token'),
-          config: config,
-          currentOrigin: Uri.parse('https://other.example.test'),
-          isRelease: false,
-        ),
-        isNull,
+        uri == null ||
+            InviteLinkParser.tryParse(uri, config: config, isRelease: false) ==
+                null,
+        isTrue,
+        reason: raw,
       );
-    },
-  );
+    }
+    expect(
+      InviteLinkParser.tryParse(
+        Uri.parse('https://planner.example.test/invite/$token'),
+        config: config,
+        currentOrigin: Uri.parse('https://other.example.test'),
+        isRelease: false,
+      ),
+      isNull,
+    );
+  });
 
-  test(
-    'base URL validator rejects encoded, credentialed, and whitespace origins',
-    () {
-      for (final raw in <String>[
-        'https://planner.example.test/%2F',
-        'https://user:pass@planner.example.test',
-        'https://planner.example.test/path with-space',
-        'https://planner.example.test/path?x=1',
-        'https://planner.example.test/path#fragment',
-      ]) {
-        expect(validateInviteBaseUrl(raw).isValid, isFalse, reason: raw);
-      }
-    },
-  );
+  test('기본 URL 검사기가 인코딩, 인증 정보, 공백이 있는 출처를 거부한다', () {
+    for (final raw in <String>[
+      'https://planner.example.test/%2F',
+      'https://user:pass@planner.example.test',
+      'https://planner.example.test/path with-space',
+      'https://planner.example.test/path?x=1',
+      'https://planner.example.test/path#fragment',
+    ]) {
+      expect(validateInviteBaseUrl(raw).isValid, isFalse, reason: raw);
+    }
+  });
 
-  test('keeps a configured deployment path exact', () {
+  test('설정된 배포 경로를 정확히 유지한다', () {
     const nested = AppConfig(
       supabaseUrl: '',
       supabasePublishableKey: '',
@@ -159,7 +146,7 @@ void main() {
     }
   });
 
-  test('disables arbitrary or release plaintext base URLs', () {
+  test('임의 또는 릴리스 평문 기본 URL을 비활성화한다', () {
     const invalid = AppConfig(
       supabaseUrl: '',
       supabasePublishableKey: '',

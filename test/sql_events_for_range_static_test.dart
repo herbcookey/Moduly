@@ -2,12 +2,16 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// Static contract checks for the bounded calendar range migration.  The
-/// pgTAP fixture and local upgrade script execute the same contract against
-/// PostgreSQL; these checks keep security and pagination invariants visible in
-/// environments without a Supabase/Docker daemon.
+/// 범위가 제한된 달력 범위 마이그레이션의 정적 계약 검사다. pgTAP 픽스처와 로컬
+/// 업그레이드 스크립트는 PostgreSQL을 대상으로 같은 계약을 실행한다. 이 검사는
+/// Supabase/Docker 데몬이 없는 환경에서도 보안과 페이지네이션 불변 조건을
+/// 명확히 보여 준다.
 void main() {
   late String migration;
+  late String finiteTimestampsMigration;
+  late String finiteTimestampsMigrationName;
+  late String validateTimestampsMigration;
+  late String validateTimestampsMigrationName;
   late String fixture;
   late String upgrade;
 
@@ -21,28 +25,55 @@ void main() {
     expect(
       migrationFile.existsSync(),
       isTrue,
-      reason: 'the CLI-created calendar range migration must be present',
+      reason: 'CLI로 만든 달력 범위 마이그레이션이 있어야 한다',
     );
     migration = normalized(migrationFile.readAsStringSync());
 
-    final fixtureFile = File('supabase/tests/events_for_range.sql');
+    final finiteTimestampMigrations = Directory('supabase/migrations')
+        .listSync()
+        .whereType<File>()
+        .where(
+          (file) =>
+              file.path.endsWith('_reject_non_finite_event_timestamps.sql'),
+        )
+        .toList(growable: false);
     expect(
-      fixtureFile.existsSync(),
-      isTrue,
-      reason: 'the bounded-range pgTAP fixture must be present',
+      finiteTimestampMigrations,
+      hasLength(1),
+      reason: 'CLI로 만든 비유한 일정 타임스탬프 차단 마이그레이션이 하나 있어야 한다',
     );
+    finiteTimestampsMigrationName =
+        finiteTimestampMigrations.single.uri.pathSegments.last;
+    finiteTimestampsMigration = normalized(
+      finiteTimestampMigrations.single.readAsStringSync(),
+    );
+
+    final validateTimestampMigrations = Directory('supabase/migrations')
+        .listSync()
+        .whereType<File>()
+        .where((file) => file.path.endsWith('_validate_event_timestamps.sql'))
+        .toList(growable: false);
+    expect(
+      validateTimestampMigrations,
+      hasLength(1),
+      reason: 'CLI로 만든 일정 타임스탬프 검증 마이그레이션이 하나 있어야 한다',
+    );
+    validateTimestampsMigrationName =
+        validateTimestampMigrations.single.uri.pathSegments.last;
+    validateTimestampsMigration = normalized(
+      validateTimestampMigrations.single.readAsStringSync(),
+    );
+
+    final fixtureFile = File('supabase/tests/events_for_range.sql');
+    expect(fixtureFile.existsSync(), isTrue, reason: '범위 제한 pgTAP 픽스처가 있어야 한다');
     fixture = normalized(fixtureFile.readAsStringSync());
 
     final upgradeFile = File('supabase/tests/run_events_for_range_upgrade.sh');
-    expect(
-      upgradeFile.existsSync(),
-      isTrue,
-      reason: 'the local range upgrade proof must be present',
-    );
+    expect(upgradeFile.existsSync(), isTrue, reason: '로컬 범위 업그레이드 증거가 있어야 한다');
     upgrade = normalized(upgradeFile.readAsStringSync());
   });
 
-  test('migration is additive, strictly ordered, and indexed for keysets', () {
+  test('마이그레이션이 추가형이고 엄격히 정렬되며 키셋용으로 색인된다', () {
     final migrations =
         Directory('supabase/migrations')
             .listSync()
@@ -60,15 +91,25 @@ void main() {
     expect(
       timestamps.length,
       migrations.length,
-      reason: 'every migration filename must carry a numeric timestamp prefix',
+      reason: '모든 마이그레이션 파일명에 숫자 타임스탬프 접두사가 있어야 한다',
     );
     expect(timestamps.toSet().length, timestamps.length);
     expect(migrations, contains('20260907130003_calendar_range.sql'));
+    final finiteTimestampPrefix = RegExp(
+      r'^(\d+)_',
+    ).firstMatch(finiteTimestampsMigrationName)!.group(1)!;
+    final validateTimestampPrefix = RegExp(
+      r'^(\d+)_',
+    ).firstMatch(validateTimestampsMigrationName)!.group(1)!;
     expect(
-      timestamps.last,
-      '20260907171029',
-      reason:
-          'the event-search migration must remain the current final migration',
+      BigInt.parse(finiteTimestampPrefix),
+      greaterThan(BigInt.parse('20260907171029')),
+      reason: '이미 배포되었을 수 있는 일정 검색 뒤의 forward-only 마이그레이션이어야 한다',
+    );
+    expect(
+      BigInt.parse(validateTimestampPrefix),
+      greaterThan(BigInt.parse(finiteTimestampPrefix)),
+      reason: '장기 검증은 짧은 NOT VALID 보호막이 커밋된 뒤 실행되어야 한다',
     );
     expect(
       migration,
@@ -87,7 +128,52 @@ void main() {
     expect(migration, isNot(contains('truncate public.events')));
   });
 
-  test('RPC signature and security boundary are explicit', () {
+  test('짧은 보호막 뒤 별도 검증으로 모든 일정 타임스탬프를 안전하게 제한한다', () {
+    const constraint = 'events_finite_time_bounds';
+    final addConstraint =
+        'add constraint $constraint check ( pg_catalog.isfinite(starts_at) and pg_catalog.isfinite(ends_at) and pg_catalog.isfinite(created_at) and pg_catalog.isfinite(updated_at) and (deleted_at is null or pg_catalog.isfinite(deleted_at)) ) not valid';
+    final detectExisting =
+        'where not pg_catalog.isfinite(e.starts_at) or not pg_catalog.isfinite(e.ends_at) or not pg_catalog.isfinite(e.created_at) or not pg_catalog.isfinite(e.updated_at) or (e.deleted_at is not null and not pg_catalog.isfinite(e.deleted_at))';
+    final validateConstraint = 'validate constraint $constraint';
+
+    expect(finiteTimestampsMigration, contains(addConstraint));
+    expect(finiteTimestampsMigration, isNot(contains(detectExisting)));
+    expect(finiteTimestampsMigration, isNot(contains(validateConstraint)));
+    expect(finiteTimestampsMigration, contains('commit;'));
+    expect(validateTimestampsMigration, contains(detectExisting));
+    expect(
+      validateTimestampsMigration,
+      contains(
+        'events contain non-finite timestamps; validation made no data changes',
+      ),
+    );
+    expect(
+      validateTimestampsMigration,
+      contains(
+        'inspect with select id, starts_at, ends_at, created_at, updated_at, deleted_at from public.events',
+      ),
+    );
+    expect(validateTimestampsMigration, contains(validateConstraint));
+    expect(
+      validateTimestampsMigration.indexOf(detectExisting),
+      lessThan(validateTimestampsMigration.indexOf(validateConstraint)),
+    );
+    expect(finiteTimestampsMigration, isNot(contains('update public.events')));
+    expect(
+      validateTimestampsMigration,
+      isNot(contains('update public.events')),
+    );
+    expect(
+      '$finiteTimestampsMigration $validateTimestampsMigration',
+      isNot(contains('delete from public.events')),
+    );
+    expect(
+      '$finiteTimestampsMigration $validateTimestampsMigration',
+      isNot(contains('truncate public.events')),
+    );
+  });
+
+  test('RPC 시그니처와 보안 경계가 명확하다', () {
     expect(
       migration,
       contains(
@@ -113,7 +199,7 @@ void main() {
     expect(migration, contains('to authenticated'));
   });
 
-  test('range and overlap validation uses local calendar semantics', () {
+  test('범위 및 겹침 검증이 현지 달력 의미를 사용한다', () {
     expect(migration, contains('pg_catalog.isfinite(p_range_start)'));
     expect(migration, contains('pg_catalog.isfinite(p_range_end)'));
     expect(migration, contains('p_range_end <= p_range_start'));
@@ -142,8 +228,8 @@ void main() {
     expect(migration, contains('from pg_catalog.pg_timezone_names t'));
   });
 
-  test('cursor contract is opaque, URL-safe, versioned, and fail-closed', () {
-    expect(migration, contains('exactly {v, starts_at, event_id}'));
+  test('커서 계약이 불투명하고 URL에 안전하며 버전이 있고 안전하게 실패한다', () {
+    expect(migration, contains('정확히 {v, starts_at, event_id}'));
     expect(migration, contains(r"p_cursor !~ '^[a-za-z0-9_-]+$'"));
     expect(migration, contains("pg_catalog.translate(p_cursor, '-_', '+/')"));
     expect(migration, contains("pg_catalog.repeat( '=',"));
@@ -181,8 +267,7 @@ void main() {
     expect(
       migration,
       isNot(contains('cursor is outside the requested range')),
-      reason:
-          'all-day starts_at can be outside the viewer UTC range; tuple-only cursors remain valid',
+      reason: '종일 starts_at은 조회자 UTC 범위 밖일 수 있으며 튜플 전용 커서는 유효하다',
     );
     expect(migration, contains('limit (v_limit + 1)'));
     expect(migration, contains('order by e.starts_at, e.id'));
@@ -192,7 +277,7 @@ void main() {
     );
   });
 
-  test('event/member visibility and realtime privacy are preserved', () {
+  test('일정/멤버 표시 범위와 Realtime 개인정보 보호가 유지된다', () {
     expect(migration, contains('e.deleted_at is null'));
     expect(migration, contains('target.is_active'));
     expect(migration, contains('target.removed_at is null'));
@@ -218,75 +303,86 @@ void main() {
     expect(migration, contains('join public.memberships target'));
   });
 
-  test('fixture covers authorization, boundaries, cursors, and pagination', () {
+  test('픽스처가 권한, 경계, 커서, 페이지네이션을 검사한다', () {
     for (final marker in <String>[
-      'owner sees the overlap and all-day rows',
-      'active ordinary members can read',
-      'outsider cannot read group event ranges',
-      'inactive member cannot read group event ranges',
-      'archived groups fail closed',
-      'missing groups fail closed',
-      'range is half-open at both timed boundaries',
-      'all-day event ending at range_start is excluded',
-      'participant filter returns only rows assigned',
-      'inactive participant targets are rejected',
-      'cross-group participant targets are rejected',
-      'DST local-midnight validation accepts',
-      'ranges over 366 local calendar days are rejected',
-      'zero limit is rejected',
-      'limit above the bounded maximum is rejected',
-      'malformed cursors are rejected',
-      'non-object cursor payload is rejected',
+      '소유자는 정확한 반개방 일 범위에서 겹치는 일정과 종일 일정 행을 볼 수 있다',
+      '활성 일반 구성원은 고정된 시간대와 함께 활성 그룹을 조회할 수 있다',
+      '외부 사용자는 그룹 이벤트 범위를 조회할 수 없다',
+      '비활성 구성원은 그룹 이벤트 범위를 조회할 수 없다',
+      '보관된 그룹은 과거 행을 반환하지 않고 접근을 차단한다',
+      '존재하지 않는 그룹도 같은 권한 결과로 접근을 차단한다',
+      '범위는 시간 경계에서 반개방 구간으로 동작한다',
+      'range_start에 끝나는 종일 일정은 제외된다',
+      '참여자 필터는 활성 대상에게 할당된 행만 반환한다',
+      '비활성 참여자 대상은 목록을 노출하지 않고 거부된다',
+      '다른 그룹의 참여자 대상은 상태를 노출하지 않고 거부된다',
+      'dst 현지 자정 검증은 23시간짜리 utc 날짜를 허용한다',
+      '현지 달력 기준 366일을 넘는 범위는 거부된다',
+      '0인 제한값은 거부된다',
+      '정해진 최대값을 넘는 제한값은 거부된다',
+      '잘못된 커서는 행을 조회하기 전에 거부된다',
+      '객체가 아닌 커서 페이로드는 거부된다',
       'cursor version is unsupported',
-      'string cursor version is rejected',
-      'floating-point cursor version is rejected',
-      'timezone-less cursor timestamp is rejected',
-      'unknown cursor keys are rejected',
-      'cursor timestamps require seconds',
-      'cursor fractions longer than six digits are rejected',
-      'impossible cursor calendar dates are rejected',
-      'invalid cursor clock components are rejected',
-      'invalid cursor offsets are rejected',
-      'valid cursor fractions from one through six digits are accepted',
-      'valid six-digit cursor fractions with an explicit offset are accepted',
-      'non-finite cursor tuples are rejected',
-      'finite tuple after range_end is accepted',
-      '1001 events paginate without duplicate rows or omissions',
-      'every bulk event appears in exactly one keyset page',
-      'final one-row page is preserved',
-      'complete event shape and member_ids',
-      'when realtime is configured, the parent events table remains the invalidation signal',
+      '문자열 형식의 커서 버전은 거부된다',
+      '부동소수점 형식의 커서 버전은 거부된다',
+      '시간대가 없는 커서 타임스탬프는 거부된다',
+      '알 수 없는 커서 키는 거부된다',
+      '커서 타임스탬프에는 초가 필요하다',
+      '소수 부분이 여섯 자리를 넘는 커서는 거부된다',
+      '존재할 수 없는 달력 날짜를 담은 커서는 거부된다',
+      '잘못된 시각 요소를 담은 커서는 거부된다',
+      '잘못된 오프셋을 담은 커서는 거부된다',
+      '한 자리부터 여섯 자리까지의 유효한 커서 소수 부분은 허용된다',
+      '명시적 오프셋이 있는 유효한 여섯 자리 커서 소수 부분은 허용된다',
+      '유한하지 않은 커서 튜플은 타임스탬프 변환 전에 거부된다',
+      'range_end 뒤의 유한한 튜플은 빈 연속 페이지로 허용된다',
+      '이벤트 1001개가 중복 행이나 누락 없이 페이지로 나뉜다',
+      '모든 대량 이벤트가 정확히 하나의 키셋 페이지에 나타난다',
+      '마지막 한 행짜리 페이지가 유지된다',
+      '완전한 이벤트 구조와 member_ids가 포함된다',
+      'starts_at이 -infinity인 일정은 테이블 경계에서 거부된다',
+      'ends_at이 infinity인 일정은 테이블 경계에서 거부된다',
+      'created_at이 -infinity인 일정은 테이블 경계에서 거부된다',
+      'updated_at이 infinity인 일정은 테이블 경계에서 거부된다',
+      'deleted_at이 infinity인 일정은 테이블 경계에서 거부된다',
+      '일정 타임스탬프 유한성 검사는 검증된 상태다',
+      '실시간 기능이 구성되면 상위 events 테이블이 계속 무효화 신호 역할을 한다',
     ]) {
       expect(
         fixture,
         contains(normalized(marker)),
-        reason: 'fixture should assert $marker',
+        reason: '픽스처가 $marker 항목을 검증해야 한다',
       );
     }
   });
 
-  test(
-    'upgrade script proves historical backfill and reapply preservation',
-    () {
-      for (final marker in <String>[
-        'temporary local PostgreSQL cluster',
-        r'rm -rf -- "$work_dir"',
-        'before event_members',
-        'historical creator backfill',
-        'inactive/deleted creator backfill timestamp',
-        'applying %s',
-        'reapplying %s',
-        'range RPC returned deleted or missing rows',
-        'range migration reapply changed backfilled row count',
-        'event_members must not be added to supabase_realtime',
-        'events_for_range upgrade/reapply/backfill checks passed',
-      ]) {
-        expect(
-          upgrade,
-          contains(normalized(marker)),
-          reason: 'upgrade should prove $marker',
-        );
-      }
-    },
-  );
+  test('업그레이드 스크립트가 과거 데이터 채우기와 재적용 보존을 입증한다', () {
+    for (final marker in <String>[
+      '임시 로컬',
+      r'rm -rf -- "$work_dir"',
+      'event_members 이전',
+      '과거 작성자 데이터 채우기',
+      '비활성/삭제 작성자 데이터 채우기의 타임스탬프',
+      '%s 적용 중',
+      '%s 재적용 중',
+      '범위 RPC가 삭제된 행을 반환했거나 필요한 행을 누락',
+      '범위 마이그레이션 재적용으로 채운 행 개수가 변경',
+      '기존 비유한 일정 행을 탐지하지 못했습니다',
+      '비유한 일정 행은 실패한 마이그레이션에서 변경되면 안 됩니다',
+      'not valid 유한성 보호막이 커밋되지 않았습니다',
+      'created_at 비유한 신규 일정이 허용되었습니다',
+      'updated_at 비유한 갱신이 허용되었습니다',
+      'deleted_at 비유한 갱신이 허용되었습니다',
+      '배포자 명시 조치 후 유한성 검증 마이그레이션을 적용',
+      '신규 비유한 일정 경계가 허용되었습니다',
+      'event_members를 supabase_realtime에 추가해서는 안',
+      'events_for_range 업그레이드/재적용/데이터 채우기 검사를 통과',
+    ]) {
+      expect(
+        upgrade,
+        contains(normalized(marker)),
+        reason: '업그레이드가 $marker 항목을 입증해야 한다',
+      );
+    }
+  });
 }

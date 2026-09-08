@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Fresh/upgrade/reapply evidence for Feature G.  This runner uses only a
-# temporary local PostgreSQL cluster and never contacts a Supabase project.
+# 기능 G의 신규 설치/업그레이드/재적용 검증이다. 이 실행기는 임시 로컬
+# PostgreSQL 클러스터만 사용하며 Supabase 프로젝트에 접속하지 않는다.
 
 set -euo pipefail
 
@@ -21,8 +21,8 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$socket_dir"
-# Keep a UTF-8 database so the fixture exercises Korean, emoji, and NFC/NFD
-# codepoints instead of silently reducing the local cluster to SQL_ASCII.
+# 로컬 클러스터가 조용히 SQL_ASCII로 축소되지 않고 픽스처에서 한국어, 이모지 및
+# NFC/NFD 코드 포인트를 검사하도록 UTF-8 데이터베이스를 유지한다.
 initdb -D "$data_dir" -A trust --locale=en_US.UTF-8 >/dev/null
 pg_ctl -D "$data_dir" -o "-p $port -k $socket_dir" -w start >/dev/null
 
@@ -63,11 +63,11 @@ as $$
 $$;
 SQL
 
-# Applying every migration before G is the fresh-schema path.  Legacy rows are
-# then inserted before G, which proves the upgrade path does not rewrite them.
+# G 이전의 모든 마이그레이션을 적용하는 것이 신규 스키마 경로다. 그 뒤 G 전에
+# 이전 행을 삽입하여 업그레이드 경로가 해당 행을 다시 쓰지 않는지 확인한다.
 for migration in "$repo_dir"/supabase/migrations/*.sql; do
   [[ "$migration" == "$g_migration" ]] && break
-  printf 'applying %s\n' "$(basename "$migration")"
+  printf '%s 적용 중\n' "$(basename "$migration")"
   psql_test -f "$migration" >/dev/null
 done
 
@@ -127,14 +127,14 @@ values ('00000000-0000-4000-8000-00000000e931',
         '00000000-0000-4000-8000-00000000e902');
 SQL
 
-printf 'applying %s (upgrade path)\n' "$(basename "$g_migration")"
+printf '%s 적용 중(업그레이드 경로)\n' "$(basename "$g_migration")"
 psql_test -f "$g_migration" >/dev/null
 legacy_updated_before=$(psql_test -Atqc "select updated_at::text from public.events where id = '00000000-0000-4000-8000-00000000e931'::uuid")
-printf 'reapplying %s\n' "$(basename "$g_migration")"
+printf '%s 재적용 중\n' "$(basename "$g_migration")"
 psql_test -f "$g_migration" >/dev/null
 legacy_updated_after=$(psql_test -Atqc "select updated_at::text from public.events where id = '00000000-0000-4000-8000-00000000e931'::uuid")
 if [[ "$legacy_updated_before" != "$legacy_updated_after" ]]; then
-  printf 'upgrade/reapply changed legacy event timestamp (%s -> %s)\n' \
+  printf '업그레이드/재적용으로 이전 일정 타임스탬프가 변경되었습니다(%s -> %s)\n' \
     "$legacy_updated_before" "$legacy_updated_after" >&2
   exit 1
 fi
@@ -149,7 +149,7 @@ begin
      where oid = 'public.events_group_creator_start_id_live_idx'::regclass
        and relkind = 'i'
   ) then
-    raise exception 'creator partial index missing after upgrade/reapply';
+    raise exception '업그레이드/재적용 뒤 작성자 부분 인덱스가 없습니다';
   end if;
   perform set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-00000000e901', true);
   perform set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000e901","role":"authenticated"}', true);
@@ -161,21 +161,20 @@ begin
   if jsonb_array_length(v_payload->'events') <> 1
      or v_payload->'events'->0->>'title' <> 'Legacy search event'
      or v_payload ? 'count' then
-    raise exception 'upgrade search result/envelope is invalid';
+    raise exception '업그레이드 검색 결과/봉투가 올바르지 않습니다';
   end if;
 end;
 $$;
 SQL
 
-# The pgTAP extension is optional in local bare PostgreSQL.  Run the complete
-# fixture where available.  On a bare install, define strict assertion-
-# compatible stubs and feed the exact same complete fixture through psql; any
-# failed assertion or SQL error must still abort this runner.
+# 로컬 기본 PostgreSQL에서 pgTAP 확장은 선택 사항이다. 사용할 수 있으면 전체
+# 픽스처를 실행한다. 기본 설치에서는 엄격한 검증 호환 스텁을 정의하고 정확히 같은
+# 전체 픽스처를 psql에 전달한다. 검증 실패나 SQL 오류가 있으면 실행기를 중단해야 한다.
 if psql_test -Atqc "select 1 from pg_catalog.pg_available_extensions where name = 'pgtap'" | grep -q '^1$'; then
-  printf 'running event_search.sql (pgTAP)\n'
+  printf 'event_search.sql 실행 중(pgTAP)\n'
   psql_test -f "$repo_dir/supabase/tests/event_search.sql" >/dev/null
 else
-  printf 'pgTAP unavailable; using strict assertion stubs for event_search.sql\n'
+  printf 'pgTAP을 사용할 수 없어 event_search.sql에 엄격한 검증 스텁을 사용합니다\n'
   psql_test <<'SQL'
 create function public.no_plan()
 returns text
@@ -188,7 +187,7 @@ language plpgsql
 as $$
 begin
   if p_condition is distinct from true then
-    raise exception 'pgTAP ok failed: %', p_description;
+    raise exception 'pgTAP ok 실패: %', p_description;
   end if;
   return 'ok';
 end;
@@ -204,7 +203,7 @@ language plpgsql
 as $$
 begin
   if p_actual is distinct from p_expected then
-    raise exception 'pgTAP is failed: % (actual %, expected %)',
+    raise exception 'pgTAP is 실패: % (실제 값 %, 기댓값 %)',
       p_description, p_actual, p_expected;
   end if;
   return 'ok';
@@ -232,12 +231,12 @@ begin
       v_message = message_text;
     if v_state <> p_sqlstate
        or (p_message is not null and v_message <> p_message) then
-      raise exception 'pgTAP throws_ok failed: % (state %, message %)',
+      raise exception 'pgTAP throws_ok 실패: % (상태 %, 메시지 %)',
         p_description, v_state, v_message;
     end if;
     return 'ok';
   end;
-  raise exception 'pgTAP throws_ok expected an error: %', p_description;
+  raise exception 'pgTAP throws_ok에서 오류를 기대했습니다: %', p_description;
 end;
 $$;
 
@@ -254,7 +253,7 @@ grant execute on function public.finish() to public;
 SQL
   sed '/^[[:space:]]*create extension if not exists pgtap;[[:space:]]*$/d' \
     "$repo_dir/supabase/tests/event_search.sql" | psql_test >/dev/null
-  printf 'event_search assertion-stub fixture passed\n'
+  printf 'event_search 검증 스텁 픽스처를 통과했습니다\n'
 fi
 
-printf 'event_search fresh/upgrade/reapply checks passed\n'
+printf 'event_search 신규 설치/업그레이드/재적용 검사를 통과했습니다\n'

@@ -39,7 +39,7 @@ Future<void> _pumpLogin(
 }
 
 void main() {
-  testWidgets('demo login shows an explicit fill affordance', (tester) async {
+  testWidgets('데모 로그인이 명확한 자동 입력 동작을 표시한다', (tester) async {
     await _pumpLogin(tester, remote: false, demoAllowed: true);
 
     expect(find.text('데모 값 채우기'), findsOneWidget);
@@ -57,9 +57,7 @@ void main() {
     expect(tester.widget<TextField>(fields.at(1)).controller?.text, 'planner');
   });
 
-  testWidgets('remote login does not expose demo credentials or copy', (
-    tester,
-  ) async {
+  testWidgets('원격 로그인이 데모 인증 정보나 문구를 노출하지 않는다', (tester) async {
     await _pumpLogin(tester, remote: true, demoAllowed: true);
 
     expect(find.text('데모 값 채우기'), findsNothing);
@@ -69,9 +67,7 @@ void main() {
     expect(tester.widget<TextField>(fields.at(1)).controller?.text, isEmpty);
   });
 
-  testWidgets('configuration-blocked login does not expose demo credentials', (
-    tester,
-  ) async {
+  testWidgets('설정으로 차단된 로그인이 데모 인증 정보를 노출하지 않는다', (tester) async {
     await _pumpLogin(tester, remote: false, demoAllowed: false);
 
     expect(find.text('데모 값 채우기'), findsNothing);
@@ -81,9 +77,7 @@ void main() {
     expect(tester.widget<TextField>(fields.at(1)).controller?.text, isEmpty);
   });
 
-  testWidgets('login enforces the six-character backend password minimum', (
-    tester,
-  ) async {
+  testWidgets('로그인이 백엔드 비밀번호 최소 길이 6자를 적용한다', (tester) async {
     await tester.pumpWidget(
       const ProviderScope(child: MaterialApp(home: LoginScreen())),
     );
@@ -97,9 +91,7 @@ void main() {
     expect(find.text('6자 이상 입력해 주세요.'), findsOneWidget);
   });
 
-  testWidgets('login busy state exposes a spoken progress label', (
-    tester,
-  ) async {
+  testWidgets('로그인 진행 상태가 음성 진행 라벨을 제공한다', (tester) async {
     final auth = _UiAuthRepository(remote: false);
     final controller = PlannerController(
       auth: auth,
@@ -125,9 +117,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('sign-up enforces backend password and display-name limits', (
-    tester,
-  ) async {
+  testWidgets('가입이 백엔드 비밀번호 및 표시 이름 제한을 적용한다', (tester) async {
     await tester.pumpWidget(
       const ProviderScope(child: MaterialApp(home: SignUpScreen())),
     );
@@ -152,9 +142,7 @@ void main() {
     expect(find.text('6자 이상 입력해 주세요.'), findsOneWidget);
   });
 
-  testWidgets('forgot-password screen reports success after requesting email', (
-    tester,
-  ) async {
+  testWidgets('비밀번호 찾기 화면이 이메일 요청 후 성공을 알린다', (tester) async {
     String? requestedEmail;
     await tester.pumpWidget(
       MaterialApp(
@@ -174,9 +162,7 @@ void main() {
     expect(find.textContaining('재설정 메일을 보냈어요'), findsOneWidget);
   });
 
-  testWidgets('forgot-password errors do not reveal account existence', (
-    tester,
-  ) async {
+  testWidgets('비밀번호 찾기 오류가 계정 존재 여부를 드러내지 않는다', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
         home: ForgotPasswordScreen(
@@ -195,39 +181,34 @@ void main() {
     expect(find.textContaining('등록되어 있다면 잠시 후 다시 시도해 주세요'), findsOneWidget);
   });
 
-  testWidgets(
-    'reset-password screen validates confirmation and updates password',
-    (tester) async {
-      String? updatedPassword;
-      await tester.pumpWidget(
-        MaterialApp(
-          home: ResetPasswordScreen(
-            onUpdate: (password) async {
-              updatedPassword = password;
-            },
-          ),
+  testWidgets('비밀번호 재설정 화면이 확인값을 검증하고 비밀번호를 갱신한다', (tester) async {
+    String? updatedPassword;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ResetPasswordScreen(
+          onUpdate: (password) async {
+            updatedPassword = password;
+          },
         ),
-      );
+      ),
+    );
 
-      final fields = find.byType(TextFormField);
-      await tester.enterText(fields.at(0), 'new-password');
-      await tester.enterText(fields.at(1), 'different-password');
-      await tester.tap(find.text('비밀번호 변경하기'));
-      await tester.pump();
-      expect(find.text('비밀번호가 일치하지 않아요.'), findsOneWidget);
-      expect(updatedPassword, isNull);
+    final fields = find.byType(TextFormField);
+    await tester.enterText(fields.at(0), 'new-password');
+    await tester.enterText(fields.at(1), 'different-password');
+    await tester.tap(find.text('비밀번호 변경하기'));
+    await tester.pump();
+    expect(find.text('비밀번호가 일치하지 않아요.'), findsOneWidget);
+    expect(updatedPassword, isNull);
 
-      await tester.enterText(fields.at(1), 'new-password');
-      await tester.tap(find.text('비밀번호 변경하기'));
-      await tester.pumpAndSettle();
-      expect(updatedPassword, 'new-password');
-      expect(find.textContaining('비밀번호를 변경했어요'), findsOneWidget);
-    },
-  );
+    await tester.enterText(fields.at(1), 'new-password');
+    await tester.tap(find.text('비밀번호 변경하기'));
+    await tester.pumpAndSettle();
+    expect(updatedPassword, 'new-password');
+    expect(find.textContaining('비밀번호를 변경했어요'), findsOneWidget);
+  });
 
-  testWidgets('confirmation screen can resend and return to login', (
-    tester,
-  ) async {
+  testWidgets('확인 화면에서 재전송하고 로그인으로 돌아갈 수 있다', (tester) async {
     String? resentEmail;
     await tester.pumpWidget(
       MaterialApp(
@@ -246,9 +227,7 @@ void main() {
     expect(find.textContaining('인증 메일을 다시 보냈어요'), findsOneWidget);
   });
 
-  testWidgets('confirmation screen hides raw provider error details', (
-    tester,
-  ) async {
+  testWidgets('확인 화면이 공급자의 원본 오류 세부 정보를 숨긴다', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
         home: VerifyEmailScreen(
@@ -270,9 +249,7 @@ void main() {
     expect(find.text(authResendSignupErrorMessage), findsOneWidget);
   });
 
-  testWidgets('reset-password screen hides raw provider error details', (
-    tester,
-  ) async {
+  testWidgets('비밀번호 재설정 화면이 공급자의 원본 오류 세부 정보를 숨긴다', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
         home: ResetPasswordScreen(

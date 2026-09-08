@@ -1,17 +1,16 @@
--- Authenticated invite-link preview and acceptance hardening.
+-- 인증된 초대 링크 미리 보기 및 수락 보강이다.
 --
--- This migration is additive.  Existing invite_codes rows keep their SHA-256
--- digests (including legacy 48-character hexadecimal codes); plaintext bearer
--- values are never backfilled or written.  Preview is deliberately an
--- authenticated operation so a logged-out deep link is routed through the
--- application's login flow before any group metadata can be requested.
+-- 이 마이그레이션은 기존 기능에 추가만 한다. 기존 invite_codes 행은 이전 48자
+-- 16진수 코드를 포함한 SHA-256 다이제스트를 유지하며, 평문 Bearer 값은 기존
+-- 데이터에 채우거나 새로 쓰지 않는다. 미리 보기는 의도적으로 인증된 작업으로
+-- 두어 로그아웃 상태의 딥 링크가 그룹 메타데이터를 요청하기 전에 애플리케이션
+-- 로그인 흐름을 거치게 한다.
 
 begin;
 
--- Preview throttling is intentionally smaller than the join ledger.  It has
--- no token, digest, group, or result columns: actor/timestamp are the only
--- request metadata retained.  The composite key also avoids adding a
--- surrogate identifier that could become an accidental correlation handle.
+-- 미리 보기 제한 원장은 의도적으로 가입 원장보다 작다. 토큰, 다이제스트, 그룹,
+-- 결과 열은 없으며 요청자/타임스탬프만 요청 메타데이터로 보존한다. 복합 키를
+-- 사용해 의도치 않은 연관 분석 수단이 될 수 있는 대체 식별자도 추가하지 않는다.
 create table if not exists public.invite_preview_attempts (
   actor_id uuid not null references auth.users(id) on delete cascade,
   attempted_at timestamptz not null default pg_catalog.clock_timestamp(),
@@ -19,28 +18,28 @@ create table if not exists public.invite_preview_attempts (
 );
 
 comment on table public.invite_preview_attempts is
-  'Private preview rate-limit ledger. It stores only actor_id and attempted_at; no token or digest is retained.';
+  '비공개 미리 보기 속도 제한 원장이다. actor_id와 attempted_at만 저장하며 토큰이나 다이제스트는 보존하지 않는다.';
 comment on column public.invite_preview_attempts.actor_id is
-  'Authenticated caller responsible for the preview request.';
+  '미리 보기 요청을 수행한 인증된 호출자다.';
 comment on column public.invite_preview_attempts.attempted_at is
-  'Wall-clock time of a real preview attempt, used for the rolling one-hour limit.';
+  '실제 미리 보기 시도의 벽시계 시각으로, 이동형 한 시간 제한에 사용한다.';
 
 create index if not exists invite_preview_attempts_actor_time_idx
   on public.invite_preview_attempts (actor_id, attempted_at desc);
 create index if not exists invite_preview_attempts_time_idx
   on public.invite_preview_attempts (attempted_at);
 
--- The legacy join ledger already has an actor/time index for rolling-window
--- checks.  Keep a second timestamp-only index so bounded global stale sweeps
--- do not scan every actor's history.
+-- 이전 가입 원장에는 이동 창 검사용 요청자/시간 인덱스가 이미 있다. 범위가 제한된
+-- 전체 오래된 행 정리가 모든 요청자의 이력을 스캔하지 않도록 타임스탬프 전용
+-- 인덱스를 하나 더 둔다.
 create index if not exists invite_join_attempts_time_idx
   on public.invite_join_attempts (attempted_at);
 
 alter table public.invite_preview_attempts enable row level security;
 
--- Keep the table private even if a future migration accidentally restores a
--- table grant.  The SECURITY DEFINER preview RPC is owned by the migration
--- role and can still maintain the ledger.
+-- 이후 마이그레이션이 실수로 테이블 권한을 복원해도 테이블을 비공개로 유지한다.
+-- SECURITY DEFINER 미리 보기 RPC는 마이그레이션 역할이 소유하므로 원장을 계속
+-- 관리할 수 있다.
 do $$
 begin
   if not exists (
@@ -56,11 +55,10 @@ $$;
 
 revoke all on table public.invite_preview_attempts from public, anon, authenticated;
 
--- Match lib/core/invite_code_utils.dart on the server.  Separators are display
--- only; short codes are canonical uppercase in the human alphabet and legacy
--- 48-character hexadecimal values are canonical lowercase.  NULL means the
--- input is empty, overlong, or malformed; callers return one safe terminal
--- result rather than exposing which validation branch failed.
+-- 서버에서도 lib/core/invite_code_utils.dart와 맞춘다. 구분자는 표시용일 뿐이다.
+-- 짧은 코드는 사람이 읽는 문자 집합의 대문자로 정규화하고 이전 48자 16진수 값은
+-- 소문자로 정규화한다. NULL은 입력이 비었거나 너무 길거나 잘못된 형식임을 뜻한다.
+-- 호출자는 어느 검증 분기가 실패했는지 노출하지 않고 안전한 종료 결과 하나를 반환한다.
 create or replace function public._canonicalize_invite_token(p_token text)
 returns text
 language plpgsql
@@ -72,8 +70,8 @@ declare
   v_compact text;
   v_short_alphabet constant text := '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 begin
-  -- Reject before normalization as well as after it.  This avoids silently
-  -- accepting an attacker-controlled prefix when a very large value arrives.
+  -- 정규화 전과 후에 모두 거부한다. 매우 큰 값이 들어왔을 때 공격자가 제어하는
+  -- 접두사를 조용히 허용하는 일을 막는다.
   if p_token is null
      or pg_catalog.octet_length(p_token) > 256 then
     return null;
@@ -106,11 +104,11 @@ end;
 $$;
 
 comment on function public._canonicalize_invite_token(text) is
-  'Private server-side invite canonicalizer; returns NULL for malformed/overlong input.';
+  '서버 측 비공개 초대 정규화 함수다. 형식이 잘못되었거나 너무 긴 입력에는 NULL을 반환한다.';
 
--- Preview exposes only the minimum confirmation fields.  It has no anon
--- execution grant and records no token/hash.  Every non-live state uses the
--- same no-group response, so a caller cannot probe hidden group existence.
+-- 미리 보기는 최소 확인 필드만 노출한다. anon 실행 권한이 없고 토큰/해시를
+-- 기록하지 않는다. 운영 중이 아닌 모든 상태는 그룹 없음 응답을 똑같이 사용하므로
+-- 호출자가 숨겨진 그룹의 존재 여부를 탐색할 수 없다.
 create or replace function public.preview_invite(p_token text)
 returns jsonb
 language plpgsql
@@ -140,9 +138,9 @@ begin
       message = 'authentication is required';
   end if;
 
-  -- Serialize and prune this actor's rolling window before counting.  A
-  -- request that is already at the limit does not insert another row, so
-  -- repeated blocked probes cannot extend their own lockout.
+  -- 개수를 세기 전에 이 요청자의 이동 창을 직렬화하고 정리한다. 이미 한도에
+  -- 도달한 요청은 행을 더 삽입하지 않으므로 반복해서 차단된 탐색이 자체 잠금
+  -- 시간을 늘릴 수 없다.
   perform pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended(v_user_id::text, 0)
   );
@@ -150,9 +148,9 @@ begin
   where actor_id = v_user_id
     and attempted_at <= pg_catalog.now() - interval '1 hour';
 
-  -- Bounded opportunistic cleanup keeps rows from inactive actors from
-  -- growing without bound.  SKIP LOCKED makes concurrent preview callers
-  -- deterministic and limits each invocation to a small ctid batch.
+  -- 범위를 제한한 기회적 정리는 비활성 요청자의 행이 끝없이 늘어나는 것을 막는다.
+  -- SKIP LOCKED는 동시 미리 보기 호출자의 동작을 결정적으로 만들고 각 호출을 작은
+  -- ctid 묶음으로 제한한다.
   with stale as (
     select p.ctid
     from public.invite_preview_attempts p
@@ -190,10 +188,9 @@ begin
     'hex'
   );
 
-  -- The fixed sentinel above keeps malformed input bounded and prevents an
-  -- arbitrary attacker string from being retained or digested.  A malformed
-  -- value cannot match a real invite digest, so return the uniform terminal
-  -- result before looking up any group.
+  -- 위의 고정 표식은 잘못된 입력의 범위를 제한하고 공격자가 만든 임의 문자열을
+  -- 보존하거나 다이제스트로 만들지 못하게 한다. 잘못된 값은 실제 초대 다이제스트와
+  -- 일치할 수 없으므로 그룹을 조회하기 전에 동일한 종료 결과를 반환한다.
   if v_token is null then
     return pg_catalog.jsonb_build_object(
       'valid', false,
@@ -227,10 +224,10 @@ begin
     );
   end if;
 
-  -- A caller who is already an active member may safely retry a previously
-  -- valid token after it expires, is revoked, or reaches max_uses.  The
-  -- membership bit is only exposed after an exact token/group match; outsiders
-  -- still receive the same no-group terminal response below.
+  -- 이미 활성 멤버인 호출자는 이전에 유효했던 토큰이 만료되거나 취소되거나
+  -- max_uses에 도달한 뒤에도 안전하게 재시도할 수 있다. 멤버십 여부는 정확한
+  -- 토큰/그룹 일치 뒤에만 노출하며 외부 사용자는 계속 아래와 같은 그룹 없음
+  -- 종료 응답을 받는다.
   if not v_already_member
      and (
        v_revoked_at is not null
@@ -255,11 +252,10 @@ begin
 end;
 $$;
 
--- Replace acceptance without changing the existing PostgREST signature or
--- row shape.  Canonicalization happens before hashing, and overlong input is
--- rejected instead of being silently truncated.  The old 48-character digest
--- rows therefore remain valid while newly issued 12-character codes accept
--- the same separator/case variants as the client.
+-- 기존 PostgREST 시그니처나 행 형태를 바꾸지 않고 수락을 교체한다. 해시 전에
+-- 정규화하고 너무 긴 입력은 조용히 자르지 않고 거부한다. 따라서 이전 48자
+-- 다이제스트 행은 계속 유효하며 새로 발급한 12자 코드는 클라이언트와 같은
+-- 구분자/대소문자 변형을 허용한다.
 create or replace function public.join_group_with_invite(p_token text)
 returns table (
   group_id uuid,
@@ -294,9 +290,8 @@ begin
     raise exception using errcode = '28000', message = 'authentication is required';
   end if;
 
-  -- The actor lock covers pruning, counting and the real-attempt ledger row.
-  -- Blocked requests return without inserting a row, preventing an attacker
-  -- from extending the rolling window indefinitely.
+  -- 요청자 잠금은 정리, 개수 계산 및 실제 시도 원장 행을 모두 포함한다. 차단된
+  -- 요청은 행을 삽입하지 않고 반환하여 공격자가 이동 창을 무한히 늘리지 못하게 한다.
   perform pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended(v_user_id::text, 0)
   );
@@ -310,8 +305,8 @@ begin
   where actor_id = v_user_id
     and attempted_at > pg_catalog.now() - interval '1 hour';
 
-  -- Bound each invocation's global cleanup work.  SKIP LOCKED allows callers
-  -- for different actors to prune stale rows without forming a lock cycle.
+  -- 각 호출의 전체 정리 작업 범위를 제한한다. SKIP LOCKED를 사용하면 서로 다른
+  -- 요청자의 호출자가 잠금 순환을 만들지 않고 오래된 행을 정리할 수 있다.
   with stale as (
     select a.ctid
     from public.invite_join_attempts a
@@ -338,9 +333,8 @@ begin
     'hex'
   );
 
-  -- Store a digest for every real attempt, including malformed input.  This
-  -- preserves the existing private ledger contract without retaining the
-  -- bearer value itself.
+  -- 잘못된 입력을 포함한 모든 실제 시도에 다이제스트를 저장한다. Bearer 값 자체를
+  -- 보존하지 않으면서 기존 비공개 원장 계약을 유지한다.
   insert into public.invite_join_attempts (actor_id, token_hash, succeeded, reason)
   values (v_user_id, v_token_hash, false, 'invalid_or_expired')
   returning id into v_attempt_id;
@@ -350,8 +344,8 @@ begin
     return;
   end if;
 
-  -- Read the parent id without a lock only to establish the group lock target.
-  -- The locked group is rechecked before the invite and membership writes.
+  -- 그룹 잠금 대상을 정하기 위해서만 잠금 없이 상위 ID를 읽는다. 초대와 멤버십을
+  -- 쓰기 전에 잠긴 그룹을 다시 확인한다.
   select i.group_id
     into v_invite_group_id
   from public.invite_codes i
@@ -374,8 +368,8 @@ begin
     return;
   end if;
 
-  -- Group-first lock order is shared with create/revoke/archive/transfer and
-  -- prevents lifecycle writes from racing invite use consumption.
+  -- 그룹 우선 잠금 순서는 생성/취소/보관/이전과 공유하며 수명 주기 쓰기가 초대
+  -- 사용 횟수 소비와 경합하는 것을 막는다.
   select i.id, i.group_id, i.expires_at, i.max_uses, i.uses_count, i.revoked_at
     into v_invite_id, v_invite_group_id, v_expires_at, v_max_uses, v_uses_count, v_revoked_at
   from public.invite_codes i
@@ -409,9 +403,9 @@ begin
     and m.user_id = v_user_id
   for update;
 
-  -- An active member can safely retry a token after its lifecycle reaches a
-  -- terminal state.  The exact token/group match and live-group check above
-  -- prevent this branch from revealing membership to outsiders.
+  -- 활성 멤버는 토큰 수명 주기가 종료 상태에 도달한 뒤에도 안전하게 재시도할 수
+  -- 있다. 위의 정확한 토큰/그룹 일치 및 운영 그룹 검사는 이 분기가 외부 사용자에게
+  -- 멤버십을 노출하지 못하게 한다.
   if found and v_membership_active then
     update public.invite_join_attempts
       set succeeded = true, reason = 'already_member'
@@ -485,9 +479,8 @@ begin
 end;
 $$;
 
--- Revoke by the current active group owner rather than the historical creator.
--- This keeps owner-transfer semantics correct while retaining the same
--- optimistic version and generic conflict response.
+-- 과거 작성자가 아닌 현재 활성 그룹 소유자가 취소한다. 같은 낙관적 버전 및 일반
+-- 충돌 응답을 유지하면서 소유권 이전 의미를 올바르게 보존한다.
 create or replace function public.revoke_invite_code(
   p_invite_id uuid,
   p_expected_version integer
@@ -518,9 +511,9 @@ begin
     raise exception using errcode = '28000', message = 'authentication is required';
   end if;
 
-  -- Account deletion locks auth.users before its cascading group rows.  Take
-  -- the compatible key-share lock first so a concurrent revoke waits on the
-  -- actor row rather than forming a cross-order deadlock with deletion.
+  -- 계정 삭제는 연쇄 그룹 행보다 auth.users를 먼저 잠근다. 호환되는 키 공유 잠금을
+  -- 먼저 얻어 동시 취소가 삭제와 순서가 교차하는 교착 상태를 만들지 않고 요청자
+  -- 행에서 기다리게 한다.
   select u.*
     into v_actor_row
   from auth.users u
@@ -564,8 +557,8 @@ begin
       message = 'invite was changed, revoked, or is not yours';
   end if;
 
-  -- Revocation is terminal.  A retry with the current terminal version is a
-  -- generic conflict and must not bump the version or emit another audit row.
+  -- 취소는 종료 상태다. 현재 종료 버전으로 재시도하면 일반 충돌이며 버전을 올리거나
+  -- 감사 행을 또 출력해서는 안 된다.
   if v_invite.revoked_at is not null then
     raise exception using
       errcode = '40001',
@@ -591,9 +584,9 @@ begin
 end;
 $$;
 
--- PostgreSQL defaults new functions to PUBLIC EXECUTE.  Keep the helper
--- private, expose preview only to authenticated callers, and explicitly reset
--- the unchanged existing invite RPC ACLs on upgraded deployments.
+-- PostgreSQL은 새 함수에 기본적으로 PUBLIC EXECUTE 권한을 준다. 도우미는 비공개로
+-- 유지하고 미리 보기는 인증된 호출자에게만 노출하며, 업그레이드된 배포에서는
+-- 변경되지 않은 기존 초대 RPC ACL을 명시적으로 재설정한다.
 revoke execute on function public._canonicalize_invite_token(text)
   from public, anon, authenticated;
 revoke execute on function public.preview_invite(text)
@@ -611,8 +604,8 @@ revoke execute on function public.revoke_invite_code(uuid, integer)
   from public, anon, authenticated;
 grant execute on function public.revoke_invite_code(uuid, integer) to authenticated;
 
--- The owner-authorized RPCs are the only invite mutation path.  The existing
--- 202608110002 column grant must be removed for both fresh and upgraded DBs.
+-- 소유자 승인 RPC만 초대를 변경할 수 있는 경로다. 신규 및 업그레이드된 DB 모두에서
+-- 기존 202608110002 열 권한을 제거해야 한다.
 revoke update on table public.invite_codes from public, anon, authenticated;
 revoke update (expires_at, max_uses, revoked_at, version)
   on public.invite_codes from public, anon, authenticated;

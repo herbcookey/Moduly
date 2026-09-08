@@ -31,10 +31,9 @@ class HomeScreen extends ConsumerWidget {
     final scheme = Theme.of(context).colorScheme;
     final view = controller.calendarView;
     final week = _week(controller.selectedDay);
-    // Legacy adapters do not expose bounded range loading, so group
-    // selection owns the only loading flag while the event snapshot is empty.
-    // Keep a retryable range error visible instead of replacing it with an
-    // unrelated global spinner.
+    // 레거시 어댑터는 제한된 범위 불러오기를 노출하지 않으므로 일정 스냅샷이
+    // 비어 있는 동안에는 그룹 선택이 유일한 로딩 플래그를 소유한다. 재시도 가능한
+    // 범위 오류를 관련 없는 전역 로딩 표시로 바꾸지 말고 계속 표시한다.
     final showEmptyLoading =
         controller.events.isEmpty &&
         controller.rangeError == null &&
@@ -275,15 +274,12 @@ class _CalendarToolbar extends StatelessWidget {
   }
 
   Future<void> _pickDate(BuildContext context) async {
+    final initialDate = CalendarDateBounds.clamp(controller.selectedDay);
     final picked = await showDatePicker(
       context: context,
-      initialDate: DateTime(
-        controller.selectedDay.year,
-        controller.selectedDay.month,
-        controller.selectedDay.day,
-      ),
-      firstDate: DateTime(2000),
-      lastDate: DateTime(2100, 12, 31),
+      initialDate: initialDate,
+      firstDate: CalendarDateBounds.firstDate,
+      lastDate: CalendarDateBounds.lastDate,
       helpText: '날짜 선택',
       cancelText: '취소',
       confirmText: '선택',
@@ -316,7 +312,7 @@ class _CalendarToolbar extends StatelessWidget {
                 ),
                 ButtonSegment<CalendarViewMode>(
                   value: CalendarViewMode.agenda,
-                  label: Text('Agenda'),
+                  label: Text('일정 목록'),
                 ),
               ],
               selected: <CalendarViewMode>{controller.calendarView},

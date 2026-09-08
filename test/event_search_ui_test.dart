@@ -220,8 +220,8 @@ Widget _routedApp(PlannerController controller, {String initial = '/home'}) {
 }
 
 EventRange _range(DateTime start, DateTime end) => EventRange(
-  // EventRange boundaries are UTC instants for local midnights in the
-  // selected group's IANA timezone.
+  // EventRange 경계는 선택한 그룹의 IANA 시간대에서 현지 자정을 나타내는
+  // UTC 시각이다.
   startUtc: wallTimeToUtc(dateOnly(start), _group.timezone),
   endUtc: wallTimeToUtc(dateOnly(end), _group.timezone),
   viewTimezone: _group.timezone,
@@ -252,9 +252,7 @@ Future<void> _settleSearch(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('home exposes a 48 px accessible search affordance', (
-    tester,
-  ) async {
+  testWidgets('홈이 48px 크기의 접근 가능한 검색 동작을 제공한다', (tester) async {
     final auth = _TestAuth();
     final repository = _SearchRepository();
     final controller = _controller(auth, repository);
@@ -272,38 +270,33 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'empty query searches by the selected month and renders Unicode',
-    (tester) async {
-      final auth = _TestAuth();
-      final event = _event(
-        id: 'unicode-event',
-        title: '회의 · 한글 😀 100%',
-        note: r'특수문자 _% [] ( )',
-      );
-      final repository = _SearchRepository(
-        pages: <EventRangePage>[
-          _page([event]),
-        ],
-      );
-      final controller = _controller(auth, repository);
-      addTearDown(auth.dispose);
+  testWidgets('빈 검색어가 선택한 달을 기준으로 검색하고 Unicode를 표시한다', (tester) async {
+    final auth = _TestAuth();
+    final event = _event(
+      id: 'unicode-event',
+      title: '회의 · 한글 😀 100%',
+      note: r'특수문자 _% [] ( )',
+    );
+    final repository = _SearchRepository(
+      pages: <EventRangePage>[
+        _page([event]),
+      ],
+    );
+    final controller = _controller(auth, repository);
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(_screenApp(controller));
-      await _settleSearch(tester);
+    await tester.pumpWidget(_screenApp(controller));
+    await _settleSearch(tester);
 
-      expect(repository.calls, hasLength(1));
-      expect(repository.calls.single.query, isEmpty);
-      expect(find.text('회의 · 한글 😀 100%'), findsOneWidget);
-      expect(find.textContaining('작성자'), findsWidgets);
-      expect(find.bySemanticsLabel('일정 검색어'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(repository.calls, hasLength(1));
+    expect(repository.calls.single.query, isEmpty);
+    expect(find.text('회의 · 한글 😀 100%'), findsOneWidget);
+    expect(find.textContaining('작성자'), findsWidgets);
+    expect(find.bySemanticsLabel('일정 검색어'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets('one-rune query is announced as validation and never fetched', (
-    tester,
-  ) async {
+  testWidgets('문자 하나인 검색어는 유효성 오류로 알리고 조회하지 않는다', (tester) async {
     final auth = _TestAuth();
     final repository = _SearchRepository(
       pages: <EventRangePage>[_page(const <PlannerEvent>[])],
@@ -322,8 +315,8 @@ void main() {
     expect(find.text('다시 시도'), findsNothing);
     expect(repository.calls.length, callsBefore);
 
-    // Whitespace-only input is normalized to the supported empty-query mode,
-    // so it must clear the validation state and issue one bounded request.
+    // 공백만 있는 입력은 지원되는 빈 검색어 모드로 정규화되므로,
+    // 유효성 검사 상태를 지우고 범위가 제한된 요청을 한 번 보내야 한다.
     await tester.enterText(find.byType(TextField), '   ');
     await tester.pump(const Duration(milliseconds: 30));
     await tester.pump();
@@ -334,9 +327,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('creator, participant and date filters are sent together', (
-    tester,
-  ) async {
+  testWidgets('생성자, 참여자, 날짜 필터를 함께 전송한다', (tester) async {
     final auth = _TestAuth();
     final event = _event(
       id: 'filtered-event',
@@ -380,9 +371,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('retry recovers and bounded load-more appends another page', (
-    tester,
-  ) async {
+  testWidgets('재시도가 복구되고 범위 제한 더 불러오기가 다음 페이지를 추가한다', (tester) async {
     final auth = _TestAuth();
     final firstPageEvents = List<PlannerEvent>.generate(
       eventSearchDefaultPageSize,
@@ -426,69 +415,63 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'occurrence result updates selected day and uses opaque occurrence route',
-    (tester) async {
-      final auth = _TestAuth();
-      const occurrenceKey = 'o00000000000000000001';
-      final occurrence = _event(
-        id: 'occurrence-row',
-        title: '반복 일정 결과',
-        startAt: DateTime.utc(2026, 8, 11, 1),
-        seriesId: 'series-anchor',
-        occurrenceKey: occurrenceKey,
-        isOccurrence: true,
-      );
-      final repository = _SearchRepository(
-        pages: <EventRangePage>[
-          _page([occurrence]),
-        ],
-      );
-      final controller = _controller(auth, repository);
-      addTearDown(auth.dispose);
+  testWidgets('발생 일정 결과가 선택 날짜를 갱신하고 불투명한 발생 라우트를 사용한다', (tester) async {
+    final auth = _TestAuth();
+    const occurrenceKey = 'o00000000000000000001';
+    final occurrence = _event(
+      id: 'occurrence-row',
+      title: '반복 일정 결과',
+      startAt: DateTime.utc(2026, 8, 11, 1),
+      seriesId: 'series-anchor',
+      occurrenceKey: occurrenceKey,
+      isOccurrence: true,
+    );
+    final repository = _SearchRepository(
+      pages: <EventRangePage>[
+        _page([occurrence]),
+      ],
+    );
+    final controller = _controller(auth, repository);
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(_routedApp(controller, initial: '/search'));
-      await _settleSearch(tester);
-      await tester.tap(find.text('반복 일정 결과'));
-      await tester.pumpAndSettle();
+    await tester.pumpWidget(_routedApp(controller, initial: '/search'));
+    await _settleSearch(tester);
+    await tester.tap(find.text('반복 일정 결과'));
+    await tester.pumpAndSettle();
 
-      expect(controller.selectedDay, DateTime(2026, 8, 11));
-      expect(
-        find.textContaining('/event/series-anchor?occurrence=$occurrenceKey'),
-        findsOneWidget,
-      );
-      expect(find.textContaining('반복 일정 결과'), findsNothing);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(controller.selectedDay, DateTime(2026, 8, 11));
+    expect(
+      find.textContaining('/event/series-anchor?occurrence=$occurrenceKey'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('반복 일정 결과'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets(
-    'large text, keyboard inset and small viewport retain semantics',
-    (tester) async {
-      tester.view.physicalSize = const Size(320, 568);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-      final auth = _TestAuth();
-      final repository = _SearchRepository(
-        pages: <EventRangePage>[_page(const <PlannerEvent>[])],
-      );
-      final controller = _controller(auth, repository);
-      addTearDown(auth.dispose);
+  testWidgets('큰 텍스트, 키보드 인셋, 작은 뷰포트에서도 의미 정보를 유지한다', (tester) async {
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final auth = _TestAuth();
+    final repository = _SearchRepository(
+      pages: <EventRangePage>[_page(const <PlannerEvent>[])],
+    );
+    final controller = _controller(auth, repository);
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(
-        MediaQuery(
-          data: const MediaQueryData(
-            textScaler: TextScaler.linear(2),
-            viewInsets: EdgeInsets.only(bottom: 300),
-          ),
-          child: _screenApp(controller),
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(
+          textScaler: TextScaler.linear(2),
+          viewInsets: EdgeInsets.only(bottom: 300),
         ),
-      );
-      await _settleSearch(tester);
+        child: _screenApp(controller),
+      ),
+    );
+    await _settleSearch(tester);
 
-      expect(find.bySemanticsLabel('일정 검색어'), findsOneWidget);
-      expect(find.text('일정 검색'), findsWidgets);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(find.bySemanticsLabel('일정 검색어'), findsOneWidget);
+    expect(find.text('일정 검색'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
 }

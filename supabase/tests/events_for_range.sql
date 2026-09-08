@@ -1,8 +1,8 @@
--- pgTAP fixture for bounded, keyset-paginated calendar reads.
+-- 범위 제한 키셋 페이지네이션 캘린더 조회용 pgTAP 픽스처다.
 --
--- The fixture intentionally calls the range RPC as the real authenticated
--- role.  Setup writes use the session owner and the complete test is rolled
--- back, so it is safe to run against a disposable local Supabase database.
+-- 픽스처는 의도적으로 실제 authenticated 역할로 범위 RPC를 호출한다. 설정 쓰기는
+-- 세션 소유자를 사용하고 전체 테스트를 롤백하므로 일회용 로컬 Supabase
+-- 데이터베이스에서 안전하게 실행할 수 있다.
 
 begin;
 
@@ -82,8 +82,8 @@ insert into auth.users (
   )
 on conflict (id) do nothing;
 
--- Fixed IDs make the privacy and cross-group checks deterministic.  Group
--- inserts create their owner membership through the existing trigger.
+-- 고정 ID는 개인정보 보호 및 교차 그룹 검사를 결정적으로 만든다. 그룹 삽입은 기존
+-- 트리거를 통해 소유자 멤버십을 만든다.
 insert into public.groups (
   id, owner_id, name, description, timezone, version, deleted_at,
   created_at, updated_at
@@ -122,9 +122,9 @@ insert into public.memberships (
   );
 reset role;
 
--- Every event below is created through the participant-aware RPC so the
--- fixture also proves that this read contract consumes the Feature 5 row
--- shape.  Explicit member lists are sorted/deduped by that RPC.
+-- 아래 모든 일정은 참여자를 인식하는 RPC를 통해 만들므로 이 픽스처는 조회 계약이
+-- 기능 5의 행 형태를 사용하는지도 확인한다. 명시적 멤버 목록은 해당 RPC가 정렬하고
+-- 중복을 제거한다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -181,8 +181,8 @@ from public.create_event_with_members(
   array[(select member_id from events_for_range_fixture)]::uuid[]
 ) as created;
 
--- The 2026 New York spring-forward day is a 23-hour UTC interval.  Its
--- local-midnight endpoints are still accepted when p_view_timezone is NY.
+-- 2026년 뉴욕의 서머타임 시작일은 23시간짜리 UTC 구간이다. p_view_timezone이
+-- 뉴욕이면 해당 현지 자정 끝점도 계속 허용한다.
 update events_for_range_fixture f
 set dst_all_day_event_id = created.id
 from public.create_event_with_members(
@@ -227,8 +227,8 @@ select public.soft_delete_event_if_version(
   (select deleted_event_id from events_for_range_fixture), 1
 );
 
--- The archived group's event is retained by the database but must be invisible
--- to this RPC after archive_group_if_version transitions the group terminal.
+-- 보관된 그룹의 일정은 데이터베이스에 남지만 archive_group_if_version이 그룹을
+-- 종료 상태로 바꾼 뒤에는 이 RPC에 보이지 않아야 한다.
 update events_for_range_fixture f
 set archived_event_id = created.id
 from public.create_event_with_members(
@@ -243,14 +243,14 @@ select public.archive_group_if_version(
 );
 reset role;
 
--- Catalog and permission assertions are run as the migration owner.
+-- 카탈로그 및 권한 검증은 마이그레이션 소유자로 실행한다.
 select ok(
   exists (
     select 1 from pg_catalog.pg_class c
     where c.oid = 'public.events_group_start_id_live_idx'::regclass
       and c.relkind = 'i'
   ),
-  'deterministic live-event keyset index exists'
+  '활성 이벤트용 결정적 키셋 인덱스가 있다'
 );
 select ok(
   exists (
@@ -258,7 +258,7 @@ select ok(
     where c.oid = 'public.events_group_allday_dates_live_idx'::regclass
       and c.relkind = 'i'
   ),
-  'all-day date overlap index exists'
+  '종일 일정의 날짜 겹침 인덱스가 있다'
 );
 select ok(
   has_function_privilege(
@@ -266,7 +266,7 @@ select ok(
     'public.events_for_range(uuid,timestamptz,timestamptz,text,integer,text,uuid)',
     'execute'
   ),
-  'authenticated can execute events_for_range'
+  'authenticated 역할은 events_for_range를 실행할 수 있다'
 );
 select ok(
   not has_function_privilege(
@@ -279,7 +279,7 @@ select ok(
     'public.events_for_range(uuid,timestamptz,timestamptz,text,integer,text,uuid)',
     'execute'
   ),
-  'anon and PUBLIC cannot execute events_for_range'
+  'anon 및 PUBLIC 역할은 events_for_range를 실행할 수 없다'
 );
 select ok(
   exists (
@@ -289,7 +289,7 @@ select ok(
       and p.prosecdef
       and p.proconfig @> array['search_path=""']::text[]
   ),
-  'range function is SECURITY DEFINER with an empty search_path'
+  '범위 함수는 빈 search_path를 사용하는 SECURITY DEFINER 함수다'
 );
 select ok(
   not exists (
@@ -299,7 +299,7 @@ select ok(
       and schemaname = 'public'
       and tablename = 'event_members'
   ),
-  'event_members remains out of the realtime publication'
+  'event_members는 실시간 publication에 포함되지 않는다'
 );
 select ok(
   not exists (
@@ -312,11 +312,105 @@ select ok(
       and schemaname = 'public'
       and tablename = 'events'
   ),
-  'when realtime is configured, the parent events table remains the invalidation signal'
+  '실시간 기능이 구성되면 상위 events 테이블이 계속 무효화 신호 역할을 한다'
 );
 
--- Owner and active member see the same live-group rows, including every
--- Feature 5 event field and a canonical member_ids array.
+select ok(
+  exists (
+    select 1
+    from pg_catalog.pg_constraint c
+    where c.conrelid = 'public.events'::pg_catalog.regclass
+      and c.conname = 'events_finite_time_bounds'
+      and c.contype = 'c'
+      and c.convalidated
+  ),
+  '일정 타임스탬프 유한성 검사는 검증된 상태다'
+);
+
+select throws_ok(
+  $$
+    insert into public.events (
+      group_id, created_by, title, description, starts_at, ends_at, timezone,
+      is_all_day, all_day_start, all_day_end, version, color_value
+    ) values (
+      '00000000-0000-4000-8000-00000000f201',
+      '00000000-0000-4000-8000-00000000f101',
+      'Invalid negative infinity start', '', '-infinity',
+      '2026-03-01T01:00:00Z', 'UTC', false, null, null, 1, 305419896
+    )
+  $$,
+  '23514', null,
+  'starts_at이 -infinity인 일정은 테이블 경계에서 거부된다'
+);
+select throws_ok(
+  $$
+    insert into public.events (
+      group_id, created_by, title, description, starts_at, ends_at, timezone,
+      is_all_day, all_day_start, all_day_end, version, color_value
+    ) values (
+      '00000000-0000-4000-8000-00000000f201',
+      '00000000-0000-4000-8000-00000000f101',
+      'Invalid positive infinity end', '', '2026-03-01T00:00:00Z',
+      'infinity', 'UTC', false, null, null, 1, 305419896
+    )
+  $$,
+  '23514', null,
+  'ends_at이 infinity인 일정은 테이블 경계에서 거부된다'
+);
+select throws_ok(
+  $$
+    insert into public.events (
+      group_id, created_by, title, description, starts_at, ends_at, timezone,
+      is_all_day, all_day_start, all_day_end, version, color_value,
+      created_at, updated_at
+    ) values (
+      '00000000-0000-4000-8000-00000000f201',
+      '00000000-0000-4000-8000-00000000f101',
+      'Invalid negative infinity created', '', '2026-03-01T00:00:00Z',
+      '2026-03-01T01:00:00Z', 'UTC', false, null, null, 1, 305419896,
+      '-infinity', '2026-01-01T00:00:00Z'
+    )
+  $$,
+  '23514', null,
+  'created_at이 -infinity인 일정은 테이블 경계에서 거부된다'
+);
+select throws_ok(
+  $$
+    insert into public.events (
+      group_id, created_by, title, description, starts_at, ends_at, timezone,
+      is_all_day, all_day_start, all_day_end, version, color_value,
+      created_at, updated_at
+    ) values (
+      '00000000-0000-4000-8000-00000000f201',
+      '00000000-0000-4000-8000-00000000f101',
+      'Invalid positive infinity updated', '', '2026-03-01T00:00:00Z',
+      '2026-03-01T01:00:00Z', 'UTC', false, null, null, 1, 305419896,
+      '2026-01-01T00:00:00Z', 'infinity'
+    )
+  $$,
+  '23514', null,
+  'updated_at이 infinity인 일정은 테이블 경계에서 거부된다'
+);
+select throws_ok(
+  $$
+    insert into public.events (
+      group_id, created_by, title, description, starts_at, ends_at, timezone,
+      is_all_day, all_day_start, all_day_end, version, color_value,
+      deleted_at, created_at, updated_at
+    ) values (
+      '00000000-0000-4000-8000-00000000f201',
+      '00000000-0000-4000-8000-00000000f101',
+      'Invalid positive infinity deleted', '', '2026-03-01T00:00:00Z',
+      '2026-03-01T01:00:00Z', 'UTC', false, null, null, 1, 305419896,
+      'infinity', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+    )
+  $$,
+  '23514', null,
+  'deleted_at이 infinity인 일정은 테이블 경계에서 거부된다'
+);
+
+-- 소유자와 활성 멤버는 기능 5의 모든 일정 필드와 정규 member_ids 배열을 포함한
+-- 동일한 운영 그룹 행을 본다.
 select set_config(
   'request.jwt.claim.sub',
   (select owner_id::text from events_for_range_fixture),
@@ -333,7 +427,7 @@ select ok(
   (select canonical_cursor from events_for_range_fixture) is not null
     and (select canonical_cursor from events_for_range_fixture) !~ '='
     and (select canonical_cursor from events_for_range_fixture) ~ '^[A-Za-z0-9_-]+$',
-  'a valid canonical cursor is emitted as unpadded URL-safe base64'
+  '유효한 정규 커서는 패딩 없는 URL 안전 base64로 반환된다'
 );
 select is(
   jsonb_array_length((public.events_for_range(
@@ -342,7 +436,7 @@ select is(
     'UTC', 1, (select canonical_cursor from events_for_range_fixture), null
   )->'events')),
   1,
-  'a canonical cursor emitted by the RPC is accepted for the next page'
+  'RPC가 반환한 정규 커서는 다음 페이지 요청에 허용된다'
 );
 select is(
   jsonb_array_length((public.events_for_range(
@@ -351,7 +445,7 @@ select is(
     'UTC', 100, null, null
   )->'events')),
   2,
-  'owner sees the overlap and all-day rows in the exact half-open day'
+  '소유자는 정확한 반개방 일 범위에서 겹치는 일정과 종일 일정 행을 볼 수 있다'
 );
 select ok(
   not exists (
@@ -364,7 +458,7 @@ select ok(
     where event_row ? 'deleted_at'
       and event_row->>'deleted_at' is not null
   ),
-  'soft-deleted events are excluded from the live range'
+  '소프트 삭제된 이벤트는 활성 범위에서 제외된다'
 );
 select ok(
   exists (
@@ -379,7 +473,7 @@ select ok(
       and event_row ? 'color_value'
       and event_row ? 'version'
   ),
-  'range rows include the complete event shape and member_ids'
+  '범위 행에는 완전한 이벤트 구조와 member_ids가 포함된다'
 );
 select is(
   (select public.events_for_range(
@@ -388,7 +482,7 @@ select is(
     'UTC', 100, null, null
   )->'events'->0->>'title'),
   'Range overlap',
-  'timed and all-day rows use deterministic starts_at,id ordering'
+  '시간 지정 일정과 종일 일정 행은 결정적인 starts_at, id 순서를 사용한다'
 );
 
 select set_config(
@@ -403,11 +497,11 @@ select is(
     null, 100, null, null
   )->'events')),
   2,
-  'active ordinary members can read the live group with its locked timezone'
+  '활성 일반 구성원은 고정된 시간대와 함께 활성 그룹을 조회할 수 있다'
 );
 
--- Exact half-open timed/date boundaries: an event ending at the start or
--- starting at the end is excluded, while the spanning row is retained.
+-- 시간/날짜의 정확한 반열린 경계다. 시작점에 끝나거나 끝점에 시작하는 일정은
+-- 제외하고 전체에 걸친 행은 유지한다.
 select is(
   jsonb_array_length((public.events_for_range(
     (select group_id from events_for_range_fixture),
@@ -415,7 +509,7 @@ select is(
     'UTC', 100, null, null
   )->'events')),
   2,
-  'the range is half-open at both timed boundaries'
+  '범위는 시간 경계에서 반개방 구간으로 동작한다'
 );
 select is(
   jsonb_array_length((public.events_for_range(
@@ -424,12 +518,11 @@ select is(
     'UTC', 100, null, null
   )->'events')),
   0,
-  'an all-day event ending at range_start is excluded'
+  'range_start에 끝나는 종일 일정은 제외된다'
 );
 
--- Participant filtering is server-side and requires an active target in this
--- same group.  It never turns an inactive, outsider, or cross-group UUID into
--- a distinguishable list response.
+-- 참여자 필터링은 서버 측에서 수행하며 같은 그룹의 활성 대상이 필요하다. 비활성,
+-- 외부 또는 다른 그룹 UUID를 구분 가능한 목록 응답으로 바꾸지 않는다.
 select is(
   jsonb_array_length((public.events_for_range(
     (select group_id from events_for_range_fixture),
@@ -437,7 +530,7 @@ select is(
     'UTC', 100, null, (select member_id from events_for_range_fixture)
   )->'events')),
   1,
-  'participant filter returns only rows assigned to the active target'
+  '참여자 필터는 활성 대상에게 할당된 행만 반환한다'
 );
 select is(
   (public.events_for_range(
@@ -446,7 +539,7 @@ select is(
     'UTC', 100, null, (select member_id from events_for_range_fixture)
   )->'events'->0->>'id'),
   (select assigned_event_id::text from events_for_range_fixture),
-  'participant filtering does not return an unassigned owner-only event'
+  '참여자 필터는 대상에게 할당되지 않은 소유자 전용 이벤트를 반환하지 않는다'
 );
 select throws_ok(
   format(
@@ -457,7 +550,7 @@ select throws_ok(
   ),
   '42501',
   'participant is not an active member of this group',
-  'inactive participant targets are rejected without a list leak'
+  '비활성 참여자 대상은 목록을 노출하지 않고 거부된다'
 );
 select throws_ok(
   format(
@@ -468,7 +561,7 @@ select throws_ok(
   ),
   '42501',
   'participant is not an active member of this group',
-  'outsider participant targets are rejected without a list leak'
+  '외부 사용자 참여자 대상은 목록을 노출하지 않고 거부된다'
 );
 select throws_ok(
   format(
@@ -479,11 +572,11 @@ select throws_ok(
   ),
   '42501',
   'participant is not an active member of this group',
-  'cross-group participant targets are rejected without a status leak'
+  '다른 그룹의 참여자 대상은 상태를 노출하지 않고 거부된다'
 );
 
--- Outsiders, inactive members, missing groups, and archived groups all fail
--- closed with the same group-unavailable code/message.
+-- 외부 사용자, 비활성 멤버, 없는 그룹 및 보관된 그룹은 모두 같은 그룹 사용 불가
+-- 코드/메시지로 실패 시 차단한다.
 select set_config(
   'request.jwt.claim.sub',
   (select outsider_id::text from events_for_range_fixture),
@@ -496,7 +589,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '42501', 'group is unavailable',
-  'an outsider cannot read group event ranges'
+  '외부 사용자는 그룹 이벤트 범위를 조회할 수 없다'
 );
 select set_config(
   'request.jwt.claim.sub',
@@ -510,7 +603,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '42501', 'group is unavailable',
-  'an inactive member cannot read group event ranges'
+  '비활성 구성원은 그룹 이벤트 범위를 조회할 수 없다'
 );
 select set_config(
   'request.jwt.claim.sub',
@@ -524,7 +617,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '42501', 'group is unavailable',
-  'archived groups fail closed without returning historical rows'
+  '보관된 그룹은 과거 행을 반환하지 않고 접근을 차단한다'
 );
 select throws_ok(
   format(
@@ -533,12 +626,11 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '42501', 'group is unavailable',
-  'missing groups fail closed with the same authorization result'
+  '존재하지 않는 그룹도 같은 권한 결과로 접근을 차단한다'
 );
 
--- Date/time validation is strict and fail-closed.  Local date ranges are
--- measured after timezone conversion, so a fall-back/short UTC interval is
--- still one valid calendar day.
+-- 날짜/시간 검증은 엄격하며 실패 시 차단한다. 현지 날짜 범위는 시간대 변환 뒤에
+-- 측정하므로 서머타임 종료/짧은 UTC 구간도 유효한 달력 날짜 하루다.
 select throws_ok(
   format(
     'select public.events_for_range(%L::uuid, %L::timestamptz, %L::timestamptz, ''UTC'')',
@@ -546,7 +638,7 @@ select throws_ok(
     '2026-03-01T01:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '22023', 'range endpoints must be local midnight in the view timezone',
-  'non-midnight UTC endpoints are rejected'
+  'UTC 자정이 아닌 끝점은 거부된다'
 );
 select is(
   jsonb_array_length((public.events_for_range(
@@ -555,7 +647,7 @@ select is(
     'America/New_York', 100, null, null
   )->'events')),
   1,
-  'DST local-midnight validation accepts the 23-hour UTC day'
+  'DST 현지 자정 검증은 23시간짜리 UTC 날짜를 허용한다'
 );
 select throws_ok(
   format(
@@ -564,7 +656,7 @@ select throws_ok(
     '2025-01-01T00:00:00Z', '2026-01-03T00:00:00Z'
   ),
   '22023', 'range must not exceed 366 calendar days',
-  'ranges over 366 local calendar days are rejected'
+  '현지 달력 기준 366일을 넘는 범위는 거부된다'
 );
 select throws_ok(
   format(
@@ -573,7 +665,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '22023', 'limit must be between 1 and 200',
-  'zero limit is rejected'
+  '0인 제한값은 거부된다'
 );
 select throws_ok(
   format(
@@ -582,7 +674,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z'
   ),
   '22023', 'limit must be between 1 and 200',
-  'limit above the bounded maximum is rejected'
+  '정해진 최대값을 넘는 제한값은 거부된다'
 );
 select throws_ok(
   format(
@@ -591,7 +683,7 @@ select throws_ok(
     '2026-03-01T00:00:00Z', '2026-03-02T00:00:00Z', 'not-a-cursor!'
   ),
   '22023', 'cursor must be an unpadded URL-safe base64 event cursor',
-  'malformed cursors are rejected before querying rows'
+  '잘못된 커서는 행을 조회하기 전에 거부된다'
 );
 select throws_ok(
   format(
@@ -601,7 +693,7 @@ select throws_ok(
     repeat('A', 4097)
   ),
   '22023', 'cursor must be an unpadded URL-safe base64 event cursor',
-  'oversized cursors are rejected before base64 decoding'
+  '너무 긴 커서는 base64 디코딩 전에 거부된다'
 );
 select throws_ok(
   format(
@@ -611,7 +703,7 @@ select throws_ok(
     rtrim(translate(replace(encode(convert_to('[]', 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor has an invalid shape',
-  'a non-object cursor payload is rejected'
+  '객체가 아닌 커서 페이로드는 거부된다'
 );
 select throws_ok(
   format(
@@ -626,7 +718,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor version is unsupported',
-  'a cursor from another version is rejected'
+  '다른 버전의 커서는 거부된다'
 );
 select throws_ok(
   format(
@@ -641,7 +733,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor has an invalid shape',
-  'a string cursor version is rejected'
+  '문자열 형식의 커서 버전은 거부된다'
 );
 select throws_ok(
   format(
@@ -656,7 +748,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor has an invalid shape',
-  'a floating-point cursor version is rejected'
+  '부동소수점 형식의 커서 버전은 거부된다'
 );
 select throws_ok(
   format(
@@ -671,7 +763,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor timestamp must include an explicit timezone',
-  'a timezone-less cursor timestamp is rejected'
+  '시간대가 없는 커서 타임스탬프는 거부된다'
 );
 select throws_ok(
   format(
@@ -686,7 +778,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor timestamp is invalid',
-  'cursor timestamps require seconds'
+  '커서 타임스탬프에는 초가 필요하다'
 );
 select throws_ok(
   format(
@@ -701,7 +793,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor timestamp is invalid',
-  'cursor fractions longer than six digits are rejected'
+  '소수 부분이 여섯 자리를 넘는 커서는 거부된다'
 );
 select throws_ok(
   format(
@@ -716,7 +808,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor timestamp is invalid',
-  'impossible cursor calendar dates are rejected'
+  '존재할 수 없는 달력 날짜를 담은 커서는 거부된다'
 );
 select throws_ok(
   format(
@@ -731,7 +823,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor timestamp is invalid',
-  'invalid cursor clock components are rejected'
+  '잘못된 시각 요소를 담은 커서는 거부된다'
 );
 select throws_ok(
   format(
@@ -746,7 +838,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor timestamp is invalid',
-  'invalid cursor offsets are rejected'
+  '잘못된 오프셋을 담은 커서는 거부된다'
 );
 do $$
 declare
@@ -767,14 +859,14 @@ begin
       null
     );
     if jsonb_array_length(v_payload->'events') <> 0 then
-      raise exception 'valid fraction cursor unexpectedly returned rows';
+      raise exception '유효한 소수 커서가 예기치 않게 행을 반환했습니다';
     end if;
   end loop;
 end;
 $$;
 select ok(
   true,
-  'valid cursor fractions from one through six digits are accepted'
+  '한 자리부터 여섯 자리까지의 유효한 커서 소수 부분은 허용된다'
 );
 select is(
   jsonb_array_length((public.events_for_range(
@@ -789,7 +881,7 @@ select is(
     null
   )->'events')),
   0,
-  'valid six-digit cursor fractions with an explicit offset are accepted'
+  '명시적 오프셋이 있는 유효한 여섯 자리 커서 소수 부분은 허용된다'
 );
 select throws_ok(
   format(
@@ -805,7 +897,7 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor has an invalid shape',
-  'unknown cursor keys are rejected'
+  '알 수 없는 커서 키는 거부된다'
 );
 select throws_ok(
   format(
@@ -820,12 +912,12 @@ select throws_ok(
       )::text, 'UTF8'), 'base64'), E'\n', ''), '+/', '-_'), '=')
   ),
   '22023', 'cursor timestamp must include an explicit timezone',
-  'non-finite cursor tuples are rejected before timestamp casting'
+  '유한하지 않은 커서 튜플은 타임스탬프 변환 전에 거부된다'
 );
 
--- A cursor tuple after range_end is valid for the tuple-only contract: the
--- all-day row's stored starts_at is expressed in its own timezone.  It simply
--- yields an empty continuation page rather than leaking or failing.
+-- range_end 뒤의 커서 튜플도 튜플 전용 계약에서는 유효하다. 종일 행에 저장된
+-- starts_at은 자체 시간대로 표현된다. 정보를 노출하거나 실패하지 않고 단순히 빈
+-- 다음 페이지를 반환한다.
 select is(
   jsonb_array_length((public.events_for_range(
     (select group_id from events_for_range_fixture),
@@ -839,12 +931,12 @@ select is(
     null
   )->'events')),
   0,
-  'a finite tuple after range_end is accepted as an empty continuation'
+  'range_end 뒤의 유한한 튜플은 빈 연속 페이지로 허용된다'
 );
 
--- Keyset pagination over 1001 same-start events must have no duplicates or
--- omissions.  Direct setup INSERTs exercise the legacy event seed trigger;
--- each event remains at its initial version and gets exactly its creator.
+-- 시작 시각이 같은 일정 1,001개의 키셋 페이지네이션에는 중복이나 누락이 없어야
+-- 한다. 직접 설정 INSERT로 이전 일정 초기화 트리거를 실행한다. 각 일정은 초기
+-- 버전을 유지하고 작성자만 정확히 할당받는다.
 reset role;
 create temporary table range_bulk_events (
   event_id uuid primary key
@@ -871,7 +963,7 @@ where group_id = (select group_id from events_for_range_fixture)
 select is(
   (select count(*)::integer from range_bulk_events),
   1001,
-  'the bulk pagination fixture contains 1001 events'
+  '대량 페이지네이션 픽스처에는 이벤트 1001개가 있다'
 );
 select ok(
   not exists (
@@ -879,7 +971,7 @@ select ok(
     where e.id in (select event_id from range_bulk_events)
       and e.version <> 1
   ),
-  'legacy event seed does not bump the initial bulk event versions'
+  '레거시 이벤트 초기화는 대량 이벤트의 초기 버전을 증가시키지 않는다'
 );
 select ok(
   not exists (
@@ -889,7 +981,7 @@ select ok(
     group by em.event_id
     having count(*) <> 1
   ),
-  'legacy bulk inserts seed exactly one creator participant each'
+  '레거시 대량 INSERT는 이벤트마다 생성자 참여자 한 명을 정확히 만든다'
 );
 
 set local role authenticated;
@@ -923,11 +1015,11 @@ begin
       exit;
     end if;
     if v_payload->>'next_cursor' is null or v_inserted = 0 then
-      raise exception 'pagination did not advance';
+      raise exception '페이지네이션이 진행되지 않았습니다';
     end if;
     v_cursor := v_payload->>'next_cursor';
     if v_page > 10 then
-      raise exception 'pagination exceeded expected page bound';
+      raise exception '페이지네이션이 예상 페이지 범위를 초과했습니다';
     end if;
   end loop;
 end;
@@ -935,17 +1027,17 @@ $$;
 select is(
   (select count(*)::integer from range_seen),
   1001,
-  '1001 events paginate without duplicate rows or omissions'
+  '이벤트 1001개가 중복 행이나 누락 없이 페이지로 나뉜다'
 );
 select is(
   (select count(*)::integer from range_bulk_events b
    where not exists (select 1 from range_seen s where s.event_id = b.event_id)),
   0,
-  'every bulk event appears in exactly one keyset page'
+  '모든 대량 이벤트가 정확히 하나의 키셋 페이지에 나타난다'
 );
 select ok(
   (select count(*) from range_seen where first_page = 6) = 1,
-  'the final one-row page is preserved after five full pages'
+  '다섯 개의 가득 찬 페이지 뒤에 마지막 한 행짜리 페이지가 유지된다'
 );
 
 select * from finish();

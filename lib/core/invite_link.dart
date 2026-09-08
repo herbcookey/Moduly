@@ -3,15 +3,14 @@ import 'package:flutter/foundation.dart';
 import 'config/app_config.dart';
 import 'invite_code_utils.dart';
 
-/// The two link families understood by the app.  A web link is always built
-/// from the configured application origin; the custom native scheme is only
-/// accepted for the `invite` host.
+/// 앱이 인식하는 두 링크 유형이다. 웹 링크는 항상 설정된 앱 출처에서 만들고,
+/// 사용자 정의 네이티브 스킴은 `invite` 호스트에만 허용한다.
 enum InviteLinkSource { web, native }
 
 final RegExp _invalidUriCharacterPattern = RegExp(r'[\s\u0000-\u001f\u007f]');
 
-/// Deliberately generic parser error.  A bearer token must never be echoed in
-/// an exception, log, analytics event, or URL query.
+/// 의도적으로 일반화한 파서 오류다. 전달자 토큰을 예외, 로그, 분석 이벤트,
+/// URL 쿼리에 절대 되풀이해서는 안 된다.
 class InviteLinkFormatException implements Exception {
   const InviteLinkFormatException([this.message = '초대 링크를 확인해 주세요.']);
 
@@ -21,8 +20,8 @@ class InviteLinkFormatException implements Exception {
   String toString() => message;
 }
 
-/// Configuration error used by share-link callers.  The parser uses the same
-/// validation result but exposes only a stable, token-free message.
+/// 공유 링크 호출자가 사용하는 설정 오류다. 파서도 같은 검증 결과를 사용하지만
+/// 토큰이 없는 고정 메시지만 노출한다.
 class InviteLinkConfigurationException implements Exception {
   const InviteLinkConfigurationException([
     this.message = '초대 링크 주소 설정을 확인해 주세요.',
@@ -38,8 +37,8 @@ class InviteLinkConfigurationException implements Exception {
 class ParsedInviteLink {
   const ParsedInviteLink({required this.token, required this.source});
 
-  /// Canonical short-code (uppercase) or legacy token (lowercase).  The raw
-  /// URI and any display form are intentionally not retained.
+  /// 표준 단축 코드(대문자) 또는 레거시 토큰(소문자)이다. 원시 URI와 모든 표시
+  /// 형식은 의도적으로 보관하지 않는다.
   final String token;
   final InviteLinkSource source;
 
@@ -68,15 +67,15 @@ class InviteBaseUrlValidation {
   bool get isValid => uri != null;
 }
 
-/// Validates and canonicalizes an application origin used for invite links.
+/// 초대 링크에 사용할 앱 출처를 검증하고 표준화한다.
 ///
-/// Release builds are required to use HTTPS.  Tests/debug builds may opt into
-/// HTTP only for loopback hosts; arbitrary plaintext origins remain disabled.
+/// 릴리스 빌드는 반드시 HTTPS를 사용해야 한다. 테스트/디버그 빌드는 루프백
+/// 호스트에 한해서만 HTTP를 선택할 수 있으며, 임의의 평문 출처는 계속 금지한다.
 InviteBaseUrlValidation validateInviteBaseUrl(
   String raw, {
-  // The build mode is the safe default. Callers can still inject a policy in
-  // tests, but a production caller cannot accidentally inherit debug's
-  // localhost-HTTP allowance by omitting this argument.
+  // 빌드 모드가 안전한 기본값이다. 테스트에서는 호출자가 정책을 주입할 수 있지만,
+  // 프로덕션 호출자가 이 인수를 생략해 디버그의 로컬호스트 HTTP 허용 정책을
+  // 실수로 물려받을 수는 없다.
   bool isRelease = kReleaseMode,
   bool allowLocalhostHttp = true,
 }) {
@@ -106,8 +105,8 @@ InviteBaseUrlValidation validateInviteBaseUrl(
   if (uri.hasQuery || uri.hasFragment || uri.path.contains('%')) {
     return const InviteBaseUrlValidation.invalid('초대 링크 주소 설정을 확인해 주세요.');
   }
-  // A base path is supported for deployments below a web sub-path, but it
-  // must itself be canonical so builder/parser matching remains exact.
+  // 웹 하위 경로에 배포할 수 있도록 기본 경로를 지원하지만, 빌더와 파서가 정확히
+  // 일치하도록 기본 경로 자체도 표준 형식이어야 한다.
   if (uri.pathSegments.any(
     (segment) =>
         segment.isEmpty ||
@@ -127,16 +126,16 @@ InviteBaseUrlValidation validateInviteBaseUrl(
     port: uri.hasPort ? uri.port : null,
     path: canonicalPath,
   );
-  // Keep builder/parser round-tripping byte-for-byte predictable.  A
-  // non-ASCII path would be percent-encoded by [Uri] and subsequently be
-  // rejected as an encoded path segment at intake.
+  // 빌더와 파서의 왕복 변환 결과를 바이트 단위까지 예측 가능하게 유지한다.
+  // 비 ASCII 경로는 [Uri]에서 퍼센트 인코딩되고, 입력 시 인코딩된 경로
+  // 조각으로 간주되어 거부된다.
   if (canonical.toString().contains('%')) {
     return const InviteBaseUrlValidation.invalid('초대 링크 주소 설정을 확인해 주세요.');
   }
   return InviteBaseUrlValidation.valid(canonical);
 }
 
-/// Strict parser/builder for bearer invite links.
+/// 전달자 초대 링크용 엄격한 파서/빌더다.
 class InviteLinkParser {
   const InviteLinkParser._();
 
@@ -192,8 +191,8 @@ class InviteLinkParser {
       }
       final token = normalizeStrictInviteToken(pathSegments.last);
       if (token == null) return null;
-      // [currentOrigin] is intentionally advisory: when supplied, it must
-      // still resolve to the same configured origin, never broaden it.
+      // [currentOrigin]은 의도적으로 참고만 한다. 값이 제공되더라도 설정된 것과
+      // 동일한 출처로 해석되어야 하며 허용 범위를 넓혀서는 안 된다.
       if (currentOrigin != null &&
           (currentOrigin.scheme.toLowerCase() != base.scheme ||
               currentOrigin.host.toLowerCase() != base.host.toLowerCase() ||
@@ -250,8 +249,8 @@ class InviteLinkParser {
   }
 }
 
-/// Top-level aliases make the pure parser convenient for tests and platform
-/// intake code without requiring callers to retain a parser instance.
+/// 최상위 별칭을 제공하여 호출자가 파서 인스턴스를 보관하지 않아도 테스트와
+/// 플랫폼 입력 코드에서 순수 파서를 편리하게 사용할 수 있게 한다.
 ParsedInviteLink? tryParseInviteLink(
   Uri uri, {
   required AppConfig config,

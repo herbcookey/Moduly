@@ -3,8 +3,8 @@ import 'package:flutter/foundation.dart';
 import '../models/app_models.dart';
 import 'timezone_utils.dart';
 
-/// One materialized projection of a recurring series.  The projection keeps
-/// its anchor event id while exposing a globally stable ordinal key.
+/// 반복 시리즈에서 구체화된 하나의 프로젝션이다. 기준 일정 ID는 유지하면서
+/// 전역적으로 안정적인 순번 키를 노출한다.
 @immutable
 class RecurrenceOccurrence {
   const RecurrenceOccurrence({required this.event, required this.ordinal});
@@ -13,10 +13,32 @@ class RecurrenceOccurrence {
   final int ordinal;
 }
 
-/// Expands a series over a bounded calendar range.  The seek calculations are
-/// arithmetic (date/month/week offsets) so a series anchored years ago does
-/// not require walking every historical occurrence.  [maxOccurrences] is a
-/// defensive page-independent cap for malformed/never-ending rules.
+/// 반복 규칙의 순번 0이 사용하는 첫 현지 날짜다. 월간 규칙에서
+/// 기준 달의 대상 날짜가 이미 지났으면 다음 달의 첫 유효한 날짜를 쓴다.
+/// [RecurrenceRule.interval]은 순번 0을 더 늦추지 않고 그 뒤 발생분 사이에만
+/// 적용된다. 반환값은 시간대 시각이 아닌 날짜 튜플이다.
+DateTime recurrenceFirstOccurrenceDate(DateTime anchor, RecurrenceRule rule) {
+  final anchorDate = dateOnly(anchor);
+  if (rule.frequency != RecurrenceFrequency.monthly) return anchorDate;
+
+  final anchorWall = DateTime.utc(
+    anchorDate.year,
+    anchorDate.month,
+    anchorDate.day,
+  );
+  final firstMonth = _firstMonthlyOccurrenceMonth(anchorWall, rule.monthlyDay!);
+  final firstWall = _monthlyOccurrenceWall(
+    anchorWall,
+    rule.monthlyDay!,
+    firstMonth,
+  );
+  return DateTime(firstWall.year, firstWall.month, firstWall.day);
+}
+
+/// 제한된 달력 범위에 걸쳐 시리즈를 확장한다. 탐색 계산은 날짜/월/주 오프셋을
+/// 산술적으로 구하므로 수년 전에 시작한 시리즈의 모든 과거 발생분을 순회할 필요가
+/// 없다. [maxOccurrences]는 잘못되었거나 끝나지 않는 규칙에 적용하는 방어적인
+/// 페이지 독립 상한이다.
 List<PlannerEvent> expandRecurringEvent(
   PlannerEvent series,
   EventRange range, {
@@ -66,9 +88,8 @@ List<PlannerEvent> expandRecurringEvent(
           ? series.occurrenceVersion
           : 0,
       isOccurrence: true,
-      // Keep the model's date-only metadata source-compatible (the metadata
-      // has no timezone semantics), while all arithmetic above remains on
-      // UTC-tagged civil tuples.
+      // 모델의 날짜 전용 메타데이터는 소스 호환성을 유지한다. 이 메타데이터에는 시간대
+      // 의미가 없지만, 위의 모든 계산은 UTC 태그가 붙은 민간력 튜플로 수행한다.
       allDayStartDate: series.allDay ? dateOnly(wallStart) : null,
       allDayEndDate: series.allDay ? dateOnly(wallEnd) : null,
       clearAllDayDates: !series.allDay,
@@ -85,7 +106,7 @@ List<PlannerEvent> expandRecurringEvent(
       final dayDelta = firstDate.difference(anchorDate).inDays;
       var index = dayDelta <= 0 ? 0 : (dayDelta / rule.interval).floor();
       if (index < 0) index = 0;
-      // Include one interval before the arithmetic seek for long events.
+      // 긴 일정에 대비해 산술 탐색 지점보다 한 간격 앞도 포함한다.
       if (index > 0 &&
           anchorDate
               .add(Duration(days: index * rule.interval))
@@ -110,8 +131,8 @@ List<PlannerEvent> expandRecurringEvent(
         );
         if (wall.isAfter(rangeEndWall) &&
             !wall.add(wallDuration).isBefore(rangeStartWall)) {
-          // A long event may still overlap; continue one candidate and then
-          // stop once its start is beyond the end boundary.
+          // 긴 일정은 여전히 겹칠 수 있으므로 후보 하나를 더 확인하고, 시작 시각이
+          // 종료 경계를 넘으면 중단한다.
           addCandidate(wall, index);
           break;
         }
@@ -149,19 +170,17 @@ List<PlannerEvent> expandRecurringEvent(
   return List<PlannerEvent>.unmodifiable(output);
 }
 
-/// Arithmetic point lookup used by deep links.  It computes the requested
-/// ordinal directly and therefore remains correct for a series anchored far in
-/// the past (or an ordinal well beyond the bounded page expansion cap).
+/// 딥 링크에서 사용하는 산술 지점 조회다. 요청된 순번을 직접 계산하므로 아주
+/// 오래전에 시작한 시리즈나 제한된 페이지 확장 상한을 훨씬 넘는 순번에도 정확하다.
 PlannerEvent? recurringOccurrenceAtIndex(
   PlannerEvent series,
   int ordinal, {
   int ordinalOffset = 0,
 }) {
-  // PostgreSQL's materializer intentionally bounds date arithmetic to a
-  // signed int32 offset before constructing a date. A key can still be a
-  // valid signed-bigint occurrence identity, so point reads must treat an
-  // ordinal outside this arithmetic domain as a missing occurrence instead
-  // of allowing Duration/DateTime to throw on an enormous seek.
+  // PostgreSQL 구체화기는 날짜를 만들기 전에 날짜 계산을 의도적으로 부호 있는 int32
+  // 오프셋으로 제한한다. 키 자체는 유효한 부호 있는 bigint 발생 식별자일 수 있으므로,
+  // 지점 조회에서는 이 계산 범위 밖의 순번을 누락된 발생분으로 처리해야 한다.
+  // 거대한 탐색값 때문에 Duration/DateTime이 예외를 던지게 해서는 안 된다.
   if (ordinal < 0 ||
       ordinalOffset < 0 ||
       ordinal > 2147483647 ||
@@ -247,24 +266,14 @@ PlannerEvent? _recurringOccurrenceAtIndex(
         anchorWall.microsecond,
       );
     case RecurrenceFrequency.monthly:
-      final monthValue =
-          anchorWall.year * 12 +
-          anchorWall.month -
-          1 +
-          localOrdinal * rule.interval;
-      final year = monthValue ~/ 12;
-      final month = monthValue % 12 + 1;
-      final lastDay = DateTime.utc(year, month + 1, 0).day;
-      final day = rule.monthlyDay! > lastDay ? lastDay : rule.monthlyDay!;
-      wall = DateTime.utc(
-        year,
-        month,
-        day,
-        anchorWall.hour,
-        anchorWall.minute,
-        anchorWall.second,
-        anchorWall.millisecond,
-        anchorWall.microsecond,
+      final firstMonth = _firstMonthlyOccurrenceMonth(
+        anchorWall,
+        rule.monthlyDay!,
+      );
+      wall = _monthlyOccurrenceWall(
+        anchorWall,
+        rule.monthlyDay!,
+        firstMonth + localOrdinal * rule.interval,
       );
   }
   if (wall.isBefore(anchorWall) || !_withinRule(rule, wall, localOrdinal)) {
@@ -386,29 +395,20 @@ void _expandMonthly({
   required int maxOccurrences,
 }) {
   final day = rule.monthlyDay!;
-  final anchorMonth = anchorWall.year * 12 + anchorWall.month - 1;
+  final firstMonth = _firstMonthlyOccurrenceMonth(anchorWall, day);
   final seekDate = civilDateOnly(
     rangeStartWall,
   ).subtract(Duration(days: _wallDurationDays(wallDuration)));
   final seekMonth = seekDate.year * 12 + seekDate.month - 1;
-  var index = seekMonth <= anchorMonth
+  var index = seekMonth <= firstMonth
       ? 0
-      : ((seekMonth - anchorMonth) / rule.interval).floor();
+      : ((seekMonth - firstMonth) / rule.interval).floor();
   if (index > 0) index--;
   for (var generated = 0; generated < maxOccurrences; generated++, index++) {
-    final monthValue = anchorMonth + index * rule.interval;
-    final year = monthValue ~/ 12;
-    final month = monthValue % 12 + 1;
-    final lastDay = DateTime.utc(year, month + 1, 0).day;
-    final wall = DateTime.utc(
-      year,
-      month,
-      day > lastDay ? lastDay : day,
-      anchorWall.hour,
-      anchorWall.minute,
-      anchorWall.second,
-      anchorWall.millisecond,
-      anchorWall.microsecond,
+    final wall = _monthlyOccurrenceWall(
+      anchorWall,
+      day,
+      firstMonth + index * rule.interval,
     );
     if (wall.isAfter(rangeEndWall)) break;
     if (wall.isBefore(anchorWall)) continue;
@@ -417,6 +417,32 @@ void _expandMonthly({
       break;
     }
   }
+}
+
+int _firstMonthlyOccurrenceMonth(DateTime anchorWall, int monthlyDay) {
+  final anchorMonth = anchorWall.year * 12 + anchorWall.month - 1;
+  final candidate = _monthlyOccurrenceWall(anchorWall, monthlyDay, anchorMonth);
+  return candidate.isBefore(anchorWall) ? anchorMonth + 1 : anchorMonth;
+}
+
+DateTime _monthlyOccurrenceWall(
+  DateTime anchorWall,
+  int monthlyDay,
+  int monthValue,
+) {
+  final year = monthValue ~/ 12;
+  final month = monthValue % 12 + 1;
+  final lastDay = DateTime.utc(year, month + 1, 0).day;
+  return DateTime.utc(
+    year,
+    month,
+    monthlyDay > lastDay ? lastDay : monthlyDay,
+    anchorWall.hour,
+    anchorWall.minute,
+    anchorWall.second,
+    anchorWall.millisecond,
+    anchorWall.microsecond,
+  );
 }
 
 int _compareOccurrences(PlannerEvent left, PlannerEvent right) {

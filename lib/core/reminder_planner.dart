@@ -5,7 +5,7 @@ import '../models/notification_models.dart';
 import 'notification_identity.dart';
 import 'timezone_utils.dart';
 
-/// One bounded reminder ready for ID allocation and a native scheduler.
+/// ID 할당과 네이티브 스케줄러 전달을 준비한 범위 제한 알림 하나다.
 @immutable
 class PlannedReminder {
   const PlannedReminder({
@@ -37,10 +37,9 @@ class PlannedReminder {
   );
 }
 
-/// Pure local parity planner.  It accepts already-authorized event rows and
-/// never performs an unbounded repository read.  The Supabase candidate RPC
-/// can feed [fromCandidates] when the server has materialized the same
-/// occurrence/fire-at semantics.
+/// 순수 로컬 동등성 플래너다. 이미 권한이 확인된 일정 행을 받아들이며 제한 없는
+/// 저장소 읽기는 절대 수행하지 않는다. 서버에서 같은 발생 항목/알림 시각 의미를
+/// 구체화했다면 Supabase 후보 RPC가 [fromCandidates]에 값을 제공할 수 있다.
 class ReminderPlanner {
   const ReminderPlanner._();
 
@@ -63,9 +62,9 @@ class ReminderPlanner {
           !preference.enabled) {
         continue;
       }
-      // A duplicate preference is ambiguous and must not cause duplicate
-      // scheduling. Keep the highest version; equal versions use the stable
-      // lexical id so local and remote adapters agree.
+      // 중복 설정은 모호하므로 알림을 중복 예약해서는 안 된다. 가장 높은 버전을
+      // 유지하고 버전이 같으면 로컬/원격 어댑터가 일치하도록 안정적인 사전식
+      // ID를 사용한다.
       final previous = prefByEvent[preference.eventId];
       if (previous == null ||
           preference.version > previous.version ||
@@ -121,9 +120,9 @@ class ReminderPlanner {
     return List<PlannedReminder>.unmodifiable(output.take(maxReminders));
   }
 
-  /// Converts trusted candidate rows returned by the all-group RPC to native
-  /// requests. The candidate's fire-at is authoritative; offset is derived
-  /// only for the stable identity and collision registry key.
+  /// 전체 그룹 RPC가 반환한 신뢰 가능한 후보 행을 네이티브 요청으로 변환한다.
+  /// 후보의 알림 시각을 기준으로 삼으며, 오프셋은 안정적인 식별자와 충돌 레지스트리
+  /// 키를 만들 때만 계산한다.
   static List<PlannedReminder> fromCandidates({
     required String userId,
     required Iterable<ReminderCandidate> candidates,

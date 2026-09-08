@@ -187,26 +187,23 @@ Future<void> _settle(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets(
-    'synchronous platform-ready errors do not escape lifecycle callbacks',
-    (tester) async {
-      final auth = _Auth();
-      final schedule = _Schedule();
-      final planner = _planner(auth, schedule);
-      final scheduler = _SynchronouslyFailingScheduler();
-      addTearDown(auth.dispose);
+  testWidgets('동기 platform-ready 오류가 lifecycle 콜백 밖으로 새지 않는다', (tester) async {
+    final auth = _Auth();
+    final schedule = _Schedule();
+    final planner = _planner(auth, schedule);
+    final scheduler = _SynchronouslyFailingScheduler();
+    addTearDown(auth.dispose);
 
-      await tester.pumpWidget(
-        _app(planner, scheduler, supplySchedulerReady: false),
-      );
-      await tester.pump();
+    await tester.pumpWidget(
+      _app(planner, scheduler, supplySchedulerReady: false),
+    );
+    await tester.pump();
 
-      expect(scheduler.initializeCalls, greaterThanOrEqualTo(2));
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(scheduler.initializeCalls, greaterThanOrEqualTo(2));
+    expect(tester.takeException(), isNull);
+  });
 
-  testWidgets('planner identity sync retries after platform-ready failure', (
+  testWidgets('첫 platform-ready 실패 뒤 같은 사용자 알림에서 인증 동기화를 재시도한다', (
     tester,
   ) async {
     final auth = _Auth();
@@ -257,9 +254,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('async platform-ready errors do not escape lifecycle futures', (
-    tester,
-  ) async {
+  testWidgets('알림 플랫폼 준비 오류가 lifecycle Future 밖으로 새지 않는다', (tester) async {
     final auth = _Auth();
     final schedule = _Schedule();
     final planner = _planner(auth, schedule);
@@ -282,9 +277,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('resume notification errors do not escape lifecycle callbacks', (
-    tester,
-  ) async {
+  testWidgets('resume 알림 오류가 앱 lifecycle 콜백 밖으로 새지 않는다', (tester) async {
     final auth = _Auth();
     final schedule = _Schedule();
     final planner = _planner(auth, schedule);
@@ -306,9 +299,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('distinct warm taps each open after authoritative validation', (
-    tester,
-  ) async {
+  testWidgets('서로 다른 웜 탭이 권위 있는 검증 후 각각 열린다', (tester) async {
     final auth = _Auth();
     final schedule = _Schedule()..response = _event(_eventA);
     final planner = _planner(auth, schedule);
@@ -332,9 +323,7 @@ void main() {
     expect(schedule.lookupCalls, 2);
   });
 
-  testWidgets('duplicate in-flight warm callbacks are coalesced', (
-    tester,
-  ) async {
+  testWidgets('진행 중인 중복 웜 콜백이 하나로 병합된다', (tester) async {
     final auth = _Auth();
     final schedule = _Schedule();
     final wait = Completer<PlannerEvent?>();
@@ -358,9 +347,7 @@ void main() {
     expect(find.text('opened $_eventA'), findsOneWidget);
   });
 
-  testWidgets('a rejected tap does not block a later valid tap', (
-    tester,
-  ) async {
+  testWidgets('거부된 탭이 이후의 유효한 탭을 막지 않는다', (tester) async {
     final auth = _Auth();
     final schedule = _Schedule();
     final planner = _planner(auth, schedule);
@@ -382,9 +369,7 @@ void main() {
     expect(find.text('opened $_eventB'), findsOneWidget);
   });
 
-  testWidgets('stale account state cannot route a deferred tap', (
-    tester,
-  ) async {
+  testWidgets('오래된 계정 상태가 지연된 탭을 라우팅할 수 없다', (tester) async {
     final auth = _Auth();
     final schedule = _Schedule();
     final wait = Completer<PlannerEvent?>();

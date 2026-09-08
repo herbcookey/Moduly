@@ -14,11 +14,10 @@ class AppConfig {
   final String supabaseUrl;
   final String supabasePublishableKey;
 
-  /// Public origin used when constructing shareable invite links.  This is
-  /// deliberately independent from [supabaseUrl]: a Supabase project URL is
-  /// an API endpoint, not an application/deep-link origin.  The value is
-  /// supplied with `--dart-define=INVITE_BASE_URL=...` and may be omitted in
-  /// local/demo builds.
+  /// 공유 가능한 초대 링크를 만들 때 사용하는 공개 출처다.
+  /// [supabaseUrl]과는 의도적으로 분리된다. Supabase 프로젝트 URL은 앱이나
+  /// 딥 링크의 출처가 아니라 API 엔드포인트이기 때문이다. 값은
+  /// `--dart-define=INVITE_BASE_URL=...`로 제공하며 로컬/데모 빌드에서는 생략할 수 있다.
   final String inviteBaseUrl;
 
   factory AppConfig.fromEnvironment() => const AppConfig(
@@ -30,14 +29,13 @@ class AppConfig {
   bool get hasSupabase =>
       supabaseUrl.trim().isNotEmpty && supabasePublishableKey.trim().isNotEmpty;
 
-  /// Raw configuration presence.  URI/scheme/host validation is kept in
-  /// `invite_link.dart` so all callers (builder, parser, and UI policy) share
-  /// exactly one canonical validator.
+  /// 원시 설정값의 존재 여부다. 모든 호출자(빌더, 파서, UI 정책)가 하나의
+  /// 표준 검증기를 공유하도록 URI/스킴/호스트 검증은 `invite_link.dart`에 둔다.
   bool get hasInviteBaseUrl => inviteBaseUrl.trim().isNotEmpty;
 
-  /// Whether the configured origin can be used for share links in a
-  /// development/test build.  Production callers should use
-  /// [inviteLinksEnabledFor] with `isRelease: true` to enforce HTTPS.
+  /// 설정된 출처를 개발/테스트 빌드의 공유 링크에 사용할 수 있는지 나타낸다.
+  /// 프로덕션 호출자는 HTTPS를 강제하도록 `isRelease: true`와 함께
+  /// [inviteLinksEnabledFor]를 사용해야 한다.
   bool get inviteLinksEnabled => validateInviteBaseUrl(inviteBaseUrl).isValid;
 
   String? get inviteLinkConfigurationError =>

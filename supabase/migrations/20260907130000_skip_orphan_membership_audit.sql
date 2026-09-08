@@ -112,8 +112,8 @@ begin
 end;
 $$;
 
--- Keep the trigger helper out of the PostgREST RPC surface on upgraded
--- deployments that may have stale default/public grants.
+-- 오래된 기본/PUBLIC 권한이 남아 있을 수 있는 업그레이드된 배포에서도 트리거
+-- 도우미를 PostgREST RPC 표면에 노출하지 않는다.
 revoke execute on function public.write_audit_log()
   from public, anon, authenticated;
 

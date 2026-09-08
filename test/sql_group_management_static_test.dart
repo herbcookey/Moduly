@@ -14,11 +14,7 @@ void main() {
     final file = File(
       'supabase/migrations/20260907130001_group_management.sql',
     );
-    expect(
-      file.existsSync(),
-      isTrue,
-      reason: 'The monotonic group-management migration is required',
-    );
+    expect(file.existsSync(), isTrue, reason: '단조 증가 그룹 관리 마이그레이션이 필요하다');
     migration = file.readAsStringSync().toLowerCase().replaceAll(
       RegExp(r'\s+'),
       ' ',
@@ -40,7 +36,7 @@ void main() {
     ).readAsStringSync().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
   });
 
-  test('update RPC is an owner-only, locked optimistic update', () {
+  test('갱신 RPC가 소유자 전용 잠금식 낙관적 갱신이다', () {
     expect(
       migration,
       contains(
@@ -69,7 +65,7 @@ void main() {
     expect(migration, contains('version = g.version + 1'));
   });
 
-  test('leave RPC is self-only and preserves membership history', () {
+  test('탈퇴 RPC가 본인 전용이며 멤버십 기록을 보존한다', () {
     expect(
       migration,
       contains(
@@ -85,7 +81,7 @@ void main() {
     expect(migration, contains("v_membership.role <> 'member'"));
   });
 
-  test('transfer uses a validated transaction marker and final invariant', () {
+  test('이전이 검증된 트랜잭션 표식과 최종 불변 조건을 사용한다', () {
     expect(
       migration,
       contains(
@@ -135,34 +131,31 @@ void main() {
     expect(migration, contains('if tg_op = \'delete\' then return old;'));
   });
 
-  test(
-    'legacy owner rows and same-name indexes are repaired or rejected safely',
-    () {
-      expect(migration, contains('pg_catalog.pg_index'));
-      expect(migration, contains('pg_catalog.pg_get_expr'));
-      expect(migration, contains('pg_catalog.pg_get_indexdef'));
-      expect(migration, contains('v_expected_index_def'));
-      expect(
-        migration,
-        contains(
-          'memberships_one_active_owner_idx exists but is not the expected',
-        ),
-      );
-      expect(migration, contains('deterministic backfill'));
-      expect(migration, contains('m.user_id <> v_owner_id'));
-      expect(migration, contains("set role = 'member'"));
-      expect(migration, contains("insert into public.memberships"));
-      expect(migration, contains('ambiguous active owner membership'));
-      expect(
-        migration,
-        contains(
-          'create unique index if not exists memberships_one_active_owner_idx',
-        ),
-      );
-    },
-  );
+  test('기존 소유자 행과 같은 이름의 인덱스를 안전하게 복구하거나 거부한다', () {
+    expect(migration, contains('pg_catalog.pg_index'));
+    expect(migration, contains('pg_catalog.pg_get_expr'));
+    expect(migration, contains('pg_catalog.pg_get_indexdef'));
+    expect(migration, contains('v_expected_index_def'));
+    expect(
+      migration,
+      contains(
+        'memberships_one_active_owner_idx exists but is not the expected',
+      ),
+    );
+    expect(migration, contains('deterministic backfill'));
+    expect(migration, contains('m.user_id <> v_owner_id'));
+    expect(migration, contains("set role = 'member'"));
+    expect(migration, contains("insert into public.memberships"));
+    expect(migration, contains('ambiguous active owner membership'));
+    expect(
+      migration,
+      contains(
+        'create unique index if not exists memberships_one_active_owner_idx',
+      ),
+    );
+  });
 
-  test('transfer marker and membership delete paths are fail-closed', () {
+  test('이전 표식과 멤버십 삭제 경로가 안전하게 실패한다', () {
     expect(
       migration,
       contains(
@@ -180,65 +173,62 @@ void main() {
     );
   });
 
-  test(
-    'group-scoped mutating RPCs lock the group before stale checks/writes',
-    () {
-      final functionNames = <String>[
-        'create_invite_code',
-        'join_group_with_invite',
-        'soft_delete_event_if_version',
-        'revoke_invite_code',
-        'set_member_active',
-      ];
-      for (final functionName in functionNames) {
-        final start = migration.indexOf(
-          'create or replace function public.$functionName',
-        );
-        expect(start, greaterThanOrEqualTo(0), reason: functionName);
-        final bodyStart = migration.indexOf(r'as $$', start);
-        final bodyEnd = migration.indexOf(r'$$;', bodyStart);
-        expect(bodyStart, greaterThanOrEqualTo(start), reason: functionName);
-        expect(bodyEnd, greaterThan(bodyStart), reason: functionName);
-        final body = migration.substring(bodyStart, bodyEnd);
-        final groupLock = body.indexOf('for update');
-        expect(groupLock, greaterThanOrEqualTo(0), reason: functionName);
-        expect(
-          body,
-          isNot(contains('for share')),
-          reason: '$functionName must not use a stale shared group lock',
-        );
-        expect(
-          body.indexOf('from public.groups g where g.id ='),
-          greaterThanOrEqualTo(0),
-          reason: '$functionName must lock its parent group',
-        );
-        for (final write in <String>[
-          'update public.invite_codes',
-          'insert into public.invite_codes',
-          'update public.memberships',
-          'insert into public.memberships',
-          'update public.events',
-        ]) {
-          final writeIndex = body.indexOf(write);
-          if (writeIndex >= 0) {
-            expect(
-              groupLock,
-              lessThan(writeIndex),
-              reason: '$functionName writes $write before locking its group',
-            );
-          }
+  test('그룹 범위 변경 RPC가 오래됨 검사/쓰기 전에 그룹을 잠근다', () {
+    final functionNames = <String>[
+      'create_invite_code',
+      'join_group_with_invite',
+      'soft_delete_event_if_version',
+      'revoke_invite_code',
+      'set_member_active',
+    ];
+    for (final functionName in functionNames) {
+      final start = migration.indexOf(
+        'create or replace function public.$functionName',
+      );
+      expect(start, greaterThanOrEqualTo(0), reason: functionName);
+      final bodyStart = migration.indexOf(r'as $$', start);
+      final bodyEnd = migration.indexOf(r'$$;', bodyStart);
+      expect(bodyStart, greaterThanOrEqualTo(start), reason: functionName);
+      expect(bodyEnd, greaterThan(bodyStart), reason: functionName);
+      final body = migration.substring(bodyStart, bodyEnd);
+      final groupLock = body.indexOf('for update');
+      expect(groupLock, greaterThanOrEqualTo(0), reason: functionName);
+      expect(
+        body,
+        isNot(contains('for share')),
+        reason: '$functionName must not use a stale shared group lock',
+      );
+      expect(
+        body.indexOf('from public.groups g where g.id ='),
+        greaterThanOrEqualTo(0),
+        reason: '$functionName must lock its parent group',
+      );
+      for (final write in <String>[
+        'update public.invite_codes',
+        'insert into public.invite_codes',
+        'update public.memberships',
+        'insert into public.memberships',
+        'update public.events',
+      ]) {
+        final writeIndex = body.indexOf(write);
+        if (writeIndex >= 0) {
+          expect(
+            groupLock,
+            lessThan(writeIndex),
+            reason: '$functionName writes $write before locking its group',
+          );
         }
-        final lifecycleCheck = body.indexOf('v_group.deleted_at is not null');
-        expect(
-          lifecycleCheck,
-          greaterThan(groupLock),
-          reason: '$functionName checks lifecycle after the group lock',
-        );
       }
-    },
-  );
+      final lifecycleCheck = body.indexOf('v_group.deleted_at is not null');
+      expect(
+        lifecycleCheck,
+        greaterThan(groupLock),
+        reason: '$functionName checks lifecycle after the group lock',
+      );
+    }
+  });
 
-  test('direct event writes serialize with terminal group transitions', () {
+  test('직접 일정 쓰기가 종료형 그룹 전환과 직렬화된다', () {
     final eventGuard = migration.indexOf(
       'create or replace function public.enforce_event_integrity()',
     );
@@ -267,7 +257,7 @@ void main() {
     );
   });
 
-  test('pgTAP fixture runs real authenticated owner/member/outsider flows', () {
+  test('pgTAP 픽스처가 실제 인증된 소유자/멤버/외부인 흐름을 실행한다', () {
     final fixture = File(
       'supabase/tests/group_management.sql',
     ).readAsStringSync().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
@@ -278,49 +268,32 @@ void main() {
       expect(fixture, contains("'sub', (select $id::text"));
     }
     expect(fixture, contains('has_column_privilege'));
-    expect(fixture, contains('direct groups update is denied by acl'));
-    expect(fixture, contains('direct membership role update is denied by acl'));
+    expect(fixture, contains('acl은 groups 직접 update를 거부한다'));
+    expect(fixture, contains('acl은 멤버십 역할 직접 update를 거부한다'));
     expect(
       fixture,
-      contains(
-        'authenticated callers cannot update membership status directly',
-      ),
+      contains('authenticated 호출자는 멤버십 상태를 직접 업데이트할 수 없으며 관리 작업은 rpc로만 가능하다'),
     );
-    expect(fixture, contains('malformed transfer marker is rejected'));
-    expect(fixture, contains('preflight group count is exact'));
-    expect(fixture, contains('preflight event cascade count is exact'));
-    expect(fixture, contains('preflight invite cascade count is exact'));
-    expect(fixture, contains('preflight membership cascade count is exact'));
-    expect(
-      fixture,
-      contains('preflight summary does not expose user uuids or pii'),
-    );
-    expect(fixture, contains('invited_by is nulled in a surviving group'));
-    expect(
-      fixture,
-      contains('deleting another owner cascades its group and memberships'),
-    );
-    expect(fixture, contains('owner cannot transfer with a stale version'));
-    expect(fixture, contains('owner cannot archive with a stale version'));
-    expect(
-      fixture,
-      contains('active members cannot perform stale group updates'),
-    );
-    expect(
-      fixture,
-      contains('active members cannot perform stale ownership transfers'),
-    );
-    expect(fixture, contains('active members cannot perform stale archives'));
-    expect(fixture, contains('outsiders cannot perform stale group updates'));
-    expect(
-      fixture,
-      contains('outsiders cannot perform stale ownership transfers'),
-    );
-    expect(fixture, contains('outsiders cannot perform stale archives'));
+    expect(fixture, contains('잘못된 이전 표식은 거부된다'));
+    expect(fixture, contains('사전 점검의 그룹 수가 정확하다'));
+    expect(fixture, contains('사전 점검의 이벤트 연쇄 삭제 수가 정확하다'));
+    expect(fixture, contains('사전 점검의 초대 연쇄 삭제 수가 정확하다'));
+    expect(fixture, contains('사전 점검의 멤버십 연쇄 삭제 수가 정확하다'));
+    expect(fixture, contains('사전 점검 요약은 사용자 uuid나 개인 식별 정보를 노출하지 않는다'));
+    expect(fixture, contains('초대자를 삭제하면 남은 그룹의 invited_by가 null이 된다'));
+    expect(fixture, contains('다른 소유자를 삭제하면 해당 그룹과 멤버십이 연쇄 삭제된다'));
+    expect(fixture, contains('소유자는 오래된 버전으로 소유권을 이전할 수 없다'));
+    expect(fixture, contains('소유자는 오래된 버전으로 그룹을 보관 처리할 수 없다'));
+    expect(fixture, contains('활성 구성원은 오래된 버전으로 그룹을 업데이트할 수 없다'));
+    expect(fixture, contains('활성 구성원은 오래된 버전으로 소유권을 이전할 수 없다'));
+    expect(fixture, contains('활성 구성원은 오래된 버전으로 그룹을 보관 처리할 수 없다'));
+    expect(fixture, contains('외부 사용자는 오래된 버전으로 그룹을 업데이트할 수 없다'));
+    expect(fixture, contains('외부 사용자는 오래된 버전으로 소유권을 이전할 수 없다'));
+    expect(fixture, contains('외부 사용자는 오래된 버전으로 그룹을 보관 처리할 수 없다'));
     expect(fixture, contains("'40001'"));
   });
 
-  test('API ACLs and audit payloads remain minimal', () {
+  test('API ACL과 감사 페이로드가 최소 상태를 유지한다', () {
     expect(
       migration,
       contains(
@@ -373,7 +346,7 @@ void main() {
     expect(migration, isNot(contains('create schema realtime')));
   });
 
-  test('archive is terminal and preflight is authenticated-only JSON', () {
+  test('보관은 종료 상태이며 사전 검사는 인증 전용 JSON이다', () {
     expect(
       migration,
       contains(
@@ -382,7 +355,7 @@ void main() {
     );
     expect(migration, contains('set deleted_at = pg_catalog.now()'));
     expect(migration, contains('old'));
-    expect(migration, contains('child rows remain intact'));
+    expect(migration, contains('하위 행은 그대로 두고'));
     expect(
       migration,
       contains(
@@ -411,7 +384,7 @@ void main() {
     );
   });
 
-  test('delete-account obtains the caller summary before admin deletion', () {
+  test('계정 삭제가 관리자 삭제 전에 호출자 요약을 가져온다', () {
     final preflight = edgeFunction.indexOf(
       "authclient.rpc( 'account_deletion_preflight', )",
     );
@@ -428,7 +401,7 @@ void main() {
     expect(edgeFunction, isNot(contains('console.error')));
   });
 
-  test('Edge preflight validator mirrors the client fail-closed contract', () {
+  test('Edge 사전 검사기가 클라이언트의 안전 실패 계약을 따른다', () {
     expect(preflightValidator, contains('isvaliddeletionsummary'));
     expect(preflightValidator, contains('owned_groups'));
     expect(preflightValidator, contains('active_owned_groups'));
@@ -446,61 +419,31 @@ void main() {
     expect(preflightValidator, isNot(contains('console.error')));
   });
 
-  test(
-    'upgrade evidence applies migrations 1..10 and verifies preservation',
-    () {
-      expect(upgradeScript, contains('initdb'));
-      expect(upgradeScript, contains('applies migrations 1..9'));
-      expect(upgradeScript, contains('20260907130001_group_management.sql'));
-      expect(upgradeScript, contains('reapplying'));
-      expect(
-        upgradeScript,
-        contains('existing group fields were not preserved'),
-      );
-      expect(
-        upgradeScript,
-        contains('existing membership fields were not preserved'),
-      );
-      expect(
-        upgradeScript,
-        contains('existing invite fields were not preserved'),
-      );
-      expect(
-        upgradeScript,
-        contains('existing event fields were not preserved'),
-      );
-      expect(
-        upgradeScript,
-        contains('existing audit fields were not preserved'),
-      );
-      expect(upgradeScript, contains('owner membership was not backfilled'));
-      expect(
-        upgradeScript,
-        contains('active-owner unique partial index is missing'),
-      );
-      expect(upgradeScript, contains('lock_timeout'));
-      expect(
-        upgradeScript,
-        contains('two-session transfer/archive group-lock race checks passed'),
-      );
-      expect(upgradeScript, contains('error: +40001'));
-      expect(upgradeScript, contains('repeatable read'));
-      expect(upgradeScript, contains('event race'));
-      expect(upgradeScript, contains('event child was modified after archive'));
-      expect(
-        upgradeScript,
-        contains('membership/archive rpc-only race checks passed'),
-      );
-      expect(
-        upgradeScript,
-        contains('membership row was modified after archive'),
-      );
-      expect(
-        upgradeScript,
-        contains('direct membership update unexpectedly succeeded'),
-      );
-      expect(upgradeScript, isNot(contains('supabase_url')));
-      expect(upgradeScript, isNot(contains('service_role')));
-    },
-  );
+  test('업그레이드 증거가 마이그레이션 1..10을 적용하고 보존을 검증한다', () {
+    expect(upgradeScript, contains('initdb'));
+    expect(upgradeScript, contains('마이그레이션 1..9 적용'));
+    expect(upgradeScript, contains('20260907130001_group_management.sql'));
+    expect(upgradeScript, contains('재적용 중'));
+    expect(upgradeScript, contains('기존 그룹 필드를 보존하지 않았습니다'));
+    expect(upgradeScript, contains('기존 멤버십 필드를 보존하지 않았습니다'));
+    expect(upgradeScript, contains('기존 초대 필드를 보존하지 않았습니다'));
+    expect(upgradeScript, contains('기존 일정 필드를 보존하지 않았습니다'));
+    expect(upgradeScript, contains('기존 감사 필드를 보존하지 않았습니다'));
+    expect(
+      upgradeScript,
+      contains('groups.owner_id 소유자 멤버십을 기존 데이터에 채우지 않았습니다'),
+    );
+    expect(upgradeScript, contains('활성 소유자 고유 부분 인덱스가 없습니다'));
+    expect(upgradeScript, contains('lock_timeout'));
+    expect(upgradeScript, contains('두 세션 이전/보관 그룹 잠금 경합 검사를 통과'));
+    expect(upgradeScript, contains('error: +40001'));
+    expect(upgradeScript, contains('repeatable read'));
+    expect(upgradeScript, contains('일정 경합'));
+    expect(upgradeScript, contains('보관 뒤 일정 하위 행이 변경되었습니다'));
+    expect(upgradeScript, contains('멤버십/보관 rpc 전용 경합 검사를 통과'));
+    expect(upgradeScript, contains('보관 뒤 멤버십 행이 변경되었습니다'));
+    expect(upgradeScript, contains('보관 뒤 직접 멤버십 update가 예기치 않게 성공했습니다'));
+    expect(upgradeScript, isNot(contains('supabase_url')));
+    expect(upgradeScript, isNot(contains('service_role')));
+  });
 }

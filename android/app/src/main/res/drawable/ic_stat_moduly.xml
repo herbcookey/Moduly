@@ -1,5 +1,5 @@
-<!-- Monochrome status-bar icon for local reminder notifications. Android
-     masks notification icons; keep the vector white and content-only. -->
+<!-- 로컬 미리 알림용 단색 상태 표시줄 아이콘이다. Android가 알림 아이콘에
+     마스크를 적용하므로 벡터를 흰색의 콘텐츠 전용 형태로 유지한다. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"

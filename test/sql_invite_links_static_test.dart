@@ -2,9 +2,9 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// Static contract checks for the authenticated invite-link migration.  The
-/// companion pgTAP fixture and local runner execute the same assertions against
-/// PostgreSQL when a Supabase stack is available.
+/// 인증된 초대 링크 마이그레이션의 정적 계약 검사다. Supabase 스택을 사용할 수
+/// 있으면 함께 제공되는 pgTAP 픽스처와 로컬 실행기가 PostgreSQL을 대상으로
+/// 같은 검증을 수행한다.
 void main() {
   late String migration;
   late String fixture;
@@ -20,28 +20,24 @@ void main() {
     expect(
       migrationFile.existsSync(),
       isTrue,
-      reason: 'the additive invite-links migration must be present',
+      reason: '추가형 초대 링크 마이그레이션이 있어야 한다',
     );
     migration = normalized(migrationFile.readAsStringSync());
 
     final fixtureFile = File('supabase/tests/invite_links.sql');
-    expect(
-      fixtureFile.existsSync(),
-      isTrue,
-      reason: 'the invite-links pgTAP fixture must be present',
-    );
+    expect(fixtureFile.existsSync(), isTrue, reason: '초대 링크 pgTAP 픽스처가 있어야 한다');
     fixture = normalized(fixtureFile.readAsStringSync());
 
     final upgradeFile = File('supabase/tests/run_invite_links_upgrade.sh');
     expect(
       upgradeFile.existsSync(),
       isTrue,
-      reason: 'the local invite-links upgrade proof must be present',
+      reason: '로컬 초대 링크 업그레이드 증거가 있어야 한다',
     );
     upgrade = normalized(upgradeFile.readAsStringSync());
   });
 
-  test('migration is additive and strictly after the existing history', () {
+  test('마이그레이션이 추가형이며 기존 기록 바로 뒤에 온다', () {
     final migrations =
         Directory('supabase/migrations')
             .listSync()
@@ -58,14 +54,18 @@ void main() {
     expect(timestamps.length, migrations.length);
     expect(timestamps.toSet().length, timestamps.length);
     expect(migrations, contains('20260907130004_invite_links.sql'));
-    expect(timestamps.last, '20260907171029');
+    expect(
+      BigInt.parse(timestamps.last),
+      greaterThanOrEqualTo(BigInt.parse('20260907171029')),
+      reason: '초대 링크 이후의 forward-only 수정 마이그레이션을 허용해야 한다',
+    );
     expect(migration, isNot(contains('drop table public.')));
     expect(migration, isNot(contains('truncate public.')));
-    expect(upgrade, contains('reapplying'));
+    expect(upgrade, contains('재적용 중'));
     expect(upgrade, contains('20260907130004_invite_links.sql'));
   });
 
-  test('preview ledger is actor/time-only, private, and rate limited', () {
+  test('미리보기 원장이 사용자/시간만 담고 비공개이며 속도가 제한된다', () {
     expect(
       migration,
       contains(
@@ -102,7 +102,7 @@ void main() {
     );
   });
 
-  test('server canonicalization and digest-only storage are explicit', () {
+  test('서버 정규화와 다이제스트 전용 저장이 명확하다', () {
     expect(
       migration,
       contains(
@@ -128,10 +128,10 @@ void main() {
       ),
     );
     expect(migration, isNot(contains('plaintext_token')));
-    expect(migration, contains('no token or digest is retained'));
+    expect(migration, contains('토큰이나 다이제스트는 보존하지 않는다'));
   });
 
-  test('preview JSON, auth boundary, and no-consume semantics are explicit', () {
+  test('미리보기 JSON, 인증 경계, 비소모 의미가 명확하다', () {
     expect(
       migration,
       contains(
@@ -152,7 +152,7 @@ void main() {
       "'already_member'",
       "'invalid_or_expired'",
     ]) {
-      expect(migration, contains(key), reason: 'preview field/reason: $key');
+      expect(migration, contains(key), reason: '미리보기 필드/사유: $key');
     }
     expect(migration, contains('v_revoked_at is not null'));
     expect(migration, contains('v_expires_at <= pg_catalog.now()'));
@@ -182,7 +182,7 @@ void main() {
     );
   });
 
-  test('join preserves transactional locks, idempotency, and safe errors', () {
+  test('참여가 트랜잭션 잠금, 멱등성, 안전한 오류를 보존한다', () {
     expect(
       migration,
       contains(
@@ -216,7 +216,7 @@ void main() {
     expect(migration, contains('for update skip locked'));
   });
 
-  test('revoke is current-owner-only and invite table writes are RPC-only', () {
+  test('취소는 현재 소유자 전용이며 초대 테이블 쓰기는 RPC 전용이다', () {
     final revokeStart = migration.indexOf(
       'create or replace function public.revoke_invite_code',
     );
@@ -252,33 +252,30 @@ void main() {
     );
   });
 
-  test('pgTAP fixture covers principal, lifecycle, and privacy cases', () {
+  test('pgTAP 픽스처가 주체, 수명 주기, 개인정보 보호 사례를 검사한다', () {
     for (final marker in <String>[
       'create extension if not exists pgtap',
       "set local role authenticated",
-      'preview valid object contains exactly the sanitized fields',
-      'preview rate-limit response has no group data',
-      'active member preview remains idempotent for an expired token',
-      'active member acceptance remains idempotent after revocation',
-      'preview sweep removes stale rows from inactive actors',
-      'outsider accepts a valid formatted short code',
-      'legacy 48-hex invite accepts canonical lowercase form',
-      'duplicate acceptance is idempotent',
-      'overlong acceptance is rejected without truncation',
-      'malformed acceptance stores only the fixed sentinel digest',
-      'blocked join does not append a rate_limited ledger row',
-      'current owner can revoke an invite created before ownership transfer',
-      're-revoking a terminal invite is a generic conflict',
-      'direct invite update is denied by acl',
-      'invite audit metadata does not contain plaintext tokens or token hashes',
+      '유효한 미리보기 객체에는 정제된 필드만 정확히 포함된다',
+      '미리보기 요청 제한 응답에는 그룹 데이터가 없다',
+      '활성 구성원의 만료 토큰 미리보기는 멱등성을 유지한다',
+      '활성 구성원의 수락은 취소 후에도 멱등성을 유지한다',
+      '미리보기 정리 작업은 비활성 행위자의 오래된 행을 제거한다',
+      '외부 사용자는 유효한 형식의 짧은 코드를 수락할 수 있다',
+      '레거시 48자리 16진수 초대는 정규 소문자 형식을 허용한다',
+      '중복 수락은 멱등성을 유지한다',
+      '너무 긴 수락 토큰은 절삭 없이 거부된다',
+      '잘못된 수락 토큰은 고정 센티널 다이제스트만 저장한다',
+      '차단된 가입은 rate_limited 원장 행을 추가하지 않는다',
+      '현재 소유자는 소유권 이전 전에 생성된 초대를 취소할 수 있다',
+      '최종 상태의 초대를 다시 취소하면 일반 충돌이 발생한다',
+      'acl은 초대 직접 update를 거부한다',
+      '초대 감사 메타데이터에는 평문 토큰이나 토큰 해시가 포함되지 않는다',
     ]) {
       expect(fixture, contains(marker), reason: marker);
     }
-    expect(
-      upgrade,
-      contains('legacy invite fields were not preserved on reapply'),
-    );
-    expect(upgrade, contains('invite-links upgrade/reapply checks passed'));
-    expect(upgrade, contains('pgtap extension unavailable'));
+    expect(upgrade, contains('재적용 시 이전 초대 필드를 보존하지 않았습니다'));
+    expect(upgrade, contains('invite-links 업그레이드/재적용 검사를 통과'));
+    expect(upgrade, contains('pgtap 확장을 사용할 수 없어'));
   });
 }

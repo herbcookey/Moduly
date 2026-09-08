@@ -21,8 +21,8 @@ class WebSessionPendingInviteStore implements PendingInviteStore {
       raw = _storage.getItem(_storageKey);
       if (raw == null) return null;
     } catch (_) {
-      // Storage can be unavailable in private browsing or sandboxed iframes.
-      // Keep the app usable with the in-memory controller state.
+      // 비공개 브라우징이나 샌드박스 아이프레임에서는 저장소를 사용하지 못할 수 있다.
+      // 메모리 내 컨트롤러 상태로 앱을 계속 사용할 수 있게 한다.
       return null;
     }
     try {
@@ -46,9 +46,9 @@ class WebSessionPendingInviteStore implements PendingInviteStore {
       }
       return PendingInviteRecord(token: token, expiresAt: expiresAt);
     } catch (_) {
-      // A malformed record must not remain in sessionStorage and repeatedly
-      // fail hydration on every controller startup.  Clearing is best effort;
-      // storage APIs may still reject access in private browsing.
+      // 잘못된 레코드가 sessionStorage에 남아 컨트롤러를 시작할 때마다 복원에
+      // 실패해서는 안 된다. 삭제는 가능한 범위에서 수행하며, 비공개 브라우징에서는 저장소
+      // API가 여전히 접근을 거부할 수 있다.
       await clear();
       return null;
     }
@@ -65,8 +65,7 @@ class WebSessionPendingInviteStore implements PendingInviteStore {
         }),
       );
     } catch (_) {
-      // Session persistence is best effort.  The controller still owns the
-      // live intent for the current tab.
+      // 세션 영속화는 가능한 범위에서 수행한다. 현재 탭의 활성 의도는 여전히 컨트롤러가 소유한다.
     }
   }
 
@@ -75,7 +74,7 @@ class WebSessionPendingInviteStore implements PendingInviteStore {
     try {
       _storage.removeItem(_storageKey);
     } catch (_) {
-      // Best effort; no user-facing error should contain the token.
+      // 가능한 범위에서 처리하며, 사용자에게 표시되는 오류에는 토큰이 없어야 한다.
     }
   }
 }

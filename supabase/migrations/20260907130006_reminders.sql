@@ -1,21 +1,19 @@
--- Feature 3: opt-in reminders and a private, server-owned delivery queue.
+-- 기능 3: 사용자가 동의한 미리 알림과 서버 소유의 비공개 전송 큐다.
 --
--- This migration is intentionally additive.  Existing event/member/recurrence
--- rows are not rewritten and no reminder rows are synthesized for old data.
--- Client writes go through the authenticated RPCs below.  Device bearer values,
--- queue leases, and reconciliation requests live in a schema that is not part
--- of the PostgREST API schema list.  The Edge worker uses the service-role-only
--- wrappers at the end of this migration; provider credentials remain Edge
--- environment secrets and are never represented in SQL or Flutter.
+-- 이 마이그레이션은 의도적으로 기존 기능에 추가만 한다. 기존 일정/멤버/반복 행을
+-- 다시 쓰지 않으며 이전 데이터에 미리 알림 행을 만들어 내지 않는다. 클라이언트
+-- 쓰기는 아래 인증된 RPC를 거친다. 기기 Bearer 값, 큐 임대 및 조정 요청은 PostgREST
+-- API 스키마 목록에 없는 스키마에 둔다. Edge 작업자는 이 마이그레이션 끝의 서비스
+-- 역할 전용 래퍼를 사용한다. 제공자 자격 증명은 Edge 환경 비밀 값으로 유지하며
+-- SQL이나 Flutter에 절대 나타내지 않는다.
 
 begin;
 
 create schema if not exists private;
 
--- `private` is deliberately not in supabase/config.toml [api].schemas.  Keep an
--- explicit ACL boundary even if a future API configuration accidentally adds
--- the schema.  The migration role remains the owner and SECURITY DEFINER
--- functions below can still read the tables.
+-- `private`은 의도적으로 supabase/config.toml의 [api].schemas에 넣지 않는다. 이후
+-- API 설정이 실수로 스키마를 추가해도 명시적인 ACL 경계를 유지한다. 마이그레이션
+-- 역할은 계속 소유자이며 아래 SECURITY DEFINER 함수는 테이블을 읽을 수 있다.
 revoke all on schema private from public, anon, authenticated;
 do $$
 begin
@@ -25,10 +23,9 @@ begin
 end;
 $$;
 
--- Declare the row types before defining functions that use them.  The full
--- idempotent DDL (comments, indexes, policies, and private ACLs) appears below
--- after these declarations; keeping the declarations here makes reapplying a
--- partially-created migration safe without relying on check_function_bodies.
+-- 행 형식을 사용하는 함수를 정의하기 전에 먼저 선언한다. 완전한 멱등 DDL(주석,
+-- 인덱스, 정책 및 비공개 ACL)은 이 선언 뒤에 나온다. 선언을 여기에 두면
+-- check_function_bodies에 의존하지 않고 부분 생성된 마이그레이션을 안전하게 재적용할 수 있다.
 create table if not exists public.notification_preferences (
   user_id uuid primary key references auth.users(id) on delete cascade,
   local_enabled boolean not null default false,
@@ -86,9 +83,9 @@ create table if not exists private.event_reminder_jobs (
   setting_version integer not null check (setting_version > 0),
   status text not null default 'pending' check (status in ('pending','processing','retry','sent','cancelled','dead_letter')),
   attempts integer not null default 0 check (attempts between 0 and 8),
-  -- Set while a trigger/update arrives after a worker has claimed the current
-  -- generation. Completion observes this bit under the row lock and requeues
-  -- the newer generation instead of incorrectly marking the old lease done.
+  -- 작업자가 현재 세대를 가져온 뒤 트리거/갱신이 들어오면 설정한다. 완료 처리는
+  -- 행 잠금 아래에서 이 비트를 확인하고 이전 임대를 잘못 완료로 표시하는 대신
+  -- 새로운 세대를 다시 큐에 넣는다.
   dirty boolean not null default false,
   next_attempt_at timestamptz not null check (pg_catalog.isfinite(next_attempt_at)),
   lease_owner uuid,
@@ -132,9 +129,9 @@ create table if not exists private.event_reminder_reconcile_queue (
   check ((status = 'done') = (completed_at is not null))
 );
 
--- Reapplication must also upgrade a queue table created by a partially applied
--- or older copy of this migration. The default/backfill keeps existing rows
--- eligible without changing their status, lease, or attempt history.
+-- 재적용 시 부분 적용되었거나 이전 사본이 만든 큐 테이블도 업그레이드해야 한다.
+-- 기본값/기존 데이터 채우기는 상태, 임대 또는 시도 이력을 바꾸지 않고 기존 행의
+-- 처리 가능 상태를 유지한다.
 alter table private.event_reminder_reconcile_queue
   add column if not exists dirty boolean;
 update private.event_reminder_reconcile_queue
@@ -213,8 +210,8 @@ begin
     raise exception using errcode = '22023', message = 'notification preference values are invalid';
   end if;
 
-  -- Account deletion acquires the same KEY SHARE lock before deleting the Auth
-  -- row.  It also keeps the caller row alive for the entire upsert.
+  -- 계정 삭제도 Auth 행을 지우기 전에 같은 KEY SHARE 잠금을 얻는다. 전체 upsert
+  -- 동안 호출자 행도 유지한다.
   perform 1 from auth.users u where u.id = v_actor for key share;
   if not found then
     raise exception using errcode = '42501', message = 'account is unavailable';
@@ -365,8 +362,8 @@ begin
 end;
 $$;
 
--- Older UI code referred to this read as list_event_reminders.  Keep the
--- additive alias so a mixed-version client can migrate without a table grant.
+-- 이전 UI 코드는 이 조회를 list_event_reminders라고 불렀다. 버전이 섞인 클라이언트가
+-- 테이블 권한 없이 전환할 수 있도록 추가 별칭을 유지한다.
 create or replace function public.list_event_reminders(p_event_id uuid)
 returns jsonb
 language plpgsql
@@ -485,8 +482,8 @@ begin
   end if;
 
   if v_changed and (not v_setting.enabled or p_channel = 'push') then
-    -- Jobs are push-only.  A changed setting receives a new setting_version,
-    -- so stale rows are cancelled without touching a sent/dead-letter receipt.
+    -- 작업은 푸시 전용이다. 설정이 바뀌면 새 setting_version을 받으므로 전송 완료/
+    -- 배달 실패 응답을 건드리지 않고 오래된 행을 취소한다.
     v_cancelled := private.cancel_event_reminder_jobs(
       p_event_id, case when v_setting.enabled then 'rescheduled' else 'setting_disabled' end,
       null, v_actor
@@ -695,11 +692,10 @@ begin
 end;
 $$;
 
--- Membership lifecycle changes are group-scoped.  A user can belong to many
--- groups, so leaving one group must not cancel reminders for unrelated groups.
--- This helper keeps the trigger bounded to the affected group/user pair while
--- preserving the same terminal-state and deterministic lock semantics as the
--- event-wide cancellation path.
+-- 멤버십 수명 주기 변경은 그룹 범위다. 사용자는 여러 그룹에 속할 수 있으므로 한
+-- 그룹 탈퇴가 관계없는 그룹의 미리 알림을 취소해서는 안 된다. 이 도우미는 일정
+-- 전체 취소 경로와 같은 종료 상태 및 결정적 잠금 의미를 유지하면서 트리거를 영향
+-- 받은 그룹/사용자 쌍으로 제한한다.
 create or replace function private.cancel_group_user_event_reminder_jobs(
   p_group_id uuid,
   p_user_id uuid,
@@ -781,9 +777,8 @@ begin
 end;
 $$;
 
--- Account-wide switches are separate from event rows.  Missing rows mean
--- opt-in is off, which preserves the old application behaviour and avoids
--- creating a row for every existing account during backfill.
+-- 계정 전체 스위치는 일정 행과 별개다. 행이 없으면 동의하지 않은 상태를 뜻하며,
+-- 이전 애플리케이션 동작을 보존하고 기존 데이터 채우기에서 모든 계정에 행을 만들지 않는다.
 create table if not exists public.notification_preferences (
   user_id uuid primary key references auth.users(id) on delete cascade,
   local_enabled boolean not null default false,
@@ -794,7 +789,7 @@ create table if not exists public.notification_preferences (
 );
 
 comment on table public.notification_preferences is
-  'Account-wide opt-in switches. Absence is equivalent to both switches being false.';
+  '계정 전체 동의 스위치다. 행이 없으면 두 스위치가 모두 false인 것과 같다.';
 
 create table if not exists public.event_reminder_settings (
   id uuid primary key default extensions.gen_random_uuid(),
@@ -802,9 +797,8 @@ create table if not exists public.event_reminder_settings (
   user_id uuid not null references auth.users(id) on delete cascade,
   channel text not null check (channel in ('local', 'push')),
   enabled boolean not null default false,
-  -- Timed events use elapsed UTC seconds.  All-day events use
-  -- all_day_days_before calendar dates and the fixed event-local 09:00 wall
-  -- time documented by the Feature 3 contract.
+  -- 시간 지정 일정은 경과 UTC 초를 사용한다. 종일 일정은 all_day_days_before
+  -- 달력 날짜와 기능 3 계약에 명시된 일정 현지 고정 벽시계 시각 09:00을 사용한다.
   lead_seconds integer not null default 900
     check (lead_seconds between 0 and 604800),
   all_day_days_before smallint not null default 0
@@ -815,13 +809,11 @@ create table if not exists public.event_reminder_settings (
   unique (user_id, event_id, channel)
 );
 
--- Reminder intent is valid only for a current event participant.  Older
--- partial/early installs could have retained a setting after membership
--- cleanup, so prune those orphan rows (and any rows for terminal soft-deleted
--- events) before adding the enforcing FK.  Deleting a setting cascades its
--- private delivery jobs; valid participant rows are untouched.  The named
--- constraint and validation make reapplication safe even if an interrupted
--- deployment already added it as NOT VALID.
+-- 미리 알림 의도는 현재 일정 참여자에게만 유효하다. 이전의 부분/초기 설치는 멤버십
+-- 정리 뒤에도 설정을 남겼을 수 있으므로 강제 FK를 추가하기 전에 해당 고아 행과
+-- 종료되어 소프트 삭제된 일정의 모든 행을 정리한다. 설정을 삭제하면 비공개 전송
+-- 작업이 연쇄 삭제되며 유효한 참여자 행은 건드리지 않는다. 이름 있는 제약과 검증은
+-- 중단된 배포가 이미 NOT VALID로 추가했어도 재적용을 안전하게 만든다.
 delete from public.event_reminder_settings s
 where not exists (
   select 1
@@ -853,18 +845,17 @@ begin
 end;
 $$;
 
--- A previous partial copy may have installed the FK as NOT VALID.  Validate
--- after the orphan cleanup so every subsequent participant delete has the
--- same cascade semantics as a fresh install.
+-- 이전의 부분 사본이 FK를 NOT VALID로 설치했을 수 있다. 고아 행 정리 뒤에 검증하여
+-- 이후 모든 참여자 삭제가 신규 설치와 같은 연쇄 의미를 갖게 한다.
 alter table public.event_reminder_settings
   validate constraint event_reminder_settings_event_member_fk;
 
 comment on table public.event_reminder_settings is
-  'Series-wide per-user reminder intent. Occurrence identity belongs only to delivery jobs.';
+  '묶음 전체에 적용하는 사용자별 미리 알림 의도다. 발생 식별자는 전송 작업에만 속한다.';
 comment on column public.event_reminder_settings.lead_seconds is
-  'Elapsed UTC lead for timed occurrences; ignored for all-day occurrences.';
+  '시간 지정 발생의 UTC 경과 기준 사전 알림 시간이다. 종일 발생에는 사용하지 않는다.';
 comment on column public.event_reminder_settings.all_day_days_before is
-  'Civil calendar-day lead for all-day occurrences at 09:00 in the effective IANA timezone. UI presets are 0/1/7; the server accepts 0..366 for explicit long-range policies.';
+  '유효 IANA 시간대의 09:00에 알리는 종일 발생의 현지 날짜 기준 사전 일수다. UI 기본값은 0/1/7이며 서버는 명시적 장기 정책에 0..366을 허용한다.';
 
 create index if not exists event_reminder_settings_user_event_idx
   on public.event_reminder_settings (user_id, event_id, channel);
@@ -918,9 +909,8 @@ with check (false);
 revoke all on table public.notification_preferences from public, anon, authenticated;
 revoke all on table public.event_reminder_settings from public, anon, authenticated;
 
--- Private device values are only read by the server-side payload loader.  A
--- token hash prevents accidental duplicate registration; the raw bearer is
--- never copied to a public column or returned by a client RPC.
+-- 비공개 기기 값은 서버 측 페이로드 로더만 읽는다. 토큰 해시는 실수로 중복 등록하는
+-- 것을 막으며 원본 Bearer 값은 공개 열로 복사하거나 클라이언트 RPC로 반환하지 않는다.
 create table if not exists private.push_device_tokens (
   id uuid primary key default extensions.gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -942,7 +932,7 @@ create table if not exists private.push_device_tokens (
 );
 
 comment on table private.push_device_tokens is
-  'Server-private push bearer storage. Raw token is never exposed through PostgREST, RLS, realtime, or client receipts.';
+  '서버 비공개 푸시 Bearer 저장소다. 원본 토큰은 PostgREST, RLS, Realtime 또는 클라이언트 응답을 통해 절대 노출하지 않는다.';
 
 create index if not exists push_device_tokens_user_active_idx
   on private.push_device_tokens (user_id, provider, last_seen_at desc)
@@ -959,7 +949,7 @@ values (true, 'none', false)
 on conflict (singleton) do nothing;
 
 comment on table private.push_provider_capability is
-  'Capability switch only; provider credentials are Edge secrets and are never stored here.';
+  '기능 스위치 전용이다. 제공자 자격 증명은 Edge 비밀 값이며 여기에 저장하지 않는다.';
 
 create table if not exists private.event_reminder_jobs (
   id uuid primary key default extensions.gen_random_uuid(),
@@ -993,9 +983,8 @@ create table if not exists private.event_reminder_jobs (
   ),
   created_at timestamptz not null default pg_catalog.clock_timestamp(),
   updated_at timestamptz not null default pg_catalog.clock_timestamp(),
-  -- A revision is the event/occurrence/setting triple.  Keeping it in the
-  -- unique key means retries and worker crashes cannot create a second row for
-  -- one logical delivery, while a changed event gets a fresh revision.
+  -- 리비전은 일정/발생/설정의 세 값이다. 고유 키에 이를 포함하면 재시도와 작업자
+  -- 중단이 논리적 전송 하나에 두 번째 행을 만들 수 없고, 변경된 일정은 새 리비전을 받는다.
   check (
     (status = 'processing' and lease_owner is not null and lease_until is not null)
     or (status <> 'processing' and lease_owner is null and lease_until is null)
@@ -1009,10 +998,9 @@ create table if not exists private.event_reminder_jobs (
             + (case when dead_letter_at is not null then 1 else 0 end) = 1)
 );
 
--- Pending/processing/retry work and a successfully sent revision participate in
--- deduplication. Terminal cancellation/dead-letter receipts remain immutable
--- history, while a later membership/device/provider reactivation may create a
--- fresh pending revision for the same occurrence without resurrecting them.
+-- 대기/처리/재시도 작업과 성공적으로 전송한 리비전은 중복 제거에 참여한다. 종료된
+-- 취소/배달 실패 응답은 변경 불가 이력으로 유지한다. 이후 멤버십/기기/제공자를
+-- 재활성화하면 해당 응답을 되살리지 않고 같은 발생에 새 대기 리비전을 만들 수 있다.
 create unique index if not exists event_reminder_jobs_active_revision_idx
   on private.event_reminder_jobs (
     setting_id, event_id, user_id, occurrence_key,
@@ -1020,7 +1008,7 @@ create unique index if not exists event_reminder_jobs_active_revision_idx
   ) where status in ('pending', 'processing', 'retry', 'sent');
 
 comment on table private.event_reminder_jobs is
-  'Private at-least-once delivery queue. occurrence_key is the only per-occurrence identity and id is the provider idempotency key.';
+  '최소 한 번 방식으로 처리하는 비공개 전송 큐다. occurrence_key는 발생별 유일한 식별자이며 id는 제공자 멱등성 키다.';
 
 create index if not exists event_reminder_jobs_due_idx
   on private.event_reminder_jobs (next_attempt_at, fire_at, id)
@@ -1033,9 +1021,8 @@ create index if not exists event_reminder_jobs_event_idx
 create index if not exists event_reminder_jobs_group_user_idx
   on private.event_reminder_jobs (group_id, user_id, status);
 
--- Trigger-driven work is only a bounded queue insert.  Recurrence expansion
--- happens in the worker, never while an event/member write holds the parent
--- locks.
+-- 트리거가 수행하는 작업은 범위를 제한한 큐 삽입뿐이다. 반복 확장은 일정/멤버
+-- 쓰기가 상위 잠금을 유지하는 동안이 아니라 작업자에서 수행한다.
 create table if not exists private.event_reminder_reconcile_queue (
   event_id uuid primary key references public.events(id) on delete cascade,
   group_id uuid not null references public.groups(id) on delete cascade,
@@ -1068,8 +1055,8 @@ alter table private.push_device_tokens enable row level security;
 alter table private.push_provider_capability enable row level security;
 alter table private.event_reminder_jobs enable row level security;
 alter table private.event_reminder_reconcile_queue enable row level security;
--- No private policy is intentionally permissive.  API roles have no schema or
--- table privileges; owner-only SECURITY DEFINER functions are the sole path.
+-- 어떤 비공개 정책도 의도적으로 허용적이지 않다. API 역할에는 스키마나 테이블
+-- 권한이 없으며 소유자 전용 SECURITY DEFINER 함수가 유일한 경로다.
 revoke all on table private.push_device_tokens from public, anon, authenticated;
 revoke all on table private.push_provider_capability from public, anon, authenticated;
 revoke all on table private.event_reminder_jobs from public, anon, authenticated;
@@ -1085,11 +1072,10 @@ begin
 end;
 $$;
 
--- Resolve a civil timestamp in exactly the same way as
--- lib/core/timezone_utils.dart: enumerate nearby offsets, retain exact
--- round-trips, and choose the latest UTC instant for a fold.  PostgreSQL's
--- built-in conversion is used only for a gap, where no exact round-trip exists
--- and its documented forward resolution is the desired policy.
+-- lib/core/timezone_utils.dart와 정확히 같은 방식으로 현지 타임스탬프를 확인한다.
+-- 인접 오프셋을 열거하고 정확히 왕복되는 값을 유지하며 중복 시각에는 가장 늦은
+-- UTC 시각을 선택한다. 정확히 왕복되는 값이 없는 누락 시각에만 PostgreSQL 내장
+-- 변환을 사용하며, 이때 문서화된 순방향 해석이 원하는 정책이다.
 create or replace function private.wall_time_to_instant(
   p_local timestamp without time zone,
   p_timezone text
@@ -1140,7 +1126,7 @@ end;
 $$;
 
 comment on function private.wall_time_to_instant(timestamp without time zone, text) is
-  'Civil conversion for reminders: spring gaps move forward and autumn folds choose the latest UTC instant.';
+  '미리 알림용 현지 시각 변환이다. 봄 누락 시각은 앞으로 이동하고 가을 중복 시각은 가장 늦은 UTC 시각을 선택한다.';
 
 create or replace function private.reminder_fire_at(
   p_starts_at timestamptz,
@@ -1176,9 +1162,9 @@ begin
 end;
 $$;
 
--- The helper is private but deliberately row-shaped so both the public local
--- candidate RPC and the private push preparation path use one source of truth
--- for active participant checks, recurrence materialization, and fire_at.
+-- 도우미는 비공개지만 의도적으로 행 형태를 사용한다. 공개 로컬 후보 RPC와 비공개
+-- 푸시 준비 경로가 활성 참여자 검사, 반복 구체화 및 fire_at에 하나의 최종 기준을
+-- 사용하게 한다.
 create or replace function private.prepare_reminder_candidates(
   p_user_id uuid,
   p_fire_at_start timestamptz,
@@ -1478,11 +1464,9 @@ begin
       extensions.digest(pg_catalog.convert_to(p_installation_id, 'utf8'), 'sha256'), 'hex'
     );
   end if;
-  -- Serialize the cross-account token uniqueness check.  The actor lock above
-  -- remains first (matching account deletion); this advisory lock prevents two
-  -- concurrent users from racing into the provider/token unique constraint and
-  -- leaking an implementation error instead of the deliberate authorization
-  -- response.
+  -- 계정 간 토큰 고유성 검사를 직렬화한다. 계정 삭제와 맞도록 위의 요청자 잠금이
+  -- 계속 먼저다. 이 advisory 잠금은 동시 사용자 둘이 제공자/토큰 고유 제약에서
+  -- 경합하여 의도한 권한 응답 대신 구현 오류를 노출하는 것을 막는다.
   perform pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended(v_token_hash, 0)
   );
@@ -1532,8 +1516,8 @@ begin
       returning * into v_device;
     end if;
   end if;
-  -- Registration only queues a bounded reconcile request.  It never expands
-  -- a recurrence while the authenticated RPC is holding account locks.
+  -- 등록은 범위를 제한한 조정 요청을 큐에 넣을 뿐이다. 인증된 RPC가 계정 잠금을
+  -- 유지하는 동안 반복 일정을 확장하지 않는다.
   perform private.enqueue_user_event_reminder_reconcile(v_actor, 'device_registered');
   return pg_catalog.jsonb_build_object(
     'committed', true,
@@ -1584,10 +1568,10 @@ begin
     returning * into v_device;
     v_changed := true;
   end if;
-  -- A job is useful only while at least one active device can receive it. If
-  -- this revocation removed the user's last active device, cancel all
-  -- nonterminal push work with an explicit receipt. Keep jobs untouched when
-  -- another device remains active so delivery can continue there.
+  -- 활성 기기가 하나 이상 수신할 수 있을 때만 작업이 유용하다. 이 취소로 사용자의
+  -- 마지막 활성 기기가 제거되면 종료되지 않은 모든 푸시 작업을 명시적인 응답과
+  -- 함께 취소한다. 다른 기기가 활성 상태면 해당 기기로 전송을 계속할 수 있도록
+  -- 작업을 그대로 둔다.
   if not exists (
     select 1
     from private.push_device_tokens d
@@ -1597,10 +1581,9 @@ begin
       v_actor, 'device_revoked'
     );
   end if;
-  -- When another device remains active, existing jobs stay pending so delivery
-  -- can continue there.  If this was the last device, the branch above has
-  -- already cancelled the nonterminal rows; a later registration can create a
-  -- fresh revision without resurrecting a cancelled receipt.
+  -- 다른 기기가 활성 상태로 남아 있으면 해당 기기로 전송을 계속할 수 있도록 기존
+  -- 작업을 대기 상태로 둔다. 마지막 기기였다면 위 분기에서 종료되지 않은 행을 이미
+  -- 취소했다. 이후 등록은 취소 응답을 되살리지 않고 새 리비전을 만들 수 있다.
   return pg_catalog.jsonb_build_object(
     'committed', true,
     'changed', v_changed,
@@ -1810,12 +1793,11 @@ begin
      or p_lease_seconds is null or p_lease_seconds < 1 or p_lease_seconds > 3600 then
     raise exception using errcode = '22023', message = 'invalid reconcile lease';
   end if;
-  -- A worker can crash after its eighth claim. Such a row is no longer
-  -- eligible for reclaim (`attempts < 8` below), so terminalize an expired
-  -- processing lease before selecting due work or it would remain stuck in
-  -- `processing` forever. A row dirtied by a newer trigger is instead reset
-  -- for that newer generation. Keep this bounded/non-blocking for concurrent
-  -- workers by taking only rows that are currently available to lock.
+  -- 작업자는 여덟 번째로 가져간 뒤 중단될 수 있다. 그런 행은 더 이상 다시 가져올
+  -- 수 없으므로(아래 `attempts < 8`) 처리할 작업을 선택하기 전에 만료된 처리 임대를
+  -- 종료하지 않으면 영원히 `processing`에 머문다. 더 새로운 트리거가 변경한 행은
+  -- 대신 새 세대용으로 재설정한다. 현재 잠글 수 있는 행만 가져와 동시 작업자에게
+  -- 범위가 제한되고 차단되지 않게 한다.
   with exhausted as (
     select q.event_id, q.dirty
     from private.event_reminder_reconcile_queue q
@@ -1862,8 +1844,7 @@ begin
   select c.event_id, c.group_id, c.reason, c.attempts, c.lease_until
   from claimed c
   order by c.event_id;
-  -- Rows that exhausted their bounded queue attempts are terminal and are not
-  -- returned to the Edge worker.
+  -- 제한된 큐 시도를 모두 사용한 행은 종료 상태이며 Edge 작업자에게 반환하지 않는다.
   update private.event_reminder_reconcile_queue q
   set status = 'done', completed_at = p_now, lease_owner = null, lease_until = null,
       dirty = false,
@@ -1903,11 +1884,10 @@ begin
      or v_queue.lease_until < pg_catalog.clock_timestamp() then
     raise exception using errcode = '40001', message = 'reconcile lease is stale';
   end if;
-  -- A trigger may have coalesced a newer event/setting generation while this
-  -- lease was being prepared.  The row lock above gives us a linearization
-  -- point: never terminalize the old generation when `dirty` is set.  Start
-  -- the newer generation with a fresh bounded-attempt budget and let the next
-  -- worker claim it after this completion commits.
+  -- 이 임대를 준비하는 동안 트리거가 더 새로운 일정/설정 세대를 합쳤을 수 있다.
+  -- 위의 행 잠금이 선형화 지점을 제공한다. `dirty`가 설정되어 있으면 이전 세대를
+  -- 절대 종료하지 않는다. 새로운 세대는 새 제한 시도 횟수로 시작하고 이 완료가
+  -- 커밋된 뒤 다음 작업자가 가져가게 한다.
   if v_queue.dirty then
     v_status := 'pending';
     update private.event_reminder_reconcile_queue q
@@ -1985,10 +1965,9 @@ begin
   if not coalesce(v_configured, false) then
     raise exception using errcode = '55000', message = 'push_unconfigured';
   end if;
-  -- See the reconcile queue claim above: an expired eighth-attempt lease is
-  -- excluded by the reclaim predicate, so make it terminal before selecting
-  -- due jobs.  This also intentionally runs before the fire_at check; a
-  -- crashed worker must not strand a future-dated occurrence in processing.
+  -- 위 조정 큐 가져오기를 참고한다. 만료된 여덟 번째 시도 임대는 다시 가져오기
+  -- 조건자에서 제외되므로 처리할 작업을 선택하기 전에 종료한다. 의도적으로 fire_at
+  -- 검사보다도 먼저 실행하여 중단된 작업자가 미래 발생을 처리 중 상태에 남기지 못하게 한다.
   with exhausted as (
     select j.id
     from private.event_reminder_jobs j
@@ -2216,9 +2195,9 @@ begin
 end;
 $$;
 
--- Lifecycle hooks deliberately do bounded cancellation/queue writes only.  They
--- never expand recurrence rows while an event, group, or membership lock is
--- held; the worker performs that work through the private reconcile functions.
+-- 수명 주기 훅은 의도적으로 범위가 제한된 취소/큐 쓰기만 수행한다. 일정, 그룹 또는
+-- 멤버십 잠금을 유지하는 동안 반복 행을 확장하지 않는다. 작업자가 비공개 조정
+-- 함수를 통해 해당 작업을 수행한다.
 create or replace function private.reminder_events_after_change()
 returns trigger
 language plpgsql
@@ -2227,11 +2206,10 @@ set search_path = ''
 as $$
 begin
   if new.deleted_at is not null then
-    -- Event deletion is terminal (the event integrity trigger rejects
-    -- restoration).  Remove the series-wide intent itself; the composite
-    -- participant FK and setting_id FK cascade all private jobs, including
-    -- rows that were already terminal receipts.  Keep the bounded cancellation
-    -- first so nonterminal rows are explicitly invalidated before the cascade.
+    -- 일정 삭제는 종료 상태다(일정 무결성 트리거가 복원을 거부한다). 묶음 전체의
+    -- 의도 자체를 제거한다. 복합 참여자 FK와 setting_id FK가 이미 종료 응답인 행을
+    -- 포함한 모든 비공개 작업을 연쇄 삭제한다. 연쇄 작업 전에 종료되지 않은 행을
+    -- 명시적으로 무효화하도록 범위 제한 취소를 먼저 수행한다.
     perform private.cancel_event_reminder_jobs(new.id, 'event_deleted');
     delete from public.event_reminder_settings
     where event_id = new.id;
@@ -2348,10 +2326,9 @@ create trigger reminders_preferences_after_change
 after insert or update on public.notification_preferences
 for each row execute function private.reminder_preferences_after_change();
 
--- The Data API never receives a private-schema grant.  Edge Functions call only
--- these narrow service-role wrappers.  The wrapper functions intentionally
--- return JSON envelopes so a worker can treat each call as one short database
--- transaction and perform provider I/O after the transaction has committed.
+-- Data API에는 비공개 스키마 권한을 절대 주지 않는다. Edge Function은 제한된 이
+-- 서비스 역할 래퍼만 호출한다. 래퍼 함수는 의도적으로 JSON 봉투를 반환하여 작업자가
+-- 각 호출을 짧은 데이터베이스 트랜잭션 하나로 처리하고 커밋 뒤 제공자 I/O를 수행하게 한다.
 create or replace function public.worker_push_capability()
 returns jsonb
 language plpgsql
@@ -2516,9 +2493,9 @@ begin
 end;
 $$;
 
--- Deployment can set a capability independently of provider credentials.  The
--- worker still checks its Edge secrets before claiming, so this switch cannot
--- accidentally make an unconfigured deployment send or log bearer values.
+-- 배포는 제공자 자격 증명과 별개로 기능을 설정할 수 있다. 작업자는 가져오기 전에
+-- 계속 Edge 비밀 값을 확인하므로 이 스위치 때문에 미구성 배포가 실수로 Bearer 값을
+-- 전송하거나 기록할 수 없다.
 create or replace function public.worker_set_push_capability(
   p_provider text,
   p_enabled boolean
@@ -2562,9 +2539,9 @@ begin
 end;
 $$;
 
--- `enqueue_user_event_reminder_reconcile` is user-scoped.  A null user is the
--- intentional operator path for capability changes; expand it here without
--- touching recurrence rows so the function remains bounded to queue rows.
+-- `enqueue_user_event_reminder_reconcile`은 사용자 범위다. null 사용자는 기능 변경을
+-- 위한 의도적인 운영자 경로다. 반복 행을 건드리지 않고 여기에서 확장하여 함수가
+-- 큐 행 범위로 제한되게 한다.
 create or replace function private.enqueue_user_event_reminder_reconcile(
   p_user_id uuid,
   p_reason text
@@ -2601,9 +2578,9 @@ begin
 end;
 $$;
 
--- Public client RPCs are the only authenticated entry points.  Revoke the
--- default PUBLIC execute privilege before granting the exact authenticated
--- set; worker wrappers are service_role-only when that role exists.
+-- 공개 클라이언트 RPC만 인증된 진입점이다. 정확한 인증 집합에 권한을 주기 전에
+-- 기본 PUBLIC 실행 권한을 회수한다. service_role 역할이 있으면 작업자 래퍼는 해당
+-- 역할 전용이다.
 revoke all on function public.get_notification_preferences() from public, anon, authenticated;
 revoke all on function public.set_notification_preferences(boolean, boolean, integer) from public, anon, authenticated;
 revoke all on function public.get_event_reminder(uuid) from public, anon, authenticated;

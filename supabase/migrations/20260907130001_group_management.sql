@@ -1,16 +1,14 @@
--- Group management RPCs and invariants.
+-- 그룹 관리 RPC와 불변 조건이다.
 --
--- This migration deliberately keeps group ownership changes behind RPCs.  The
--- API roles retain no direct UPDATE privilege for ownership, role, or group
--- presentation columns.  SECURITY DEFINER functions use an empty search_path
--- and qualify every application object.
+-- 이 마이그레이션은 의도적으로 그룹 소유권 변경을 RPC 뒤에 둔다. API 역할에는
+-- 소유권, 역할 또는 그룹 표시 열에 대한 직접 UPDATE 권한이 없다. SECURITY
+-- DEFINER 함수는 빈 search_path를 사용하고 모든 애플리케이션 객체를 정규화한다.
 
 begin;
 
--- The index name is part of the schema contract.  A pre-existing object with
--- that name is accepted only when pg_catalog confirms the exact unique,
--- one-column, partial definition; a malformed same-name index aborts before
--- any data repair can occur.
+-- 인덱스 이름은 스키마 계약의 일부다. pg_catalog에서 정확히 단일 열 고유 부분
+-- 인덱스 정의임을 확인한 경우에만 같은 이름의 기존 객체를 허용한다. 같은 이름의
+-- 잘못된 인덱스가 있으면 데이터 복구 전에 중단한다.
 do $$
 declare
   v_index_oid oid;
@@ -93,12 +91,11 @@ begin
 end;
 $$;
 
--- Repair only deterministic owner-membership drift before creating the unique
--- index.  For each group, extra active owner rows are demoted first, then the
--- groups.owner_id row is inserted/reactivated/promoted.  This order is safe
--- with the existing membership trigger and also works when a valid index was
--- already present.  No arbitrary owner is selected; groups.owner_id is the
--- sole source of truth.
+-- 고유 인덱스를 만들기 전에 결과가 결정적인 소유자-멤버십 불일치만 복구한다.
+-- 각 그룹에서 추가 활성 소유자 행을 먼저 일반 멤버로 내린 다음 groups.owner_id
+-- 행을 삽입/재활성화/소유자로 승격한다. 이 순서는 기존 멤버십 트리거와 함께
+-- 안전하며 유효한 인덱스가 이미 있어도 동작한다. 임의의 소유자를 선택하지 않으며
+-- groups.owner_id만 최종 기준으로 삼는다.
 do $$
 declare
   v_group_id uuid;
@@ -149,8 +146,8 @@ begin
 end;
 $$;
 
--- Abort informatively if a malformed/ambiguous legacy row still remains.  A
--- group must have exactly one active owner row, and it must be groups.owner_id.
+-- 잘못되었거나 모호한 이전 행이 남아 있으면 알기 쉬운 오류로 중단한다. 그룹에는
+-- 활성 소유자 행이 정확히 하나 있어야 하며 그 행은 groups.owner_id여야 한다.
 do $$
 declare
   v_bad_group uuid;
@@ -185,9 +182,8 @@ begin
 end;
 $$;
 
--- There must never be two active owners for a group.  The guarded CREATE is
--- followed by a pg_catalog definition check so IF NOT EXISTS cannot hide a
--- malformed object introduced by an older deployment.
+-- 한 그룹에 활성 소유자가 둘 있어서는 안 된다. 보호된 CREATE 뒤에 pg_catalog
+-- 정의를 검사하여 IF NOT EXISTS가 이전 배포에서 생긴 잘못된 객체를 숨기지 못하게 한다.
 create unique index if not exists memberships_one_active_owner_idx
   on public.memberships (group_id)
   where role = 'owner' and is_active;
@@ -272,11 +268,11 @@ end;
 $$;
 
 comment on index public.memberships_one_active_owner_idx is
-  'At most one active owner membership may exist for each group.';
+  '각 그룹에는 활성 소유자 멤버십이 최대 하나만 존재할 수 있다.';
 
--- Realtime is optional in plain Postgres tests.  When the Supabase publication
--- exists, include groups and memberships idempotently for group lifecycle and
--- membership invalidation; the realtime schema itself is never modified.
+-- 일반 Postgres 테스트에서 Realtime은 선택 사항이다. Supabase publication이
+-- 있으면 그룹 수명 주기와 멤버십 무효화를 위해 groups와 memberships를 멱등적으로
+-- 포함하되 Realtime 스키마 자체는 절대 변경하지 않는다.
 do $$
 begin
   if exists (
@@ -315,11 +311,11 @@ begin
 end;
 $$;
 
--- Direct events INSERT/UPDATE statements are still part of the client write
--- contract, so their RLS membership check must be serialized with archive.
--- The existing events_integrity trigger is reused: it locks the parent group
--- first and rejects a terminal row before validating event fields.  DELETEs
--- (including auth/group cascades) do not fire this trigger and remain intact.
+-- 직접 events INSERT/UPDATE 문은 여전히 클라이언트 쓰기 계약의 일부이므로 RLS
+-- 멤버십 검사를 보관 작업과 직렬화해야 한다. 기존 events_integrity 트리거를
+-- 재사용해 상위 그룹을 먼저 잠그고 일정 필드를 검증하기 전에 종료 상태 행을
+-- 거부한다. 인증/그룹 연쇄 삭제를 포함한 DELETE는 이 트리거를 실행하지 않으므로
+-- 기존 동작을 유지한다.
 create or replace function public.enforce_event_integrity()
 returns trigger
 language plpgsql
@@ -361,10 +357,10 @@ begin
 end;
 $$;
 
--- A transfer is the only operation that may change groups.owner_id or a
--- membership role.  The marker is transaction-local and is checked by both
--- immutable-table triggers.  It contains the exact group, old owner, and new
--- owner UUIDs; a malformed, stale, or partial marker is never accepted.
+-- 소유권 이전만 groups.owner_id 또는 멤버십 역할을 바꿀 수 있다. 표시는
+-- 트랜잭션 로컬이며 두 불변 테이블 트리거가 모두 확인한다. 정확한 그룹, 이전
+-- 소유자, 새 소유자 UUID를 담으며 잘못되었거나 오래되었거나 불완전한 표시는
+-- 절대 허용하지 않는다.
 create or replace function public.enforce_group_integrity()
 returns trigger
 language plpgsql
@@ -421,10 +417,9 @@ declare
   v_marker_valid boolean := false;
   v_transfer_role_change boolean := false;
 begin
-  -- Cascading account/group deletes must be allowed to remove memberships
-  -- without consulting a parent row that may already be gone.  The row-level
-  -- CHECK constraint still protects inserts/updates; DELETE has no invariant
-  -- to enforce here.
+  -- 계정/그룹 연쇄 삭제에서는 이미 사라졌을 수 있는 상위 행을 조회하지 않고도
+  -- 멤버십을 제거할 수 있어야 한다. 행 단위 CHECK 제약은 계속 삽입/갱신을
+  -- 보호하며, 여기서 DELETE에 강제할 불변 조건은 없다.
   if tg_op = 'DELETE' then
     return old;
   end if;
@@ -461,10 +456,9 @@ begin
     and v_marker ->> 'new_owner_id' <> v_owner_id::text
     and v_marker - 'group_id' - 'old_owner_id' - 'new_owner_id' = '{}'::jsonb;
 
-  -- During a valid transfer the old owner's row is demoted before the group
-  -- owner_id changes, and the target is promoted while groups.owner_id still
-  -- names the old owner.  These are the two and only two role transitions
-  -- allowed by the transaction marker.
+  -- 유효한 이전에서는 그룹 owner_id가 바뀌기 전에 이전 소유자 행을 일반 멤버로
+  -- 내리고, groups.owner_id가 아직 이전 소유자를 가리킬 때 대상을 소유자로
+  -- 올린다. 트랜잭션 표시가 허용하는 역할 전환은 이 두 가지뿐이다.
   if tg_op = 'UPDATE' then
     v_transfer_role_change := v_marker_valid and (
       (
@@ -510,18 +504,17 @@ begin
 end;
 $$;
 
--- Keep the DELETE path explicit as well as safe.  Cascading account/group
--- deletes may invoke the trigger after the parent row has disappeared; the
--- function's early return above intentionally makes that path a no-op.
+-- DELETE 경로를 명시적이고 안전하게 유지한다. 계정/그룹 연쇄 삭제는 상위 행이
+-- 사라진 뒤 트리거를 호출할 수 있으며, 위 함수의 조기 반환은 의도적으로 해당
+-- 경로를 무동작으로 만든다.
 drop trigger if exists memberships_integrity on public.memberships;
 create trigger memberships_integrity
 before insert or update or delete on public.memberships
 for each row execute function public.enforce_membership_integrity();
 
--- Keep the field-safe/orphan-safe audit trigger while marking both event and
--- group NULL-to-non-NULL deleted_at transitions as soft_delete.  Archived
--- children remain stored, but their lifecycle is represented by this minimal
--- audit action rather than a generic update.
+-- 필드 및 고아 행에 안전한 감사 트리거를 유지하면서 일정과 그룹의 deleted_at이
+-- NULL에서 NULL이 아닌 값으로 바뀌는 경우를 모두 soft_delete로 표시한다. 보관된
+-- 하위 행은 계속 저장하지만, 수명 주기는 일반 update가 아닌 이 최소 감사 작업으로 나타낸다.
 create or replace function public.write_audit_log()
 returns trigger
 language plpgsql
@@ -554,8 +547,8 @@ begin
 
   elsif tg_table_name = 'memberships' then
     if tg_op = 'DELETE' then
-      -- Membership rows intentionally never identify a user in audit_logs.
-      -- The group/action/timestamp remain useful without exposing a UUID.
+      -- 멤버십 행은 audit_logs에서 의도적으로 사용자를 식별하지 않는다.
+      -- UUID를 노출하지 않아도 그룹/작업/타임스탬프는 여전히 유용하다.
       v_entity_id := null;
       v_group_id := old.group_id;
       v_action := 'soft_delete';
@@ -607,9 +600,8 @@ begin
       message = pg_catalog.format('unsupported audit trigger table: %s', tg_table_name);
   end if;
 
-  -- Account-deletion cascades may SET NULL invited_by after the owning group
-  -- row has already disappeared.  Skip only that orphaned internal update;
-  -- normal writes for an existing group remain auditable.
+  -- 계정 삭제 연쇄 작업은 소유 그룹 행이 이미 사라진 뒤 invited_by를 SET NULL할
+  -- 수 있다. 해당 고아 내부 갱신만 건너뛰며, 존재하는 그룹의 일반 쓰기는 계속 감사한다.
   if v_group_id is not null
      and not exists (
        select 1
@@ -633,10 +625,10 @@ begin
 end;
 $$;
 
--- Owner-only, optimistic-locking group details update.  The row lock is taken
--- before validation so a concurrent archive or transfer cannot produce a
--- non-deterministic result.  Input errors use 22023; stale, deleted, missing,
--- or unauthorized rows use the safe serialization/conflict code 40001.
+-- 소유자 전용 낙관적 잠금 그룹 세부 정보 갱신이다. 검증 전에 행을 잠가 동시
+-- 보관 또는 이전이 비결정적 결과를 만들지 못하게 한다. 입력 오류에는 22023을,
+-- 오래되었거나 삭제되었거나 없거나 권한 없는 행에는 안전한 직렬화/충돌 코드
+-- 40001을 사용한다.
 create or replace function public.update_group_if_version(
   p_group_id uuid,
   p_expected_version integer,
@@ -709,9 +701,8 @@ begin
 end;
 $$;
 
--- An active ordinary member can leave only their own membership.  The group
--- lock makes archive/leave races deterministic; owner and archived groups are
--- rejected before the membership row is changed.
+-- 활성 일반 멤버는 자신의 멤버십만 탈퇴할 수 있다. 그룹 잠금은 보관/탈퇴 경합
+-- 결과를 결정적으로 만들며, 멤버십 행을 바꾸기 전에 소유자와 보관된 그룹을 거부한다.
 create or replace function public.leave_group(p_group_id uuid)
 returns void
 language plpgsql
@@ -777,10 +768,9 @@ begin
 end;
 $$;
 
--- Transfer ownership atomically.  The group row is locked first, followed by
--- both membership rows.  The transaction-local marker is populated only after
--- all ownership and membership checks pass and is validated by the immutable
--- triggers on every affected row.
+-- 소유권을 원자적으로 이전한다. 그룹 행을 먼저 잠근 뒤 두 멤버십 행을 잠근다.
+-- 모든 소유권 및 멤버십 검사를 통과한 뒤에만 트랜잭션 로컬 표시를 채우며, 영향을
+-- 받는 모든 행에서 불변 트리거가 이를 검증한다.
 create or replace function public.transfer_group_ownership(
   p_group_id uuid,
   p_new_owner_id uuid,
@@ -807,8 +797,8 @@ begin
     raise exception using errcode = '22023', message = 'new owner must be another user';
   end if;
 
-  -- Lock the group before any membership row.  This lock order is shared by
-  -- archive/update and prevents transfer deadlocks with terminal operations.
+  -- 모든 멤버십 행보다 그룹을 먼저 잠근다. 보관/갱신도 같은 잠금 순서를 사용해
+  -- 이전과 종료 작업 사이의 교착 상태를 막는다.
   select g.*
     into v_group
   from public.groups g
@@ -825,8 +815,8 @@ begin
       message = 'group was changed, archived, or is not yours';
   end if;
 
-  -- The ordered query acquires both membership locks after the group lock.
-  -- The result rows are copied below so each required role/state is checked.
+  -- 정렬된 쿼리가 그룹 잠금 뒤에 두 멤버십 잠금을 얻는다. 아래에서 결과 행을
+  -- 복사하여 필요한 각 역할/상태를 검사한다.
   select m.*
     into v_old_membership
   from public.memberships m
@@ -864,8 +854,8 @@ begin
   )::text;
   perform pg_catalog.set_config('moduly.transfer_marker', v_marker, true);
 
-  -- Demote then promote before changing groups.owner_id.  The partial unique
-  -- index therefore cannot observe two active owners, even within this write.
+  -- groups.owner_id를 바꾸기 전에 이전 소유자를 내리고 새 소유자를 올린다. 따라서
+  -- 이 쓰기 도중에도 부분 고유 인덱스가 활성 소유자 둘을 볼 수 없다.
   update public.memberships m
   set role = 'member',
       updated_at = pg_catalog.now()
@@ -901,9 +891,8 @@ begin
     raise exception using errcode = '40001', message = 'group was changed during ownership transfer';
   end if;
 
-  -- Check the final invariant in the same transaction before returning.  The
-  -- unique index catches duplicate owners; these checks also catch a missing
-  -- owner row or a trigger/schema drift.
+  -- 반환 전에 같은 트랜잭션에서 최종 불변 조건을 검사한다. 고유 인덱스는 중복
+  -- 소유자를 잡고, 이 검사는 누락된 소유자 행이나 트리거/스키마 불일치도 잡는다.
   select count(*)::integer
     into v_active_owner_count
   from public.memberships m
@@ -932,10 +921,10 @@ begin
 end;
 $$;
 
--- Preserve archive_group_if_version's public signature while taking a terminal
--- group lock.  The existing groups audit trigger records the transition from
--- deleted_at NULL to non-NULL as action soft_delete; child rows remain intact
--- and are hidden by the existing group/member/event RLS helpers.
+-- 종료 그룹 잠금을 얻으면서 archive_group_if_version의 공개 시그니처를 보존한다.
+-- 기존 groups 감사 트리거가 deleted_at의 NULL에서 NULL 아닌 값으로의 전환을
+-- soft_delete 작업으로 기록한다. 하위 행은 그대로 두고 기존 그룹/멤버/일정 RLS
+-- 도우미가 숨긴다.
 create or replace function public.archive_group_if_version(
   p_group_id uuid,
   p_expected_version integer
@@ -986,10 +975,9 @@ begin
 end;
 $$;
 
--- Existing group-scoped RPCs also take the group lock before checking
--- ownership/lifecycle state.  Transfer, archive, moderation, invite and event
--- writes therefore share one lock order (group first), so a concurrent
--- transfer/archive cannot pass a helper check and then write stale data.
+-- 기존 그룹 범위 RPC도 소유권/수명 주기 상태를 확인하기 전에 그룹 잠금을 얻는다.
+-- 따라서 이전, 보관, 관리, 초대 및 일정 쓰기가 그룹 우선의 한 잠금 순서를 공유하므로
+-- 동시 이전/보관이 도우미 검사를 통과한 뒤 오래된 데이터를 쓰지 못한다.
 create or replace function public.create_invite_code(
   p_group_id uuid,
   p_expires_at timestamptz,
@@ -1019,8 +1007,8 @@ begin
     raise exception using errcode = '28000', message = 'authentication is required';
   end if;
 
-  -- Lock the target group before checking owner/deleted state.  All other
-  -- group-scoped writes in this migration use the same group-first order.
+  -- 소유자/삭제 상태를 확인하기 전에 대상 그룹을 잠근다. 이 마이그레이션의 다른
+  -- 모든 그룹 범위 쓰기도 같은 그룹 우선 순서를 사용한다.
   select g.*
     into v_group
   from public.groups g
@@ -1041,8 +1029,8 @@ begin
     raise exception using errcode = '22023', message = 'max_uses must be between 1 and 100000';
   end if;
 
-  -- Preserve the human-friendly 12-character code and SHA-256 hash semantics
-  -- introduced by 20260815055218_shorten_invite_codes.sql.
+  -- 20260815055218_shorten_invite_codes.sql에서 도입한 사람이 읽기 쉬운 12자 코드와
+  -- SHA-256 해시 의미를 보존한다.
   for v_attempt in 1..5 loop
     v_random := extensions.gen_random_bytes(12);
     v_token := '';
@@ -1116,8 +1104,8 @@ begin
     'hex'
   );
 
-  -- Serialize a caller's attempts exactly as before. The group lock below is
-  -- acquired before any group-owned membership/invite write.
+  -- 호출자의 시도를 이전과 정확히 같은 방식으로 직렬화한다. 아래 그룹 잠금은
+  -- 그룹 소유 멤버십/초대 쓰기보다 먼저 얻는다.
   perform pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended(v_user_id::text, 0)
   );
@@ -1138,9 +1126,9 @@ begin
   values (v_user_id, v_token_hash, false, 'invalid_or_expired')
   returning id into v_attempt_id;
 
-  -- Read the group id without locking only to establish the lock target.  The
-  -- locked group row is rechecked before the invite row and membership are
-  -- changed, so a concurrent archive/transfer cannot leave stale writes.
+  -- 잠금 대상을 정하기 위해서만 잠금 없이 그룹 ID를 읽는다. 초대 행과 멤버십을
+  -- 바꾸기 전에 잠긴 그룹 행을 다시 확인하므로 동시 보관/이전이 오래된 쓰기를
+  -- 남기지 못한다.
   select i.group_id
     into v_invite_group_id
   from public.invite_codes i
@@ -1163,8 +1151,8 @@ begin
     return;
   end if;
 
-  -- Lock the invite only after its parent group, matching revoke/create and
-  -- every other group-scoped RPC's group-first lock order.
+  -- 취소/생성 및 다른 모든 그룹 범위 RPC의 그룹 우선 잠금 순서와 맞도록 상위
+  -- 그룹 뒤에 초대를 잠근다.
   select i.id, i.group_id, i.expires_at, i.max_uses, i.uses_count, i.revoked_at
     into v_invite_id, v_invite_group_id, v_expires_at, v_max_uses, v_uses_count, v_revoked_at
   from public.invite_codes i
@@ -1225,8 +1213,8 @@ begin
     return;
   end if;
 
-  -- The group lock remains held while repairing/rejoining membership and
-  -- consuming the invite, so archive/transfer cannot interleave here.
+  -- 멤버십을 복구/재가입하고 초대를 사용하는 동안 그룹 잠금을 유지하므로
+  -- 보관/이전이 이 사이에 끼어들 수 없다.
   if v_group_owner = v_user_id then
     insert into public.memberships (group_id, user_id, role, is_active, removed_at)
     values (v_invite_group_id, v_user_id, 'owner', true, null)
@@ -1299,8 +1287,8 @@ begin
       message = 'event was changed, deleted, or is not yours';
   end if;
 
-  -- Group-first then membership lock matches moderation/join and prevents a
-  -- deactivation from racing the active-member check below.
+  -- 그룹 우선, 멤버십 차례의 잠금은 관리/가입과 맞으며 비활성화가 아래 활성
+  -- 멤버 검사와 경합하는 것을 막는다.
   select m.*
     into v_membership
   from public.memberships m
@@ -1375,9 +1363,8 @@ begin
     raise exception using errcode = '28000', message = 'authentication is required';
   end if;
 
-  -- Resolve the parent without a lock, then lock group first and re-read the
-  -- invite under that lock. Invite ownership/group lifecycle cannot change
-  -- between the check and write now.
+  -- 잠금 없이 상위를 찾은 뒤 그룹을 먼저 잠그고 그 잠금 아래에서 초대를 다시
+  -- 읽는다. 이제 검사와 쓰기 사이에 초대 소유권/그룹 수명 주기가 바뀔 수 없다.
   select i.group_id
     into v_invite_group_id
   from public.invite_codes i
@@ -1486,8 +1473,8 @@ begin
 end;
 $$;
 
--- Return only current-user-owned group names/IDs/status and deletion counts.
--- This is a display preflight for account deletion, not an audit/logging API.
+-- 현재 사용자가 소유한 그룹 이름/ID/상태와 삭제 개수만 반환한다. 이는 계정 삭제
+-- 표시용 사전 검사이며 감사/로깅 API가 아니다.
 create or replace function public.account_deletion_preflight()
 returns jsonb
 language plpgsql
@@ -1585,8 +1572,8 @@ begin
   from public.groups g
   where g.owner_id = v_user_id and g.deleted_at is not null;
 
-  -- Owned groups and authored rows both disappear on auth.users cascade.  Use
-  -- OR predicates so each row is counted once even when both conditions hold.
+  -- 소유 그룹과 작성한 행은 모두 auth.users 연쇄 작업에서 사라진다. 두 조건을
+  -- 모두 만족해도 각 행을 한 번만 세도록 OR 조건자를 사용한다.
   select count(*) into v_groups
   from public.groups g
   where g.owner_id = v_user_id;
@@ -1615,44 +1602,41 @@ begin
 end;
 $$;
 
--- Older deployments recorded membership.user_id in audit_logs.entity_id.
--- Remove only that identifiable field; group/action/version metadata is kept.
+-- 이전 배포는 membership.user_id를 audit_logs.entity_id에 기록했다. 식별 가능한
+-- 해당 필드만 제거하고 그룹/작업/버전 메타데이터는 유지한다.
 update public.audit_logs
 set entity_id = null
 where entity_type = 'memberships'
   and entity_id is not null;
 
--- Auth deletion fans out through both auth.users and groups.  Deferring the
--- audit FKs lets PostgreSQL apply the actor_id and group_id SET NULL actions
--- together after the cascaded parent deletes, avoiding a transient
--- cross-cascade violation while preserving the audit rows themselves.
+-- 인증 삭제는 auth.users와 groups 양쪽으로 퍼진다. 감사 FK를 지연하면 PostgreSQL이
+-- 상위 연쇄 삭제 뒤 actor_id 및 group_id SET NULL 작업을 함께 적용할 수 있다.
+-- 감사 행 자체를 보존하면서 일시적인 교차 연쇄 위반을 피한다.
 alter table public.audit_logs
   alter constraint audit_logs_group_id_fkey deferrable initially deferred;
 alter table public.audit_logs
   alter constraint audit_logs_actor_id_fkey deferrable initially deferred;
 
--- Keep direct detail updates RPC-only.  Revoke stale table-level and
--- column-level grants from every API role; SECURITY DEFINER RPCs retain the
--- owner-authorized write path.  Groups INSERT remains compatible with the
--- existing create_group trigger/RPC contract.
+-- 직접 세부 정보 갱신은 RPC 전용으로 유지한다. 모든 API 역할에서 오래된 테이블 및
+-- 열 단위 권한을 회수하며, SECURITY DEFINER RPC는 소유자 승인 쓰기 경로를 유지한다.
+-- groups INSERT는 기존 create_group 트리거/RPC 계약과 계속 호환된다.
 revoke update on table public.groups from public, anon, authenticated;
 revoke update (owner_id, name, description, timezone, version, deleted_at,
                created_at, updated_at) on public.groups
   from public, anon, authenticated;
--- Keep the approved detail-column list explicit for upgraded ACL catalogs.
+-- 업그레이드된 ACL 카탈로그에 승인된 세부 정보 열 목록을 명시적으로 유지한다.
 revoke update (name, description, timezone, version) on public.groups
   from public, anon, authenticated;
 
--- Membership status changes are exposed only through the owner moderation RPC.
--- Removing the remaining column grant closes the stale direct-UPDATE path:
--- set_member_active takes the parent group lock before its membership check,
--- while account/group cascades retain unrestricted owner-side execution.
+-- 멤버십 상태 변경은 소유자 관리 RPC를 통해서만 노출한다. 남은 열 권한을 제거해
+-- 오래된 직접 UPDATE 경로를 닫는다. set_member_active는 멤버십 검사 전에 상위
+-- 그룹을 잠그고, 계정/그룹 연쇄 작업은 제한 없는 소유자 측 실행을 유지한다.
 revoke update on table public.memberships from public, anon, authenticated;
 revoke update (group_id, user_id, role, joined_at, removed_at, invited_by,
                created_at, updated_at, is_active) on public.memberships
   from public, anon, authenticated;
 
--- New SECURITY DEFINER functions must not inherit PUBLIC's default EXECUTE.
+-- 새 SECURITY DEFINER 함수는 PUBLIC의 기본 EXECUTE 권한을 상속해서는 안 된다.
 revoke execute on function public.write_audit_log()
   from public, anon, authenticated;
 

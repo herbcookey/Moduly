@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/recurrence.dart';
+import '../../core/timezone_utils.dart';
 import '../../models/app_models.dart';
 
-/// Korean labels used by the recurrence editor.  Keep the mapping in one
-/// place so cards, the editor, and screen-reader announcements use the same
-/// vocabulary.
+/// 반복 편집기에서 사용하는 한국어 레이블이다. 카드, 편집기, 화면 읽기 프로그램 안내가
+/// 같은 용어를 사용하도록 매핑을 한곳에 둔다.
 const List<String> recurrenceWeekdayLabels = <String>[
   '월',
   '화',
@@ -38,9 +39,8 @@ String recurrenceCadenceLabel(RecurrenceFrequency frequency, int interval) {
   };
 }
 
-/// Returns the short, user-facing Korean summary shown below the controls and
-/// on repeated event cards.  [start] is used for a monthly fallback when a
-/// legacy rule does not carry a day (new rules always carry one).
+/// 컨트롤 아래와 반복 일정 카드에 표시할 짧은 한국어 요약을 반환한다. 날짜 정보가
+/// 없는 레거시 월간 규칙에는 [start]를 대체값으로 사용한다. 새 규칙에는 항상 날짜가 있다.
 String recurrenceSummary(RecurrenceRule rule, {DateTime? start}) {
   final interval = recurrenceCadenceLabel(rule.frequency, rule.interval);
   final cadence = switch (rule.frequency) {
@@ -62,9 +62,9 @@ String recurrenceSummary(RecurrenceRule rule, {DateTime? start}) {
 String recurrenceMonthlyClampNotice(int day) =>
     '매월 $day일에 반복해요. 해당 월에 $day일이 없으면 그 달의 마지막 날에 표시돼요.';
 
-/// A bounded, accessible recurrence rule editor.  A null rule represents the
-/// default “반복 안 함” choice.  The state exposes [validateRule] so a parent
-/// form can block a save while preserving the user's partially entered text.
+/// 범위가 제한되고 접근성을 갖춘 반복 규칙 편집기다. null 규칙은 기본값인
+/// “반복 안 함”을 뜻한다. 상위 양식이 사용자의 일부 입력을 보존하면서 저장을
+/// 막을 수 있도록 상태에서 [validateRule]을 노출한다.
 class RecurrenceEditor extends StatefulWidget {
   const RecurrenceEditor({
     required this.start,
@@ -204,11 +204,7 @@ class RecurrenceEditorState extends State<RecurrenceEditor> {
         (count == null || count < 1 || count > 10000)) {
       throw const FormatException('반복 횟수는 1~10,000회로 입력해 주세요.');
     }
-    if (_end == RecurrenceEnd.until &&
-        (_untilDate == null || _untilDate!.isBefore(_dateOnly(widget.start)))) {
-      throw const FormatException('종료일은 시작일 이후로 선택해 주세요.');
-    }
-    return RecurrenceRule(
+    final rule = RecurrenceRule(
       frequency: _frequency!,
       interval: interval,
       weekdays: _frequency == RecurrenceFrequency.weekly
@@ -219,11 +215,18 @@ class RecurrenceEditorState extends State<RecurrenceEditor> {
       untilDate: _end == RecurrenceEnd.until ? _untilDate : null,
       monthlyDay: _frequency == RecurrenceFrequency.monthly ? monthlyDay : null,
     );
+    if (rule.end == RecurrenceEnd.until &&
+        (rule.untilDate == null ||
+            rule.untilDate!.isBefore(
+              recurrenceFirstOccurrenceDate(widget.start, rule),
+            ))) {
+      throw const FormatException('종료일은 첫 반복 날짜와 같거나 이후로 선택해 주세요.');
+    }
+    return rule;
   }
 
-  /// Validates current fields and returns the exact rule to persist.  The
-  /// inline error remains visible after a failed attempt so the next action
-  /// is obvious with keyboard and assistive-technology input.
+  /// 현재 필드를 검증하고 저장할 정확한 규칙을 반환한다. 시도가 실패한 뒤에도
+  /// 인라인 오류를 표시해 키보드와 보조 기술로 다음 동작을 명확히 알 수 있게 한다.
   RecurrenceRule? validateRule() {
     if (_frequency == null) {
       setState(() => _validationError = null);
@@ -275,12 +278,25 @@ class RecurrenceEditorState extends State<RecurrenceEditor> {
   }
 
   Future<void> _pickUntilDate() async {
-    final initial = _untilDate ?? _dateOnly(widget.start);
+    final firstOccurrenceDate = _minimumUntilDate();
+    if (firstOccurrenceDate.isAfter(CalendarDateBounds.lastDate)) {
+      setState(() {
+        _validationError = '첫 반복 날짜가 지원 날짜 범위를 벗어났어요.';
+      });
+      widget.onChanged?.call(null);
+      return;
+    }
+    final minimumUntilDate = CalendarDateBounds.clamp(firstOccurrenceDate);
+    var initial = CalendarDateBounds.clamp(
+      _untilDate ?? _dateOnly(widget.start),
+    );
+    if (initial.isBefore(minimumUntilDate)) initial = minimumUntilDate;
     final picked = await showDatePicker(
       context: context,
       initialDate: initial,
-      firstDate: _dateOnly(widget.start),
-      lastDate: DateTime(2100, 12, 31),
+      firstDate: CalendarDateBounds.firstDate,
+      lastDate: CalendarDateBounds.lastDate,
+      selectableDayPredicate: (date) => !date.isBefore(minimumUntilDate),
       helpText: '반복 종료일',
       cancelText: '취소',
       confirmText: '선택',
@@ -292,6 +308,22 @@ class RecurrenceEditorState extends State<RecurrenceEditor> {
       _validationError = null;
     });
     _emit();
+  }
+
+  DateTime _minimumUntilDate() {
+    if (_frequency == RecurrenceFrequency.monthly) {
+      final monthlyDay = int.tryParse(_monthlyDayController.text.trim());
+      if (monthlyDay != null && monthlyDay >= 1 && monthlyDay <= 31) {
+        return recurrenceFirstOccurrenceDate(
+          widget.start,
+          RecurrenceRule(
+            frequency: RecurrenceFrequency.monthly,
+            monthlyDay: monthlyDay,
+          ),
+        );
+      }
+    }
+    return _dateOnly(widget.start);
   }
 
   @override
@@ -729,9 +761,9 @@ DateTime _dateOnly(DateTime value) =>
 String _formatDate(DateTime value) =>
     '${value.year}년 ${value.month}월 ${value.day}일';
 
-/// Explicit scope confirmation used for recurring occurrence mutations.
-/// The safest default is always `이번 일정만`; cancel and barrier-dismiss both
-/// return null and must be treated as no-op by the caller.
+/// 반복 발생분을 변경할 때 사용하는 명시적인 범위 확인이다. 가장 안전한 기본값은
+/// 항상 `이번 일정만`이다. 취소와 배리어 닫기는 모두 `null`을 반환하며 호출자는
+/// 이를 무동작으로 처리해야 한다.
 Future<EventEditScope?> showRecurrenceScopeDialog(
   BuildContext context, {
   required bool deleting,

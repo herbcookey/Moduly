@@ -44,9 +44,9 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-        // flutter_local_notifications uses java.time APIs for scheduled
-        // notifications. Keep the plugin's required library desugaring
-        // enabled without requesting exact-alarm capabilities.
+        // flutter_local_notifications는 예약 알림에 java.time API를 사용한다.
+        // 정확한 알람 권한을 요청하지 않으면서 플러그인에 필요한 라이브러리
+        // 디슈거링을 활성 상태로 유지한다.
         isCoreLibraryDesugaringEnabled = true
     }
 
@@ -98,13 +98,13 @@ tasks.configureEach {
                 val source = if (keyPropertiesFile.isFile) {
                     "android/key.properties"
                 } else {
-                    "MODULY_ANDROID_* environment variables"
+                    "MODULY_ANDROID_* 환경 변수"
                 }
                 throw GradleException(
-                    "Release signing is not configured. Provide storeFile, " +
-                        "storePassword, keyAlias, and keyPassword in $source " +
-                        "(see android/key.properties.example); a debug keystore " +
-                        "is never used for release builds.",
+                    "릴리스 서명이 설정되지 않았습니다. ${source}에 storeFile, " +
+                        "storePassword, keyAlias, keyPassword를 지정하세요 " +
+                        "(android/key.properties.example 참고). 릴리스 빌드에는 " +
+                        "디버그 키 저장소를 사용하지 않습니다.",
                 )
             }
         }

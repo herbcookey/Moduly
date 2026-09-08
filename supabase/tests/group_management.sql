@@ -1,8 +1,8 @@
--- pgTAP fixture for the group-management vertical slice.
+-- 그룹 관리 수직 기능 조각용 pgTAP 픽스처다.
 --
--- This fixture deliberately exercises the API as the real `authenticated`
--- database role with request.jwt.claims set.  Setup-only writes switch back to
--- the session owner, and the whole test is rolled back at the end.
+-- 이 픽스처는 request.jwt.claims를 설정한 실제 `authenticated` 데이터베이스
+-- 역할로 의도적으로 API를 실행한다. 설정 전용 쓰기는 세션 소유자로 돌아가서
+-- 수행하고 전체 테스트는 끝에 롤백한다.
 
 begin;
 
@@ -21,9 +21,9 @@ create temporary table group_management_fixture (
   target_active_group_id uuid,
   target_archived_group_id uuid
 ) on commit drop;
--- The fixture key is non-sensitive test metadata, and API-role updates below
--- only fill generated group IDs. Granting this temporary table avoids a
--- privilege error while still keeping every application-table write scoped.
+-- 픽스처 키는 민감하지 않은 테스트 메타데이터이며 아래 API 역할 갱신은 생성된 그룹
+-- ID만 채운다. 이 임시 테이블에 권한을 주면 모든 애플리케이션 테이블 쓰기의 범위를
+-- 유지하면서 권한 오류를 피할 수 있다.
 grant all on group_management_fixture to authenticated;
 
 insert into group_management_fixture (
@@ -38,7 +38,7 @@ insert into group_management_fixture (
   '00000000-0000-4000-8000-000000009904'
 );
 
--- Auth rows are setup data. The auth trigger creates corresponding profiles.
+-- Auth 행은 설정 데이터다. Auth 트리거가 해당 프로필을 만든다.
 reset role;
 insert into auth.users (
   id, instance_id, aud, role, email, encrypted_password,
@@ -70,8 +70,8 @@ insert into auth.users (
   )
 on conflict (id) do nothing;
 
--- The owner creates the two initial groups through the existing RPC.  Claims
--- are set in both supported forms because PostgREST and pgTAP stacks differ.
+-- 소유자가 기존 RPC를 통해 초기 그룹 두 개를 만든다. PostgREST와 pgTAP 스택이
+-- 다르므로 지원하는 두 형식으로 클레임을 설정한다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -103,13 +103,13 @@ select public.archive_group_if_version(
 
 reset role;
 
--- Membership setup is intentionally outside the API write surface.
+-- 멤버십 설정은 의도적으로 API 쓰기 표면 밖에서 수행한다.
 insert into public.memberships (group_id, user_id, role, is_active, removed_at)
 select group_id, member_id, 'member', true, null
 from group_management_fixture;
 
--- An unrelated group survives deletion of the original owner. Its membership
--- carries invited_by=owner so the FK SET NULL path is covered.
+-- 관계없는 그룹은 원래 소유자를 삭제해도 남는다. 해당 멤버십에는
+-- invited_by=owner가 있어 FK SET NULL 경로를 확인할 수 있다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -135,8 +135,8 @@ insert into public.memberships (
 select other_group_id, cascade_owner_id, 'member', true, null, owner_id
 from group_management_fixture;
 
--- The cascade owner owns a separate group; its owner row and any children must
--- disappear when auth.users is deleted.
+-- 연쇄 작업용 소유자는 별도 그룹을 소유한다. auth.users가 삭제되면 해당 소유자
+-- 행과 모든 하위 행이 사라져야 한다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -156,10 +156,10 @@ set cascade_group_id = created.id
 from public.create_group('Fixture cascade', 'UTC', '') as created;
 reset role;
 
--- Basic catalog/ACL/RLS assertions are made as the session owner.
+-- 기본 카탈로그/ACL/RLS 검증은 세션 소유자로 수행한다.
 select ok(
   has_table_privilege('authenticated', 'public.groups', 'select'),
-  'authenticated callers retain group SELECT access'
+  'authenticated 호출자는 그룹 SELECT 권한을 유지한다'
 );
 select ok(
   exists (
@@ -168,7 +168,7 @@ select ok(
     where c.oid = 'public.groups'::regclass
       and c.relrowsecurity
   ),
-  'groups has RLS enabled'
+  'groups에 RLS가 활성화되어 있다'
 );
 select ok(
   exists (
@@ -196,21 +196,21 @@ select ok(
         '[[:space:]]+', '', 'g'
       ) = '((role=''owner''::group_member_role)andis_active)'
   ),
-  'active owner partial unique index exists with the expected definition'
+  '활성 소유자용 부분 고유 인덱스가 예상한 정의로 존재한다'
 );
 select ok(
   not has_column_privilege('authenticated', 'public.groups', 'owner_id', 'UPDATE')
     and not has_column_privilege('authenticated', 'public.groups', 'name', 'UPDATE'),
-  'authenticated callers cannot update group ownership or details directly'
+  'authenticated 호출자는 그룹 소유권이나 세부 정보를 직접 업데이트할 수 없다'
 );
 select ok(
   not has_column_privilege('authenticated', 'public.memberships', 'role', 'UPDATE'),
-  'authenticated callers cannot update membership roles directly'
+  'authenticated 호출자는 멤버십 역할을 직접 업데이트할 수 없다'
 );
 select ok(
   not has_column_privilege('authenticated', 'public.memberships', 'is_active', 'UPDATE')
     and not has_column_privilege('authenticated', 'public.memberships', 'removed_at', 'UPDATE'),
-  'authenticated callers cannot update membership status directly; moderation is RPC-only'
+  'authenticated 호출자는 멤버십 상태를 직접 업데이트할 수 없으며 관리 작업은 RPC로만 가능하다'
 );
 select ok(
   not exists (
@@ -235,10 +235,10 @@ select ok(
         and schemaname = 'public' and tablename = 'memberships'
     )
   ),
-  'supabase_realtime includes events, groups, and memberships when available'
+  '사용 가능한 경우 supabase_realtime에 events, groups 및 memberships가 포함된다'
 );
 
--- RLS is evaluated under the actual API role, not the test superuser.
+-- RLS는 테스트 슈퍼유저가 아니라 실제 API 역할에서 평가한다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -261,14 +261,14 @@ select is(
      (select archived_group_id from group_management_fixture)
    )),
   1,
-  'owner RLS hides the archived group while retaining the active group'
+  '소유자 RLS는 활성 그룹만 유지하고 보관된 그룹은 숨긴다'
 );
 select is(
   (select count(*)::integer
    from public.memberships
    where group_id = (select group_id from group_management_fixture)),
   2,
-  'owner RLS exposes all active memberships in the active group'
+  '소유자 RLS는 활성 그룹의 모든 활성 멤버십을 노출한다'
 );
 
 select set_config(
@@ -289,21 +289,21 @@ select is(
    from public.groups
    where id = (select group_id from group_management_fixture)),
   1,
-  'active ordinary member can see the active group'
+  '활성 일반 구성원은 활성 그룹을 볼 수 있다'
 );
 select is(
   (select count(*)::integer
    from public.groups
    where id = (select archived_group_id from group_management_fixture)),
   0,
-  'active ordinary member cannot see an archived group'
+  '활성 일반 구성원은 보관된 그룹을 볼 수 없다'
 );
 select is(
   (select count(*)::integer
    from public.memberships
    where group_id = (select group_id from group_management_fixture)),
   2,
-  'active ordinary member sees active memberships in the shared group'
+  '활성 일반 구성원은 공유 그룹의 활성 멤버십을 볼 수 있다'
 );
 
 select set_config(
@@ -327,11 +327,11 @@ select is(
      (select archived_group_id from group_management_fixture)
    )),
   0,
-  'outsider RLS cannot see either fixture group'
+  '외부 사용자 RLS는 어느 픽스처 그룹도 볼 수 없다'
 );
 reset role;
 
--- Update trims the name, validates the exact timezone, and increments once.
+-- 갱신은 이름의 공백을 제거하고 정확한 시간대를 검증하며 버전을 한 번 올린다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -356,21 +356,21 @@ select is(
      'Asia/Seoul'
    ) as g),
   'Renamed fixture'::text,
-  'update_group_if_version trims the group name'
+  'update_group_if_version은 그룹 이름의 앞뒤 공백을 제거한다'
 );
 select is(
   (select g.description
    from public.groups g
    where g.id = (select group_id from group_management_fixture)),
   'Description'::text,
-  'update_group_if_version stores the bounded description'
+  'update_group_if_version은 길이가 제한된 설명을 저장한다'
 );
 select is(
   (select g.version
    from public.groups g
    where g.id = (select group_id from group_management_fixture)),
   2,
-  'update_group_if_version increments version'
+  'update_group_if_version은 버전을 증가시킨다'
 );
 select throws_ok(
   format(
@@ -380,7 +380,7 @@ select throws_ok(
   ),
   '22023',
   'timezone must be an exact IANA timezone name',
-  'invalid IANA timezone is rejected'
+  '잘못된 IANA 시간대는 거부된다'
 );
 select throws_ok(
   format(
@@ -390,7 +390,7 @@ select throws_ok(
   ),
   '40001',
   'group was changed, archived, or is not yours',
-  'stale group update is rejected'
+  '오래된 버전의 그룹 업데이트는 거부된다'
 );
 select throws_ok(
   format(
@@ -400,12 +400,11 @@ select throws_ok(
   ),
   '22023',
   'group description must be at most 10000 characters',
-  'group description length is bounded'
+  '그룹 설명 길이는 제한된다'
 );
 
--- A stale version is rejected for every owner-only terminal/ownership RPC,
--- including transfer and archive. The owner remains unchanged after each
--- failed attempt.
+-- 이전과 보관을 포함한 모든 소유자 전용 종료/소유권 RPC는 오래된 버전을 거부한다.
+-- 각 실패한 시도 뒤에도 소유자는 바뀌지 않는다.
 select throws_ok(
   format(
     'select public.transfer_group_ownership(%L::uuid, %L::uuid, 1)',
@@ -414,7 +413,7 @@ select throws_ok(
   ),
   '40001',
   'group was changed, archived, or is not yours',
-  'owner cannot transfer with a stale version'
+  '소유자는 오래된 버전으로 소유권을 이전할 수 없다'
 );
 select throws_ok(
   format(
@@ -423,11 +422,11 @@ select throws_ok(
   ),
   '40001',
   'group was changed, archived, or is not yours',
-  'owner cannot archive with a stale version'
+  '소유자는 오래된 버전으로 그룹을 보관 처리할 수 없다'
 );
 
--- Active members and outsiders cannot use any owner-only RPC, even when they
--- present an old/stale version. All failures use the same safe conflict code.
+-- 활성 멤버와 외부 사용자는 이전/오래된 버전을 제시해도 소유자 전용 RPC를 사용할
+-- 수 없다. 모든 실패는 같은 안전한 충돌 코드를 사용한다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -448,7 +447,7 @@ select throws_ok(
   ),
   '40001',
   'group was changed, archived, or is not yours',
-  'active members cannot perform stale group updates'
+  '활성 구성원은 오래된 버전으로 그룹을 업데이트할 수 없다'
 );
 select throws_ok(
   format(
@@ -458,7 +457,7 @@ select throws_ok(
   ),
   '40001',
   'group was changed, archived, or is not yours',
-  'active members cannot perform stale ownership transfers'
+  '활성 구성원은 오래된 버전으로 소유권을 이전할 수 없다'
 );
 select throws_ok(
   format(
@@ -467,7 +466,7 @@ select throws_ok(
   ),
   '40001',
   'group was changed, archived, or is not yours',
-  'active members cannot perform stale archives'
+  '활성 구성원은 오래된 버전으로 그룹을 보관 처리할 수 없다'
 );
 
 select set_config(
@@ -490,7 +489,7 @@ select throws_ok(
   ),
   '40001',
   'group was changed, archived, or is not yours',
-  'outsiders cannot perform stale group updates'
+  '외부 사용자는 오래된 버전으로 그룹을 업데이트할 수 없다'
 );
 select throws_ok(
   format(
@@ -500,7 +499,7 @@ select throws_ok(
   ),
   '40001',
   'group was changed, archived, or is not yours',
-  'outsiders cannot perform stale ownership transfers'
+  '외부 사용자는 오래된 버전으로 소유권을 이전할 수 없다'
 );
 select throws_ok(
   format(
@@ -509,11 +508,11 @@ select throws_ok(
   ),
   '40001',
   'group was changed, archived, or is not yours',
-  'outsiders cannot perform stale archives'
+  '외부 사용자는 오래된 버전으로 그룹을 보관 처리할 수 없다'
 );
 
--- Leave is self-only and only deactivates an ordinary member.  The owner and
--- outsider attempts are made through the same authenticated role.
+-- 탈퇴는 본인만 할 수 있고 일반 멤버만 비활성화한다. 소유자와 외부 사용자의 시도도
+-- 같은 authenticated 역할을 통해 수행한다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -528,9 +527,8 @@ select set_config(
 true
 );
 select public.leave_group((select group_id from group_management_fixture));
--- The caller is inactive immediately after leaving and therefore no longer
--- passes the ordinary-member SELECT policy. Inspect the historical row as
--- the setup role, then return to authenticated for the rejection path.
+-- 호출자는 탈퇴 직후 비활성 상태라 더 이상 일반 멤버 SELECT 정책을 통과하지 못한다.
+-- 설정 역할로 이력 행을 확인한 다음 거부 경로를 위해 authenticated로 돌아간다.
 reset role;
 select is(
   (select m.is_active
@@ -538,21 +536,21 @@ select is(
    where m.group_id = (select group_id from group_management_fixture)
      and m.user_id = (select member_id from group_management_fixture)),
   false,
-  'leave_group marks the caller inactive'
+  'leave_group은 호출자를 비활성 상태로 표시한다'
 );
 select ok(
   (select m.removed_at is not null
    from public.memberships m
    where m.group_id = (select group_id from group_management_fixture)
      and m.user_id = (select member_id from group_management_fixture)),
-  'leave_group records removed_at'
+  'leave_group은 removed_at을 기록한다'
 );
 set local role authenticated;
 select throws_ok(
   format('select public.leave_group(%L::uuid)', (select archived_group_id from group_management_fixture)),
   '42501',
   'only an active ordinary member can leave this group',
-  'members cannot leave archived groups'
+  '구성원은 보관된 그룹에서 탈퇴할 수 없다'
 );
 
 select set_config(
@@ -572,7 +570,7 @@ select throws_ok(
   format('select public.leave_group(%L::uuid)', (select group_id from group_management_fixture)),
   '42501',
   'only an active ordinary member can leave this group',
-  'group owners cannot leave'
+  '그룹 소유자는 탈퇴할 수 없다'
 );
 
 select set_config(
@@ -592,17 +590,17 @@ select throws_ok(
   format('select public.leave_group(%L::uuid)', (select group_id from group_management_fixture)),
   '42501',
   'only an active ordinary member can leave this group',
-  'outsiders cannot leave'
+  '외부 사용자는 탈퇴할 수 없다'
 );
 
--- Restore only the fixture member status through the setup role before transfer.
+-- 이전 전에 설정 역할을 통해 픽스처 멤버 상태만 복원한다.
 reset role;
 update public.memberships m
 set is_active = true, removed_at = null
 where m.group_id = (select group_id from group_management_fixture)
   and m.user_id = (select member_id from group_management_fixture);
 
--- Transfer is one atomic owner -> member / member -> owner operation.
+-- 이전은 소유자 -> 멤버 / 멤버 -> 소유자의 원자적 작업 하나다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -625,14 +623,14 @@ select is(
      2
    ) as g),
   (select member_id from group_management_fixture),
-  'transfer_group_ownership returns the new owner'
+  'transfer_group_ownership은 새 소유자를 반환한다'
 );
 select is(
   (select g.version
    from public.groups g
    where g.id = (select group_id from group_management_fixture)),
   3,
-  'ownership transfer increments group version atomically'
+  '소유권 이전은 그룹 버전을 원자적으로 증가시킨다'
 );
 select is(
   (select count(*)::integer
@@ -640,7 +638,7 @@ select is(
    where m.group_id = (select group_id from group_management_fixture)
      and m.role = 'owner' and m.is_active and m.removed_at is null),
   1,
-  'transfer leaves exactly one active owner'
+  '소유권 이전 후 활성 소유자가 정확히 한 명 남는다'
 );
 select is(
   (select m.role::text
@@ -648,7 +646,7 @@ select is(
    where m.group_id = (select group_id from group_management_fixture)
      and m.user_id = (select owner_id from group_management_fixture)),
   'member'::text,
-  'old owner is demoted to member'
+  '이전 소유자는 일반 구성원으로 강등된다'
 );
 select is(
   (select m.role::text
@@ -656,11 +654,11 @@ select is(
    where m.group_id = (select group_id from group_management_fixture)
      and m.user_id = (select member_id from group_management_fixture)),
   'owner'::text,
-  'target member is promoted to owner'
+  '대상 구성원은 소유자로 승격된다'
 );
 
--- The current (new) owner cannot self-leave or self-deactivate. These are the
--- last-owner paths rather than an artificial direct role update.
+-- 현재(새) 소유자는 스스로 탈퇴하거나 비활성화할 수 없다. 인위적인 직접 역할
+-- 갱신이 아니라 마지막 소유자 경로다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -678,7 +676,7 @@ select throws_ok(
   format('select public.leave_group(%L::uuid)', (select group_id from group_management_fixture)),
   '42501',
   'only an active ordinary member can leave this group',
-  'the new owner cannot leave through the self-only RPC'
+  '새 소유자는 본인 전용 RPC를 통해 탈퇴할 수 없다'
 );
 select throws_ok(
   format(
@@ -688,10 +686,10 @@ select throws_ok(
   ),
   '42501',
   'only the owner can change another member',
-  'the new owner cannot self-deactivate through moderation RPC'
+  '새 소유자는 관리 RPC를 통해 자신을 비활성화할 수 없다'
 );
 
--- Add one active and one archived group owned by the new owner for preflight.
+-- 사전 검사를 위해 새 소유자가 소유한 활성 그룹과 보관 그룹을 하나씩 추가한다.
 update group_management_fixture f
 set target_active_group_id = created.id
 from public.create_group('Fixture target active', 'UTC', '') as created;
@@ -704,7 +702,7 @@ select public.archive_group_if_version(
 );
 reset role;
 
--- Authored children are counted by preflight and retained by soft archive.
+-- 작성한 하위 행은 사전 검사에서 개수를 세며 소프트 보관 뒤에도 유지한다.
 insert into public.events (
   id, group_id, created_by, title, description, starts_at, ends_at,
   timezone, is_all_day, all_day_start, all_day_end, version
@@ -724,8 +722,8 @@ insert into public.invite_codes (
   repeat('a', 64), now() + interval '1 day', 2, 0, 1
 );
 
--- Exact preflight summary: three owned groups (two active, one archived), one
--- authored event/invite, and four memberships across owned groups.
+-- 정확한 사전 검사 요약이다. 소유 그룹 세 개(활성 둘, 보관 하나), 작성한 일정/초대
+-- 하나, 소유 그룹 전체의 멤버십 네 개다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -743,45 +741,45 @@ set local role authenticated;
 select is(
   jsonb_array_length(public.account_deletion_preflight() -> 'owned_groups'),
   3,
-  'preflight lists all active and archived groups owned by the caller'
+  '사전 점검은 호출자가 소유한 모든 활성 및 보관 그룹을 나열한다'
 );
 select is(
   jsonb_array_length(public.account_deletion_preflight() -> 'active_owned_groups'),
   2,
-  'preflight lists the two active owned groups'
+  '사전 점검은 소유한 활성 그룹 두 개를 나열한다'
 );
 select is(
   jsonb_array_length(public.account_deletion_preflight() -> 'archived_owned_groups'),
   1,
-  'preflight lists the archived owned group'
+  '사전 점검은 소유한 보관 그룹을 나열한다'
 );
 select is(
   (public.account_deletion_preflight() ->> 'groups')::bigint,
   3::bigint,
-  'preflight group count is exact'
+  '사전 점검의 그룹 수가 정확하다'
 );
 select is(
   (public.account_deletion_preflight() ->> 'events')::bigint,
   1::bigint,
-  'preflight event cascade count is exact'
+  '사전 점검의 이벤트 연쇄 삭제 수가 정확하다'
 );
 select is(
   (public.account_deletion_preflight() ->> 'invites')::bigint,
   1::bigint,
-  'preflight invite cascade count is exact'
+  '사전 점검의 초대 연쇄 삭제 수가 정확하다'
 );
 select is(
   (public.account_deletion_preflight() ->> 'memberships')::bigint,
   4::bigint,
-  'preflight membership cascade count is exact'
+  '사전 점검의 멤버십 연쇄 삭제 수가 정확하다'
 );
 select ok(
   (public.account_deletion_preflight() ->> 'owned_groups') not like '%' || (select member_id::text from group_management_fixture) || '%'
     and (public.account_deletion_preflight() ->> 'owned_groups') not like '%' || (select owner_id::text from group_management_fixture) || '%',
-  'preflight summary does not expose user UUIDs or PII'
+  '사전 점검 요약은 사용자 UUID나 개인 식별 정보를 노출하지 않는다'
 );
 
--- Direct table writes fail with ACLs even for the owner; RPCs remain usable.
+-- 소유자도 ACL 때문에 직접 테이블 쓰기는 실패하지만 RPC는 계속 사용할 수 있다.
 select throws_ok(
   format(
     'update public.groups set name = %L where id = %L::uuid',
@@ -789,7 +787,7 @@ select throws_ok(
     (select group_id from group_management_fixture)
   ),
   '42501',
-  'direct groups UPDATE is denied by ACL'
+  'ACL은 groups 직접 UPDATE를 거부한다'
 );
 select throws_ok(
   format(
@@ -799,11 +797,11 @@ select throws_ok(
     (select member_id from group_management_fixture)
   ),
   '42501',
-  'direct membership role UPDATE is denied by ACL'
+  'ACL은 멤버십 역할 직접 UPDATE를 거부한다'
 );
 reset role;
 
--- A malformed transfer marker cannot bypass immutable ownership triggers.
+-- 잘못된 이전 표시로 불변 소유권 트리거를 우회할 수 없다.
 select set_config(
   'moduly.transfer_marker',
   json_build_object('group_id', (select target_active_group_id::text from group_management_fixture))::text,
@@ -817,11 +815,11 @@ select throws_ok(
   ),
   '42501',
   'group owner_id is immutable outside transfer_group_ownership',
-  'malformed transfer marker is rejected'
+  '잘못된 이전 표식은 거부된다'
 );
 select set_config('moduly.transfer_marker', '', true);
 
--- Archive is terminal/versioned. Child rows are hidden by RLS but not deleted.
+-- 보관은 버전이 있는 종료 상태다. 하위 행은 RLS가 숨기지만 삭제하지 않는다.
 select set_config(
   'request.jwt.claims',
   json_build_object(
@@ -844,44 +842,44 @@ select throws_ok(
   format('select public.archive_group_if_version(%L::uuid, 4)', (select group_id from group_management_fixture)),
   '40001',
   'group was changed, archived, or is not yours',
-  'archived group is terminal'
+  '보관된 그룹은 최종 상태다'
 );
 select is(
   (select count(*)::integer from public.groups where id = (select group_id from group_management_fixture)),
   0,
-  'RLS hides an archived group from its former owner'
+  'RLS는 이전 소유자에게 보관된 그룹을 숨긴다'
 );
 select is(
   (select count(*)::integer from public.events where id = '00000000-0000-4000-8000-000000009201'),
   0,
-  'RLS hides archived events'
+  'RLS는 보관된 이벤트를 숨긴다'
 );
 select is(
   (select count(*)::integer from public.invite_codes where id = '00000000-0000-4000-8000-000000009301'),
   0,
-  'RLS hides archived invites'
+  'RLS는 보관된 초대를 숨긴다'
 );
 select is(
   (select count(*)::integer from public.memberships where group_id = (select group_id from group_management_fixture)),
   0,
-  'RLS hides archived memberships'
+  'RLS는 보관된 멤버십을 숨긴다'
 );
 reset role;
 
 select is(
   (select count(*)::integer from public.groups where id = (select group_id from group_management_fixture)),
   1,
-  'archived group row remains stored for account-deletion cascade'
+  '보관된 그룹 행은 계정 삭제 연쇄 처리를 위해 저장된 채로 남는다'
 );
 select is(
   (select count(*)::integer from public.events where id = '00000000-0000-4000-8000-000000009201'),
   1,
-  'archived event child remains stored'
+  '보관된 하위 이벤트는 저장된 채로 남는다'
 );
 select is(
   (select count(*)::integer from public.invite_codes where id = '00000000-0000-4000-8000-000000009301'),
   1,
-  'archived invite child remains stored'
+  '보관된 하위 초대는 저장된 채로 남는다'
 );
 select ok(
   exists (
@@ -891,17 +889,17 @@ select ok(
       and a.entity_type = 'groups'
       and a.action = 'soft_delete'
   ),
-  'archive records a soft_delete audit action'
+  '보관 처리는 soft_delete 감사 작업을 기록한다'
 );
 
--- Delete the original owner. Its archived owned group is cascaded, while the
--- transferred/other groups survive. invited_by is SET NULL in the survivor.
+-- 원래 소유자를 삭제한다. 소유하던 보관 그룹은 연쇄 삭제되지만 이전된 그룹과 다른
+-- 그룹은 남는다. 남은 행의 invited_by는 SET NULL된다.
 delete from auth.users
 where id = (select owner_id from group_management_fixture);
 select is(
   (select count(*)::integer from public.groups where id = (select archived_group_id from group_management_fixture)),
   0,
-  'deleting an owner cascades its archived owned group'
+  '소유자를 삭제하면 그 소유자의 보관 그룹이 연쇄 삭제된다'
 );
 select is(
   (select invited_by
@@ -909,14 +907,14 @@ select is(
    where group_id = (select other_group_id from group_management_fixture)
      and user_id = (select cascade_owner_id from group_management_fixture)),
   null::uuid,
-  'invited_by is nulled in a surviving group when inviter is deleted'
+  '초대자를 삭제하면 남은 그룹의 invited_by가 NULL이 된다'
 );
 select is(
   (select count(*)::integer
    from public.groups
    where id = (select group_id from group_management_fixture)),
   1,
-  'ownership transfer keeps the surviving group after old owner deletion'
+  '소유권 이전 후 이전 소유자를 삭제해도 그룹은 유지된다'
 );
 select ok(
   not exists (
@@ -925,7 +923,7 @@ select ok(
     where a.entity_type = 'memberships'
       and a.entity_id is not null
   ),
-  'membership audit rows never retain a user UUID'
+  '멤버십 감사 행은 사용자 UUID를 보존하지 않는다'
 );
 select ok(
   not exists (
@@ -934,7 +932,7 @@ select ok(
     where a.entity_type = 'memberships'
       and a.metadata::text ~ '9901|9902|9903|9904'
   ),
-  'membership audit metadata contains no user UUID or PII'
+  '멤버십 감사 메타데이터에는 사용자 UUID나 개인 식별 정보가 없다'
 );
 
 delete from auth.users
@@ -942,7 +940,7 @@ where id = (select cascade_owner_id from group_management_fixture);
 select is(
   (select count(*)::integer from public.groups where id = (select cascade_group_id from group_management_fixture)),
   0,
-  'deleting another owner cascades its group and memberships'
+  '다른 소유자를 삭제하면 해당 그룹과 멤버십이 연쇄 삭제된다'
 );
 
 select * from finish();

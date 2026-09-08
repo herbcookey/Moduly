@@ -45,10 +45,10 @@ alter table public.events
   on delete cascade;
 
 comment on constraint groups_owner_id_fkey on public.groups is
-  'Account deletion policy: deleting auth.users permanently deletes owned groups and their cascading child rows.';
+  '계정 삭제 정책: auth.users를 삭제하면 소유한 그룹과 연쇄 하위 행을 영구 삭제한다.';
 comment on constraint invite_codes_created_by_fkey on public.invite_codes is
-  'Account deletion policy: deleting the creator permanently removes the invite code.';
+  '계정 삭제 정책: 작성자를 삭제하면 초대 코드를 영구 제거한다.';
 comment on constraint events_created_by_fkey on public.events is
-  'Account deletion policy: deleting the author permanently removes the event.';
+  '계정 삭제 정책: 작성자를 삭제하면 일정을 영구 제거한다.';
 
 commit;

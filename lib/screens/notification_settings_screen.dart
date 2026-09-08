@@ -7,13 +7,12 @@ import '../models/notification_models.dart';
 typedef NotificationBoolCallback = FutureOr<void> Function(bool value);
 typedef NotificationActionCallback = FutureOr<void> Function();
 
-/// A presentation-only notification settings page.
+/// 표시만 담당하는 알림 설정 페이지다.
 ///
-/// Account preference, OS permission, and server-provider capability are
-/// intentionally supplied as separate values.  A caller can therefore render
-/// an authorized device with server push unconfigured without conflating the
-/// two states.  All callbacks are optional so the page can also be used as a
-/// read-only diagnostic surface while a session is loading.
+/// 계정 설정, OS 권한, 서버 공급자 기능을 의도적으로 별도 값으로 제공한다. 따라서
+/// 호출자는 권한이 허용된 기기와 설정되지 않은 서버 푸시를 혼동하지 않고 표시할 수
+/// 있다. 모든 콜백은 선택 사항이므로 세션을 불러오는 동안 이 페이지를 읽기 전용
+/// 진단 화면으로 사용할 수도 있다.
 class NotificationSettingsScreen extends StatefulWidget {
   const NotificationSettingsScreen({
     required this.accountEnabled,
@@ -148,10 +147,9 @@ class _NotificationSettingsScreenState
             child: Column(
               children: <Widget>[
                 ListTile(
-                  // OS permission is intentionally a status row, not a
-                  // second product switch.  The account master above is the
-                  // persisted local-reminder preference; the actions below
-                  // only request/recheck the operating-system permission.
+                  // OS 권한은 의도적으로 두 번째 제품 스위치가 아니라 상태 행이다.
+                  // 위의 계정 전체 제어가 저장되는 로컬 알림 설정이고, 아래 동작은
+                  // 운영체제 권한을 요청하거나 다시 확인하기만 한다.
                   title: const Text('이 기기에서 받기'),
                   subtitle: Text(_localSubtitle(permission, localAvailable)),
                   leading: Icon(

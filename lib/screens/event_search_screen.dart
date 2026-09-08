@@ -10,10 +10,9 @@ import '../core/timezone_utils.dart';
 import '../models/app_models.dart';
 import '../state/app_state.dart';
 
-/// Server-backed event search.  Search is deliberately a separate route and
-/// projection from the calendar: the controller owns debounce/cancellation,
-/// while this screen only supplies bounded filters and renders complete event
-/// rows returned by the server.
+/// 서버 기반 일정 검색이다. 검색은 의도적으로 달력과 별도의 경로 및 프로젝션으로
+/// 구성한다. 컨트롤러가 디바운스와 취소를 담당하고, 이 화면은 제한된 필터를
+/// 제공하며 서버가 반환한 완전한 일정 행만 렌더링한다.
 class EventSearchScreen extends ConsumerStatefulWidget {
   const EventSearchScreen({super.key});
 
@@ -50,9 +49,8 @@ class _EventSearchScreenState extends ConsumerState<EventSearchScreen> {
     _setRangeDatesFromRange(range, group.timezone);
     if (!_didInitialize) {
       _didInitialize = true;
-      // Empty query is a supported period/filter-only search.  Use one
-      // immediate request on entry instead of also scheduling the same work
-      // through setSearchFilters.
+      // 빈 쿼리는 지원되는 기간/필터 전용 검색이다. 진입 시 요청을 즉시 한 번
+      // 실행하고 setSearchFilters를 통해 같은 작업을 다시 예약하지 않는다.
       unawaited(
         controller.searchEvents(
           range: range,
@@ -79,8 +77,8 @@ class _EventSearchScreenState extends ConsumerState<EventSearchScreen> {
 
   void _setRangeDatesFromRange(EventRange range, String timezone) {
     final start = utcToWallTime(range.startUtc, timezone);
-    // The end is exclusive.  Subtracting one microsecond preserves a date at
-    // the end of a DST-short/long day before converting back to wall time.
+    // 종료점은 포함하지 않는다. 1마이크로초를 빼면 DST로 짧거나 긴 날의 끝에서도
+    // 현지 시각으로 되돌리기 전에 날짜를 보존할 수 있다.
     final end = utcToWallTime(
       range.endUtc.subtract(const Duration(microseconds: 1)),
       timezone,
@@ -163,11 +161,13 @@ class _EventSearchScreenState extends ConsumerState<EventSearchScreen> {
             group.timezone,
           ),
         );
+    final pickerStart = CalendarDateBounds.clamp(currentStart);
+    final pickerEnd = CalendarDateBounds.clamp(currentEnd);
     final picked = await showDateRangePicker(
       context: context,
-      firstDate: DateTime(2000),
-      lastDate: DateTime(2100, 12, 31),
-      initialDateRange: DateTimeRange(start: currentStart, end: currentEnd),
+      firstDate: CalendarDateBounds.firstDate,
+      lastDate: CalendarDateBounds.lastDate,
+      initialDateRange: DateTimeRange(start: pickerStart, end: pickerEnd),
       helpText: '검색 날짜 범위',
       cancelText: '취소',
       confirmText: '선택',
@@ -387,10 +387,9 @@ class _EventSearchScreenState extends ConsumerState<EventSearchScreen> {
       hint: '비워 두면 날짜와 필터로 검색합니다. 두 글자 이상 입력하세요.',
       child: TextField(
         controller: _queryController,
-        // Flutter's built-in counter measures UTF-16 code units, while the
-        // server contract measures Unicode scalars and UTF-8 bytes.  Let the
-        // controller perform the canonical validation instead of truncating
-        // an emoji or other astral character early.
+        // Flutter 내장 카운터는 UTF-16 코드 단위를 세지만 서버 계약은 Unicode
+        // 스칼라와 UTF-8 바이트를 센다. 이모지나 다른 보조 평면 문자를 미리 잘라내지
+        // 말고 컨트롤러가 표준 검증을 수행하게 한다.
         maxLengthEnforcement: MaxLengthEnforcement.none,
         buildCounter:
             (

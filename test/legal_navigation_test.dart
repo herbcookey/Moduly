@@ -7,9 +7,7 @@ import 'package:moduly/app.dart';
 import 'package:moduly/screens/auth_screens.dart';
 
 void main() {
-  testWidgets('privacy policy and terms are reachable while signed out', (
-    tester,
-  ) async {
+  testWidgets('로그아웃 상태에서 개인정보처리방침과 약관에 접근할 수 있다', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
     await tester.pumpAndSettle();
     final router = GoRouter.of(tester.element(find.byType(LoginScreen)));
@@ -27,7 +25,7 @@ void main() {
     expect(find.textContaining('법률 자문이 아닙니다'), findsWidgets);
   });
 
-  testWidgets('settings exposes the same legal document links', (tester) async {
+  testWidgets('설정이 같은 법률 문서 링크를 제공한다', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: ModulyApp()));
     await tester.pumpAndSettle();
     await tester.tap(find.text('데모 값 채우기'));

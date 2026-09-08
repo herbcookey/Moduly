@@ -241,188 +241,173 @@ PlannerGroup _plannerGroup(String id) => PlannerGroup(id: id, name: id);
 void main() {
   setUpAll(tzdata.initializeTimeZones);
 
-  test(
-    'PlannerController filters events by local calendar day and member',
-    () async {
-      final controller = PlannerController(
-        auth: _NoAuth(),
-        repository: _NoSchedule(),
-      );
-      addTearDown(controller.dispose);
-      await Future<void>.delayed(Duration.zero);
+  test('PlannerController가 현지 달력 날짜와 멤버로 일정을 필터링한다', () async {
+    final controller = PlannerController(
+      auth: _NoAuth(),
+      repository: _NoSchedule(),
+    );
+    addTearDown(controller.dispose);
+    await Future<void>.delayed(Duration.zero);
 
-      final start = DateTime.utc(2026, 5, 1, 23);
-      final end = DateTime.utc(2026, 5, 2, 1);
-      final event = PlannerEvent(
-        id: 'cross-midnight',
-        groupId: 'g',
-        title: 'Cross midnight',
-        startAt: start,
-        endAt: end,
-        ownerId: 'owner',
-        memberIds: const <String>['member'],
-      );
-      controller.events = <PlannerEvent>[event];
+    final start = DateTime.utc(2026, 5, 1, 23);
+    final end = DateTime.utc(2026, 5, 2, 1);
+    final event = PlannerEvent(
+      id: 'cross-midnight',
+      groupId: 'g',
+      title: 'Cross midnight',
+      startAt: start,
+      endAt: end,
+      ownerId: 'owner',
+      memberIds: const <String>['member'],
+    );
+    controller.events = <PlannerEvent>[event];
 
-      controller.setSelectedDay(start.toLocal());
-      expect(
-        controller.visibleEvents.map((value) => value.id),
-        contains('cross-midnight'),
-      );
-      controller.setSelectedDay(end.toLocal());
-      expect(
-        controller.visibleEvents.map((value) => value.id),
-        contains('cross-midnight'),
-      );
+    controller.setSelectedDay(start.toLocal());
+    expect(
+      controller.visibleEvents.map((value) => value.id),
+      contains('cross-midnight'),
+    );
+    controller.setSelectedDay(end.toLocal());
+    expect(
+      controller.visibleEvents.map((value) => value.id),
+      contains('cross-midnight'),
+    );
 
-      controller.setMemberFilter('other-member');
-      expect(controller.visibleEvents, isEmpty);
-      controller.setMemberFilter('member');
-      expect(
-        controller.visibleEvents.map((value) => value.id),
-        contains('cross-midnight'),
-      );
-      controller.setMemberFilter('owner');
-      expect(controller.visibleEvents, isEmpty);
-    },
-  );
+    controller.setMemberFilter('other-member');
+    expect(controller.visibleEvents, isEmpty);
+    controller.setMemberFilter('member');
+    expect(
+      controller.visibleEvents.map((value) => value.id),
+      contains('cross-midnight'),
+    );
+    controller.setMemberFilter('owner');
+    expect(controller.visibleEvents, isEmpty);
+  });
 
-  test(
-    'filters events by the event IANA timezone, not the device timezone',
-    () async {
-      final controller = PlannerController(
-        auth: _NoAuth(),
-        repository: _NoSchedule(),
-      );
-      addTearDown(controller.dispose);
-      final event = PlannerEvent(
-        id: 'la-midnight',
-        groupId: 'g',
-        title: 'LA midnight',
-        startAt: DateTime.utc(2026, 3, 8, 8),
-        endAt: DateTime.utc(2026, 3, 9, 7),
-        ownerId: 'owner',
-        allDay: true,
-        timezone: 'America/Los_Angeles',
-        allDayStartDate: DateTime(2026, 3, 8),
-        allDayEndDate: DateTime(2026, 3, 9),
-      );
-      controller.events = <PlannerEvent>[event];
-      controller.selectedDay = DateTime(2026, 3, 8);
-      expect(
-        controller.visibleEvents.map((item) => item.id),
-        contains('la-midnight'),
-      );
-      controller.selectedDay = DateTime(2026, 3, 9);
-      expect(controller.visibleEvents, isEmpty);
-    },
-  );
+  test('기기 시간대가 아닌 일정의 IANA 시간대로 일정을 필터링한다', () async {
+    final controller = PlannerController(
+      auth: _NoAuth(),
+      repository: _NoSchedule(),
+    );
+    addTearDown(controller.dispose);
+    final event = PlannerEvent(
+      id: 'la-midnight',
+      groupId: 'g',
+      title: 'LA midnight',
+      startAt: DateTime.utc(2026, 3, 8, 8),
+      endAt: DateTime.utc(2026, 3, 9, 7),
+      ownerId: 'owner',
+      allDay: true,
+      timezone: 'America/Los_Angeles',
+      allDayStartDate: DateTime(2026, 3, 8),
+      allDayEndDate: DateTime(2026, 3, 9),
+    );
+    controller.events = <PlannerEvent>[event];
+    controller.selectedDay = DateTime(2026, 3, 8);
+    expect(
+      controller.visibleEvents.map((item) => item.id),
+      contains('la-midnight'),
+    );
+    controller.selectedDay = DateTime(2026, 3, 9);
+    expect(controller.visibleEvents, isEmpty);
+  });
 
-  test(
-    'stale leave completion does not purge a newly authenticated account',
-    () async {
-      final auth = _EventAuth();
-      final schedule = _MutationSchedule();
-      final notifications = _RecordingNotifications();
-      final leaveGate = Completer<void>();
-      schedule.leaveGate = leaveGate.future;
-      final controller = PlannerController(
-        auth: auth,
-        repository: schedule,
-        notifications: notifications,
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settlePlannerCallbacks();
+  test('오래된 탈퇴 완료가 새로 인증된 계정을 지우지 않는다', () async {
+    final auth = _EventAuth();
+    final schedule = _MutationSchedule();
+    final notifications = _RecordingNotifications();
+    final leaveGate = Completer<void>();
+    schedule.leaveGate = leaveGate.future;
+    final controller = PlannerController(
+      auth: auth,
+      repository: schedule,
+      notifications: notifications,
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settlePlannerCallbacks();
 
-      controller.user = _plannerUser('user-a');
-      controller.selectedGroup = _plannerGroup('group-a');
-      final leave = controller.leaveGroup();
-      await _settlePlannerCallbacks();
-      expect(schedule.leaveCalled, isTrue);
+    controller.user = _plannerUser('user-a');
+    controller.selectedGroup = _plannerGroup('group-a');
+    final leave = controller.leaveGroup();
+    await _settlePlannerCallbacks();
+    expect(schedule.leaveCalled, isTrue);
 
-      final userB = _plannerUser('user-b');
-      auth.value = userB;
-      auth.emit(AuthRepositoryEvent(type: AuthEventType.signedIn, user: userB));
-      await _settlePlannerCallbacks();
-      leaveGate.complete();
-      await leave;
-      await _settlePlannerCallbacks();
+    final userB = _plannerUser('user-b');
+    auth.value = userB;
+    auth.emit(AuthRepositoryEvent(type: AuthEventType.signedIn, user: userB));
+    await _settlePlannerCallbacks();
+    leaveGate.complete();
+    await leave;
+    await _settlePlannerCallbacks();
 
-      expect(controller.user?.id, 'user-b');
-      expect(notifications.cancelledGroups, isEmpty);
-    },
-  );
+    expect(controller.user?.id, 'user-b');
+    expect(notifications.cancelledGroups, isEmpty);
+  });
 
-  test(
-    'stale archive completion does not purge a newly authenticated account',
-    () async {
-      final auth = _EventAuth();
-      final schedule = _MutationSchedule();
-      final notifications = _RecordingNotifications();
-      final archiveGate = Completer<void>();
-      schedule.archiveGate = archiveGate.future;
-      final controller = PlannerController(
-        auth: auth,
-        repository: schedule,
-        notifications: notifications,
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settlePlannerCallbacks();
+  test('오래된 보관 완료가 새로 인증된 계정을 지우지 않는다', () async {
+    final auth = _EventAuth();
+    final schedule = _MutationSchedule();
+    final notifications = _RecordingNotifications();
+    final archiveGate = Completer<void>();
+    schedule.archiveGate = archiveGate.future;
+    final controller = PlannerController(
+      auth: auth,
+      repository: schedule,
+      notifications: notifications,
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settlePlannerCallbacks();
 
-      controller.user = _plannerUser('user-a');
-      controller.selectedGroup = _plannerGroup('group-a');
-      final archive = controller.archiveGroup();
-      await _settlePlannerCallbacks();
-      expect(schedule.archiveCalled, isTrue);
+    controller.user = _plannerUser('user-a');
+    controller.selectedGroup = _plannerGroup('group-a');
+    final archive = controller.archiveGroup();
+    await _settlePlannerCallbacks();
+    expect(schedule.archiveCalled, isTrue);
 
-      final userB = _plannerUser('user-b');
-      auth.value = userB;
-      auth.emit(AuthRepositoryEvent(type: AuthEventType.signedIn, user: userB));
-      await _settlePlannerCallbacks();
-      archiveGate.complete();
-      await archive;
-      await _settlePlannerCallbacks();
+    final userB = _plannerUser('user-b');
+    auth.value = userB;
+    auth.emit(AuthRepositoryEvent(type: AuthEventType.signedIn, user: userB));
+    await _settlePlannerCallbacks();
+    archiveGate.complete();
+    await archive;
+    await _settlePlannerCallbacks();
 
-      expect(controller.user?.id, 'user-b');
-      expect(notifications.cancelledGroups, isEmpty);
-    },
-  );
+    expect(controller.user?.id, 'user-b');
+    expect(notifications.cancelledGroups, isEmpty);
+  });
 
-  test(
-    'same-account group switch still cancels the completed leave group',
-    () async {
-      final auth = _EventAuth();
-      final schedule = _MutationSchedule();
-      final notifications = _RecordingNotifications();
-      final leaveGate = Completer<void>();
-      schedule.leaveGate = leaveGate.future;
-      final controller = PlannerController(
-        auth: auth,
-        repository: schedule,
-        notifications: notifications,
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settlePlannerCallbacks();
+  test('같은 계정의 그룹 전환도 탈퇴 완료된 그룹을 취소한다', () async {
+    final auth = _EventAuth();
+    final schedule = _MutationSchedule();
+    final notifications = _RecordingNotifications();
+    final leaveGate = Completer<void>();
+    schedule.leaveGate = leaveGate.future;
+    final controller = PlannerController(
+      auth: auth,
+      repository: schedule,
+      notifications: notifications,
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settlePlannerCallbacks();
 
-      controller.user = _plannerUser('user-a');
-      controller.selectedGroup = _plannerGroup('group-a');
-      final leave = controller.leaveGroup();
-      await _settlePlannerCallbacks();
-      controller.selectedGroup = _plannerGroup('group-b');
-      leaveGate.complete();
-      await leave;
-      await _settlePlannerCallbacks();
+    controller.user = _plannerUser('user-a');
+    controller.selectedGroup = _plannerGroup('group-a');
+    final leave = controller.leaveGroup();
+    await _settlePlannerCallbacks();
+    controller.selectedGroup = _plannerGroup('group-b');
+    leaveGate.complete();
+    await leave;
+    await _settlePlannerCallbacks();
 
-      expect(notifications.cancelledGroups, <String>['group-a']);
-    },
-  );
+    expect(notifications.cancelledGroups, <String>['group-a']);
+  });
 }

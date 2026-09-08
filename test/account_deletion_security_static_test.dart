@@ -21,7 +21,7 @@ void main() {
     ).readAsStringSync();
   });
 
-  test('Edge deletion verifies JWT and resolves current key-set secrets', () {
+  test('Edge 삭제가 JWT를 검증하고 현재 키 집합 비밀 값을 확인한다', () {
     expect(edgeFunction, contains('raw.trim().length === 0'));
     expect(edgeFunction, isNot(contains('raw.trim().isEmpty')));
     expect(edgeFunction, contains("defaultKey('SUPABASE_PUBLISHABLE_KEYS')"));
@@ -47,7 +47,7 @@ void main() {
     expect(functionConfig, contains('verify_jwt = false'));
   });
 
-  test('Edge deletion handles Flutter web CORS preflight before auth', () {
+  test('Edge 삭제가 인증 전에 Flutter 웹 CORS 사전 요청을 처리한다', () {
     expect(edgeFunction, contains("'Access-Control-Allow-Origin': '*'"));
     expect(
       edgeFunction,
@@ -70,34 +70,28 @@ void main() {
     expect(
       edgeFunction,
       contains("headers: jsonHeaders"),
-      reason: 'every JSON response should carry the CORS headers',
+      reason: '모든 JSON 응답에 CORS 헤더가 있어야 한다',
     );
   });
 
-  test(
-    'preflight validator is pure and has no logging or provider dependency',
-    () {
-      expect(
-        preflightValidator,
-        contains('export function isValidDeletionSummary'),
-      );
-      expect(preflightValidator, contains('return false'));
-      expect(preflightValidator, contains('return true'));
-      expect(preflightValidator, isNot(contains('Deno.')));
-      expect(preflightValidator, isNot(contains('supabase')));
-      expect(preflightValidator, isNot(contains('console.')));
-    },
-  );
+  test('사전 검사기가 순수하며 로깅이나 공급자 의존성이 없다', () {
+    expect(
+      preflightValidator,
+      contains('export function isValidDeletionSummary'),
+    );
+    expect(preflightValidator, contains('return false'));
+    expect(preflightValidator, contains('return true'));
+    expect(preflightValidator, isNot(contains('Deno.')));
+    expect(preflightValidator, isNot(contains('supabase')));
+    expect(preflightValidator, isNot(contains('console.')));
+  });
 
-  test(
-    'account deletion migration documents the owned-data cascade policy',
-    () {
-      final sql = accountMigration.toLowerCase();
-      expect(sql, contains('groups_owner_id_fkey'));
-      expect(sql, contains('invite_codes_created_by_fkey'));
-      expect(sql, contains('events_created_by_fkey'));
-      expect(sql, contains('on delete cascade'));
-      expect(sql, contains('감사 행은'));
-    },
-  );
+  test('계정 삭제 마이그레이션이 소유 데이터 연쇄 삭제 정책을 설명한다', () {
+    final sql = accountMigration.toLowerCase();
+    expect(sql, contains('groups_owner_id_fkey'));
+    expect(sql, contains('invite_codes_created_by_fkey'));
+    expect(sql, contains('events_created_by_fkey'));
+    expect(sql, contains('on delete cascade'));
+    expect(sql, contains('감사 행은'));
+  });
 }

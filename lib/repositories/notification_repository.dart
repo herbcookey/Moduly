@@ -54,9 +54,8 @@ String _strictNotificationUuid(Object? value, String message) {
   return value;
 }
 
-/// Read/write boundary for desired notification settings and the bounded
-/// all-group candidate projection.  The interface is additive: existing
-/// ScheduleRepository test doubles do not implement it.
+/// 원하는 알림 설정과 제한된 전체 그룹 후보 프로젝션의 읽기/쓰기 경계다. 인터페이스는
+/// 추가형이며 기존 ScheduleRepository 테스트 대역은 이를 구현하지 않는다.
 abstract interface class NotificationRepository {
   NotificationCapabilityState get capability;
 
@@ -69,9 +68,8 @@ abstract interface class NotificationRepository {
 
   Future<List<EventNotificationPreference>> preferencesForUser(String userId);
 
-  /// Reads the series-wide settings for one logical event. The default
-  /// implementation keeps older adapters source-compatible by filtering the
-  /// user list when they can provide it.
+  /// 논리 일정 하나의 시리즈 전체 설정을 읽는다. 기본 구현은 이전 어댑터가 사용자
+  /// 목록을 제공할 수 있으면 이를 필터링하여 소스 호환성을 유지한다.
   Future<List<EventNotificationPreference>> preferencesForEvent({
     required String userId,
     required String eventId,
@@ -100,9 +98,8 @@ abstract interface class NotificationRepository {
   });
 }
 
-/// In-memory/local adapter used by demo and unit tests. It mirrors the remote
-/// participant projection through bounded `eventsForRange` pages instead of
-/// reading a full event stream.
+/// 데모 및 단위 테스트에서 사용하는 메모리/로컬 어댑터다. 전체 일정 스트림을 읽는
+/// 대신 제한된 `eventsForRange` 페이지를 통해 원격 참여자 프로젝션을 재현한다.
 class LocalNotificationRepository implements NotificationRepository {
   LocalNotificationRepository(
     this.schedule, {
@@ -273,8 +270,8 @@ class LocalNotificationRepository implements NotificationRepository {
     final eventsByIdentity = <String, PlannerEvent>{};
     for (final group in groups) {
       if (group.id.trim().isEmpty) continue;
-      // The remote range RPC accepts local-midnight boundaries and max 366
-      // civil days. Split a wide look-behind window by group timezone.
+      // 원격 범위 RPC는 현지 자정 경계와 최대 366일의 민간력 날짜를 허용한다.
+      // 넓은 과거 조회 창은 그룹 시간대에 따라 나눈다.
       final localStart = civilDateOnly(utcToWallTime(start, group.timezone));
       final localEnd = civilDateAdd(
         civilDateOnly(utcToWallTime(end, group.timezone)),
@@ -445,9 +442,8 @@ class LocalNotificationRepository implements NotificationRepository {
   }
 }
 
-/// Production remote adapter. Push devices/outbox are intentionally not
-/// exposed here; this slice only reads/writes user-local desired settings and
-/// the bounded local candidate RPC.
+/// 프로덕션 원격 어댑터다. 푸시 기기/송신함은 여기서 의도적으로 노출하지 않는다.
+/// 이 범위에서는 사용자 로컬 희망 설정과 제한된 로컬 후보 RPC만 읽고 쓴다.
 class SupabaseNotificationRepository implements NotificationRepository {
   SupabaseNotificationRepository(this.client);
 
@@ -509,9 +505,8 @@ class SupabaseNotificationRepository implements NotificationRepository {
     }
     return UserNotificationSettings(
       userId: userId,
-      // The remote schema has one local account switch. Keep the model's
-      // master flag in lock-step with local_enabled while retaining the
-      // separate local/push projections for UI capability display.
+      // 원격 스키마에는 로컬 계정 전환이 하나 있다. UI 기능 표시에 사용할 별도
+      // 로컬/푸시 프로젝션은 유지하면서 모델의 전체 제어 플래그를 local_enabled와 맞춘다.
       enabled: raw['local_enabled'] as bool,
       localEnabled: raw['local_enabled'] as bool,
       pushEnabled: raw['push_enabled'] as bool,
@@ -530,9 +525,8 @@ class SupabaseNotificationRepository implements NotificationRepository {
       'set_notification_preferences',
       params: <String, dynamic>{
         'p_local_enabled': settings.enabled && settings.localEnabled,
-        // Push is an independent desired channel. Keep its account intent
-        // when the local master is off; the server validates capability when
-        // a caller attempts to turn push on for the first time.
+        // 푸시는 독립적으로 원하는 채널이다. 로컬 전체 제어가 꺼져 있어도 계정 의도를
+        // 유지한다. 호출자가 처음 푸시를 켜려고 할 때 서버가 기능을 검증한다.
         'p_push_enabled': settings.pushEnabled,
         'p_expected_version': expected,
       },
@@ -587,9 +581,8 @@ class SupabaseNotificationRepository implements NotificationRepository {
     String userId,
   ) async {
     _requireCurrentUser(userId);
-    // The authenticated RPC intentionally exposes one event at a time. This
-    // method remains available for local parity; remote callers should use
-    // preferencesForEvent for the event currently being edited.
+    // 인증된 RPC는 의도적으로 한 번에 일정 하나만 노출한다. 이 메서드는 로컬 동등성을
+    // 위해 남겨 둔다. 원격 호출자는 현재 편집 중인 일정에 preferencesForEvent를 사용해야 한다.
     return const <EventNotificationPreference>[];
   }
 
@@ -637,11 +630,9 @@ class SupabaseNotificationRepository implements NotificationRepository {
       capabilities['push'],
       '일정 알림 푸시 기능 상태를 확인할 수 없습니다.',
     );
-    // The get RPC reports capability even when no row exists.  There is no
-    // preference value in this envelope to tie to the two strings, but
-    // retaining the validation above prevents a forged capability from
-    // crossing the repository boundary (and keeps the values available for a
-    // future capability-bearing state model).
+    // 조회 RPC는 행이 없어도 기능을 보고한다. 이 봉투에는 두 문자열과 연결할 설정값이
+    // 없지만, 위 검증을 유지하면 위조된 기능이 저장소 경계를 넘지 못한다.
+    // 또한 향후 기능을 포함하는 상태 모델에서 사용할 수 있도록 값을 유지한다.
     if (localCapability == 'push_configured' ||
         localCapability == 'push_unconfigured' ||
         pushCapability == 'client_local_scheduler') {
@@ -892,9 +883,8 @@ class SupabaseNotificationRepository implements NotificationRepository {
       try {
         candidate = ReminderCandidate.fromJson(item);
       } on FormatException {
-        // Transport/model parse errors stay within the repository's typed
-        // boundary; callers must not need to distinguish malformed remote
-        // JSON from another invalid RPC receipt.
+        // 전송/모델 파싱 오류는 저장소의 형식 지정 경계 안에 둔다. 호출자가 잘못된
+        // 원격 JSON과 다른 유효하지 않은 RPC 처리 결과를 구분할 필요가 없어야 한다.
         throw const ScheduleConflictException('알림 후보 응답을 확인할 수 없습니다.');
       }
       if (candidate.channel != NotificationChannel.local ||
@@ -956,8 +946,8 @@ class SupabaseNotificationRepository implements NotificationRepository {
   }
 }
 
-/// Configuration-blocked production adapter. It is explicit in state/UI and
-/// never pretends that a reminder was scheduled.
+/// 설정 때문에 차단된 프로덕션 어댑터다. 상태/UI에 이를 명확히 표시하고 알림이
+/// 예약된 것처럼 절대 가장하지 않는다.
 class ConfigurationBlockedNotificationRepository
     implements NotificationRepository {
   ConfigurationBlockedNotificationRepository(this.message);

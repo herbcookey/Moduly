@@ -20,11 +20,10 @@ import 'group_management_dialogs.dart';
 class MembersScreen extends ConsumerWidget {
   const MembersScreen({super.key});
 
-  /// Resolve the version at the moment a dialog submits, rather than the
-  /// version captured when that dialog opened.  Conflict recovery reloads the
-  /// controller while keeping the dialog (and its draft) alive, so a retry
-  /// must use that freshly loaded value.  A switched/removed/archived group
-  /// is a terminal stale callback and fails closed before any repository write.
+  /// 대화상자가 열릴 때 포착한 버전이 아니라 제출하는 순간의 버전을 확인한다.
+  /// 충돌 복구는 대화상자와 초안을 유지한 채 컨트롤러를 다시 불러오므로 재시도에는
+  /// 새로 불러온 값을 사용해야 한다. 전환되었거나 제거 또는 보관된 그룹은 최종적인
+  /// 오래된 콜백으로 간주하고 저장소에 쓰기 전에 실패 시 차단한다.
   static PlannerGroup _latestGroupForSubmit(
     PlannerController controller,
     PlannerGroup openedGroup,
@@ -536,10 +535,9 @@ class _CreateInviteDialogState extends State<_CreateInviteDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    // Keep the title and form in the dialog's flexible scroll viewport.  A
-    // focused field can leave only a short viewport when the keyboard is
-    // visible, especially with a large text scale; a non-scrollable
-    // AlertDialog lets the form's intrinsic height overflow that viewport.
+    // 제목과 양식을 대화상자의 유연한 스크롤 표시 영역 안에 둔다. 키보드가 표시되면,
+    // 특히 글자 크기가 클 때 초점이 맞은 필드에 매우 짧은 표시 영역만 남을 수 있다.
+    // 스크롤되지 않는 AlertDialog에서는 양식의 고유 높이가 표시 영역을 넘치게 한다.
     scrollable: true,
     insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
     title: const Text('초대 코드 만들기'),
@@ -626,8 +624,8 @@ class _InviteCreatedDialogState extends State<_InviteCreatedDialog> {
   Uri? get _shareLink {
     final token = widget.invite.token;
     if (token == null || token.isEmpty) return null;
-    // A missing/invalid base intentionally yields code-only sharing.  Never
-    // derive a link from the Supabase API URL or invent a hostname.
+    // 기본 주소가 없거나 잘못되면 의도적으로 코드만 공유한다. Supabase API URL에서 링크를
+    // 유도하거나 호스트 이름을 임의로 만들지 않는다.
     return InviteLinkParser.build(
       token,
       config: widget.config,

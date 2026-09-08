@@ -5,18 +5,16 @@ import 'package:flutter/foundation.dart';
 import '../core/timezone_utils.dart';
 import 'app_models.dart';
 
-/// The local reminder contract is deliberately finite.  The platform
-/// adapters may have a smaller effective limit (iOS currently keeps a
-/// headroom below its pending-request quota), but they must never turn this
-/// bounded planner into an unbounded scheduler.
+/// 로컬 알림 계약은 의도적으로 유한하다. 플랫폼 어댑터의 실제 한도는 더 작을 수
+/// 있지만(iOS는 현재 대기 요청 할당량보다 여유를 둔다), 이 제한된 플래너를 제한 없는
+/// 스케줄러로 바꾸어서는 안 된다.
 const Duration reminderPlanningHorizon = Duration(days: 60);
 const int reminderPlanningLimit = 48;
 const int reminderPageLimit = 100;
 const int reminderPageCap = 100;
 
-/// Channels are kept separate even though the first production slice only
-/// enables the local channel.  A push value in persisted preferences is
-/// retained as a typed, disabled capability rather than reported as success.
+/// 첫 프로덕션 단계에서 로컬 채널만 활성화하더라도 채널은 분리해 둔다. 저장된
+/// 설정의 푸시 값은 성공으로 보고하지 않고 형식이 지정된 비활성 기능으로 유지한다.
 enum NotificationChannel { local, push }
 
 extension NotificationChannelWire on NotificationChannel {
@@ -32,8 +30,8 @@ extension NotificationChannelWire on NotificationChannel {
   };
 }
 
-/// Timed offsets are elapsed seconds before an instant.  All-day offsets are
-/// civil calendar days before the event's local start date.
+/// 시간 지정 간격은 해당 시각 전까지의 경과 초 단위다. 종일 일정 간격은 일정의
+/// 현지 시작 날짜 이전의 민간력 날짜 단위다.
 enum NotificationOffsetUnit { seconds, calendarDays }
 
 extension NotificationOffsetUnitWire on NotificationOffsetUnit {
@@ -49,9 +47,8 @@ extension NotificationOffsetUnitWire on NotificationOffsetUnit {
   };
 }
 
-/// OS authorization and product capability are intentionally represented as
-/// different axes.  For example, an Android user may be authorized while the
-/// server push source remains unconfigured.
+/// OS 권한과 제품 기능은 의도적으로 별도 축으로 표현한다. 예를 들어 Android 사용자는
+/// 권한을 허용했지만 서버 푸시 소스는 설정되지 않았을 수 있다.
 enum NotificationPermissionState {
   unsupported,
   unconfigured,
@@ -78,9 +75,8 @@ extension NotificationCapabilityStateWire on NotificationCapabilityState {
   };
 }
 
-/// A user-wide switch.  It is opt-in by default; event settings are retained
-/// while this switch or an OS permission is off so re-enabling can restore the
-/// same desired reminders.
+/// 사용자 전체에 적용되는 스위치다. 기본값은 옵트인이다. 이 스위치나 OS 권한이 꺼진
+/// 동안에도 일정 설정을 유지하여 다시 활성화할 때 원하던 알림을 복원할 수 있게 한다.
 @immutable
 class UserNotificationSettings {
   const UserNotificationSettings({
@@ -101,8 +97,8 @@ class UserNotificationSettings {
 
   bool get localDesired => enabled && localEnabled;
 
-  /// Push is a separate desired channel. The local account master must not
-  /// erase a user's push intent while local reminders are switched off.
+  /// 푸시는 별도로 원하는 채널이다. 로컬 알림이 꺼져 있어도 로컬 계정 전체 제어가
+  /// 사용자의 푸시 의도를 지워서는 안 된다.
   bool get pushDesired => pushEnabled;
 
   UserNotificationSettings copyWith({
@@ -180,10 +176,9 @@ class UserNotificationSettings {
   );
 }
 
-/// Event settings are series-wide.  For a recurring projection the event id
-/// is the logical series anchor and [occurrenceKey] is never persisted in the
-/// preference row.  This keeps one desired setting from silently diverging
-/// across future occurrences.
+/// 일정 설정은 시리즈 전체에 적용된다. 반복 프로젝션에서 일정 ID는 논리 시리즈의
+/// 기준점이며 [occurrenceKey]는 설정 행에 저장하지 않는다. 따라서 하나의 원하는
+/// 설정이 향후 발생분마다 암묵적으로 달라지지 않는다.
 @immutable
 class EventNotificationPreference {
   EventNotificationPreference({
@@ -263,10 +258,9 @@ class EventNotificationPreference {
       'version',
       'updated_at',
     };
-    // The public row wire does not carry the event's optimistic-lock
-    // version (the RPC envelope supplies it), while local snapshots include
-    // it for parity. Accept exactly one of those two shapes; unknown fields
-    // remain rejected.
+    // 공개 행 전송 형식에는 일정의 낙관적 잠금 버전이 없고 RPC 봉투가 제공한다.
+    // 로컬 스냅샷에는 동등성을 위해 이를 포함한다. 이 두 형식만 정확히 허용하며
+    // 알 수 없는 필드는 계속 거부한다.
     final keys = raw.containsKey('event_version')
         ? <String>{...baseKeys, 'event_version'}
         : baseKeys;
@@ -333,10 +327,9 @@ class EventNotificationPreference {
   );
 }
 
-/// One server/local candidate.  The server candidate already carries the
-/// calculated [fireAt] so the client can use the same sorted keyset for all
-/// groups; the local adapter computes the field through [ReminderPlanner]
-/// from the same event projection.
+/// 서버/로컬 후보 하나다. 서버 후보에는 계산된 [fireAt]이 이미 있어 클라이언트가 모든
+/// 그룹에 같은 정렬 키 집합을 사용할 수 있다. 로컬 어댑터는 같은 일정 프로젝션에서
+/// [ReminderPlanner]를 통해 이 필드를 계산한다.
 @immutable
 class ReminderCandidate {
   ReminderCandidate({
@@ -457,10 +450,9 @@ class ReminderCandidate {
     }
 
     return ReminderCandidate(
-      // Candidate rows come from the authenticated RPC and use PostgreSQL
-      // UUID columns for both resource identifiers.  Keep constructors
-      // permissive for local/demo projections, but make the wire parser
-      // reject an accidental legacy slug before it can reach the scheduler.
+      // 후보 행은 인증된 RPC에서 오며 두 리소스 식별자 모두 PostgreSQL UUID 열을
+      // 사용한다. 로컬/데모 프로젝션을 위해 생성자는 관대하게 유지하지만, 실수로
+      // 들어온 기존 슬러그가 스케줄러에 도달하기 전에 전송 형식 파서에서 거부한다.
       eventId: _strictUuid(raw['event_id']),
       groupId: _strictUuid(raw['group_id']),
       occurrenceKey: _strictOccurrenceKey(raw['occurrence_key']),
@@ -558,9 +550,8 @@ class ReminderCandidate {
   );
 }
 
-/// Keyset cursor for the all-group candidate RPC.  It is intentionally not
-/// interchangeable with [EventRangeCursor]: fire-at, not event start, is the
-/// primary ordering field.
+/// 전체 그룹 후보 RPC용 키 집합 커서다. 일정 시작이 아니라 알림 시각이 기본 정렬
+/// 필드이므로 의도적으로 [EventRangeCursor]와 호환되지 않는다.
 @immutable
 class ReminderCandidateCursor {
   ReminderCandidateCursor({
@@ -663,8 +654,8 @@ class ReminderCandidatePage {
   final bool hasMore;
   final NotificationCapabilityState capability;
 
-  /// False means a bounded page cap/transport error prevented a complete
-  /// authoritative set; callers must not cancel IDs that were not observed.
+  /// `false`는 제한된 페이지 상한/전송 오류 때문에 완전하고 신뢰할 수 있는 집합을
+  /// 만들지 못했다는 뜻이다. 호출자는 관찰되지 않은 ID를 취소하면 안 된다.
   final bool complete;
 
   static ReminderCandidatePage empty({
@@ -678,9 +669,9 @@ class ReminderCandidatePage {
   );
 }
 
-/// A strict, token-free deep-link payload.  Event title/note/member data is
-/// deliberately absent; the destination must re-read authoritative data after
-/// validating the user's session and group membership.
+/// 엄격하고 토큰이 없는 딥 링크 페이로드다. 일정 제목/메모/멤버 데이터는 의도적으로
+/// 제외한다. 목적지는 사용자 세션과 그룹 멤버십을 검증한 뒤 신뢰할 수 있는 데이터를
+/// 다시 읽어야 한다.
 @immutable
 class NotificationPayload {
   const NotificationPayload({
@@ -757,8 +748,8 @@ class NotificationPayload {
   }
 }
 
-/// Data passed to the native scheduler.  [notificationId] is allocated by
-/// [NotificationIdAllocator], never generated by the platform adapter.
+/// 네이티브 스케줄러에 전달하는 데이터다. [notificationId]는
+/// [NotificationIdAllocator]가 할당하며 플랫폼 어댑터가 생성하지 않는다.
 @immutable
 class NotificationScheduleRequest {
   const NotificationScheduleRequest({

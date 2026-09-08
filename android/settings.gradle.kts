@@ -4,7 +4,7 @@ pluginManagement {
             val properties = java.util.Properties()
             file("local.properties").inputStream().use { properties.load(it) }
             val flutterSdkPath = properties.getProperty("flutter.sdk")
-            require(flutterSdkPath != null) { "flutter.sdk not set in local.properties" }
+            require(flutterSdkPath != null) { "local.properties에 flutter.sdk가 설정되지 않았습니다" }
             flutterSdkPath
         }
 

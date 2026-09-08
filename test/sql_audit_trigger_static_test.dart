@@ -9,18 +9,14 @@ void main() {
     final file = File(
       'supabase/migrations/202608140005_write_audit_log_field_safe.sql',
     );
-    expect(
-      file.existsSync(),
-      isTrue,
-      reason: 'The field-safe audit trigger migration is required',
-    );
+    expect(file.existsSync(), isTrue, reason: '필드에 안전한 감사 트리거 마이그레이션이 필요하다');
     migration = file.readAsStringSync().toLowerCase().replaceAll(
       RegExp(r'\s+'),
       ' ',
     );
   });
 
-  test('audit trigger branches before reading table-specific fields', () {
+  test('감사 트리거가 테이블별 필드를 읽기 전에 분기한다', () {
     expect(
       migration,
       contains('create or replace function public.write_audit_log()'),
@@ -34,7 +30,7 @@ void main() {
       expect(
         migration,
         contains("if tg_table_name = '$table' then"),
-        reason: 'write_audit_log must isolate $table record fields',
+        reason: 'write_audit_log가 $table 레코드 필드를 격리해야 한다',
       );
     }
 
@@ -60,7 +56,7 @@ void main() {
     );
   });
 
-  test('audit rows keep the existing privacy and lifecycle contract', () {
+  test('감사 행이 기존 개인정보 보호 및 수명 주기 계약을 유지한다', () {
     expect(migration, contains('security definer'));
     expect(migration, contains('set search_path = public, auth, extensions'));
     expect(migration, contains('jsonb_build_object(\'version\', v_version)'));

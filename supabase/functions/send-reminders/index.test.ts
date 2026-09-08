@@ -2,7 +2,7 @@ import { handleRequest } from "./index.ts";
 
 function assert(
   condition: unknown,
-  message = "assertion failed",
+  message = "검증에 실패했습니다",
 ): asserts condition {
   if (!condition) throw new Error(message);
 }
@@ -10,17 +10,17 @@ function assert(
 function assertEquals<T>(actual: T, expected: T): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error(
-      `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+      `기댓값: ${JSON.stringify(expected)}, 실제 값: ${JSON.stringify(actual)}`,
     );
   }
 }
 
 function assertFalse(value: unknown): void {
-  assert(value === false, `expected false, got ${String(value)}`);
+  assert(value === false, `false를 기대했지만 ${String(value)}을(를) 받았습니다`);
 }
 
 function assertStringIncludes(value: string, fragment: string): void {
-  assert(value.includes(fragment), `expected ${value} to include ${fragment}`);
+  assert(value.includes(fragment), `${value}에 ${fragment}이(가) 포함되어야 합니다`);
 }
 
 const envNames = [
@@ -104,7 +104,7 @@ async function installFetch(
   };
 }
 
-Deno.test("send-reminders authenticates, bounds claims, and sanitizes worker output", async () => {
+Deno.test("send-reminders가 인증하고 작업 가져오기 범위를 제한하며 작업자 출력을 정제한다", async () => {
   await withCleanEnvironment(async () => {
     const unauthorizedCalls: RpcCall[] = [];
     const restoreUnauthorized = await installFetch(
@@ -112,8 +112,8 @@ Deno.test("send-reminders authenticates, bounds claims, and sanitizes worker out
       unauthorizedCalls,
     );
     try {
-      // Missing and mismatched worker secrets fail before URL/key resolution or
-      // any Supabase RPC, including when the request body is malformed.
+      // 작업자 비밀 값이 없거나 일치하지 않으면 요청 본문의 형식이 잘못된
+      // 경우를 포함해 URL/키 확인이나 Supabase RPC 전에 실패한다.
       let response = await handleRequest(request({ limit: 999 }));
       assertEquals(response.status, 401);
       assertEquals(unauthorizedCalls.length, 0);
@@ -128,8 +128,8 @@ Deno.test("send-reminders authenticates, bounds claims, and sanitizes worker out
     Deno.env.set("SUPABASE_URL", "https://project.example");
     Deno.env.set("SUPABASE_SECRET_KEY", "service-key");
 
-    // Capability is checked before either claim path; an unconfigured
-    // deployment leaves every lease untouched and returns an explicit 503.
+    // 두 작업 가져오기 경로보다 먼저 기능을 확인한다. 구성되지 않은 배포는
+    // 모든 임대를 그대로 두고 명시적인 503을 반환한다.
     const unconfiguredCalls: RpcCall[] = [];
     const restoreUnconfigured = await installFetch((name) => {
       assertEquals(name, "worker_push_capability");
@@ -152,11 +152,10 @@ Deno.test("send-reminders authenticates, bounds claims, and sanitizes worker out
       restoreUnconfigured();
     }
 
-    // Configure only the provider capability and a fake provider secret.  The
-    // repository intentionally has no APNs/FCM adapter, so a valid payload is
-    // completed retryably while stale/no-device payloads use their distinct
-    // permanent/retryable receipts.  None of those payload values can escape
-    // the HTTP response or logs.
+    // 제공자 기능과 가짜 제공자 비밀 값만 구성한다. 저장소에는 의도적으로
+    // APNs/FCM 어댑터가 없으므로 유효한 페이로드는 재시도 가능 상태로 완료하고,
+    // 오래되었거나 기기가 없는 페이로드는 각각 영구/재시도 가능 응답을 사용한다.
+    // 해당 페이로드 값은 어느 것도 HTTP 응답이나 로그로 노출될 수 없다.
     Deno.env.set("FCM_SERVER_KEY", "fake-provider-secret");
     const calls: RpcCall[] = [];
     const restoreConfigured = await installFetch((name, params) => {
@@ -210,7 +209,7 @@ Deno.test("send-reminders authenticates, bounds claims, and sanitizes worker out
         case "worker_complete_event_reminder_job":
           return { committed: true, status: params.p_outcome };
         default:
-          throw new Error(`unexpected rpc ${name}`);
+          throw new Error(`예상하지 못한 RPC: ${name}`);
       }
     }, calls);
     const logs: string[] = [];

@@ -45,7 +45,7 @@ class _SocialAuth extends AuthRepository {
 }
 
 void main() {
-  test('demo auth never fabricates a social login success', () async {
+  test('데모 인증이 소셜 로그인 성공을 가장하지 않는다', () async {
     final auth = AuthRepository();
     addTearDown(auth.dispose);
 
@@ -61,7 +61,7 @@ void main() {
     );
   });
 
-  test('controller rejects concurrent social login launches', () async {
+  test('컨트롤러가 동시 소셜 로그인 실행을 거부한다', () async {
     final auth = _SocialAuth()..gate = Completer<void>();
     final controller = PlannerController(
       auth: auth,
@@ -97,7 +97,7 @@ void main() {
     expect(controller.user, isNull);
   });
 
-  test('controller surfaces a safe provider-disabled message', () async {
+  test('컨트롤러가 안전한 공급자 비활성화 메시지를 표시한다', () async {
     final auth = _SocialAuth(
       error: const AuthException('Unsupported provider: kakao'),
     );
@@ -124,36 +124,31 @@ void main() {
     expect(controller.errorMessage, socialAuthProviderDisabledMessage);
   });
 
-  test(
-    'controller maps provider errors even when adapter throws a plain error',
-    () async {
-      final auth = _SocialAuth(error: StateError('provider not enabled'));
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await Future<void>.delayed(Duration.zero);
+  test('어댑터가 일반 오류를 던져도 컨트롤러가 공급자 오류로 변환한다', () async {
+    final auth = _SocialAuth(error: StateError('provider not enabled'));
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await Future<void>.delayed(Duration.zero);
 
-      await expectLater(
-        controller.signInWithOAuth(SocialAuthProvider.kakao),
-        throwsA(
-          isA<AuthException>().having(
-            (error) => error.message,
-            'message',
-            socialAuthProviderDisabledMessage,
-          ),
+    await expectLater(
+      controller.signInWithOAuth(SocialAuthProvider.kakao),
+      throwsA(
+        isA<AuthException>().having(
+          (error) => error.message,
+          'message',
+          socialAuthProviderDisabledMessage,
         ),
-      );
-    },
-  );
+      ),
+    );
+  });
 
-  testWidgets('demo social button explains that remote auth is required', (
-    tester,
-  ) async {
+  testWidgets('데모 소셜 버튼이 원격 인증 필요성을 설명한다', (tester) async {
     await tester.pumpWidget(
       const ProviderScope(child: MaterialApp(home: LoginScreen())),
     );

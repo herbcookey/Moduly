@@ -14,15 +14,15 @@ import 'state/app_state.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Use clean `/invite/<token>` and `/auth-callback` paths in the browser.
-  // Hosting must rewrite those paths to web/index.html (see README); native
-  // platforms simply ignore this web-only URL strategy.
+  // 브라우저에서는 깔끔한 `/invite/<token>` 및 `/auth-callback` 경로를 사용한다.
+  // 호스팅 환경은 이 경로들을 web/index.html로 다시 써야 한다(README 참고).
+  // 네이티브 플랫폼에서는 이 웹 전용 URL 전략을 무시한다.
   if (kIsWeb) url_strategy.usePathUrlStrategy();
   tzdata.initializeTimeZones();
-  // AppLinks is also used internally by Supabase for auth callbacks.  Create
-  // our passive source now, but attach its stream only after Supabase has
-  // established the auth observer.  The source's post-init getInitialLink
-  // probe recovers a native cold invite without racing auth callback setup.
+  // Supabase도 인증 콜백을 위해 내부적으로 AppLinks를 사용한다. 수동 소스는 지금
+  // 만들되, 스트림은 Supabase가 인증 옵저버를 설정한 뒤에만 연결한다. 소스가
+  // 초기화 후 실행하는 getInitialLink 탐색은 인증 콜백 설정과 경합하지 않으면서
+  // 네이티브 콜드 스타트 초대를 복구한다.
   final inviteLinkSource = InviteLinkSource();
   final config = AppConfig.fromEnvironment();
   final releaseConfigurationError = AppConfigPolicy.releaseConfigurationError(

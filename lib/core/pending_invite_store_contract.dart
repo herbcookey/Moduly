@@ -1,9 +1,8 @@
-/// Ephemeral persistence boundary for a pending invite intent.
+/// 대기 중인 초대 의도를 위한 임시 영속성 경계다.
 ///
-/// The store contains only the bearer token and an expiry timestamp.  It is
-/// never used for query parameters, logs, or analytics.  Native callers use
-/// the in-memory implementation; web callers use sessionStorage through the
-/// conditional factory in `pending_invite_store.dart`.
+/// 저장소에는 Bearer 토큰과 만료 타임스탬프만 담는다. 쿼리 매개변수, 로그, 분석에는
+/// 절대 사용하지 않는다. 네이티브 호출자는 메모리 구현을 사용하고 웹 호출자는
+/// `pending_invite_store.dart`의 조건부 팩터리를 통해 sessionStorage를 사용한다.
 class PendingInviteRecord {
   const PendingInviteRecord({required this.token, this.expiresAt});
 
@@ -18,18 +17,17 @@ abstract class PendingInviteStore {
 
   Future<void> clear();
 
-  /// Newer stores preserve the original deadline across a controller reload.
-  /// Legacy test doubles implementing only [read] continue to work with a
-  /// null deadline; the controller applies its bounded fallback TTL.
+  /// 최신 저장소는 컨트롤러를 다시 불러와도 원래 기한을 유지한다. [read]만
+  /// 구현한 레거시 테스트 대역은 `null` 기한으로 계속 동작하며, 컨트롤러가
+  /// 상한이 있는 대체 TTL을 적용한다.
   Future<PendingInviteRecord?> readRecord() async {
     final token = await read();
     return token == null ? null : PendingInviteRecord(token: token);
   }
 }
 
-/// Deterministic fallback for native platforms and tests.  The value is held
-/// only for this store instance and is dropped when the controller is
-/// disposed.
+/// 네이티브 플랫폼과 테스트를 위한 결정론적 대체 구현이다. 값은 이 저장소
+/// 인스턴스에서만 유지되며 컨트롤러가 해제될 때 폐기된다.
 class MemoryPendingInviteStore implements PendingInviteStore {
   String? _token;
   DateTime? _expiresAt;

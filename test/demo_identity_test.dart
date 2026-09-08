@@ -5,7 +5,7 @@ import 'package:moduly/repositories/auth_repository.dart';
 import 'package:moduly/repositories/schedule_repository.dart';
 
 void main() {
-  test('local demo auth and members use Donghyun consistently', () async {
+  test('로컬 데모 인증과 멤버가 Donghyun을 일관되게 사용한다', () async {
     final auth = AuthRepository();
     final user = await auth.signIn(demoUserEmail, 'planner');
     expect(user.id, demoUserId);

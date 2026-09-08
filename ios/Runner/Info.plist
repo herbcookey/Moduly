@@ -24,8 +24,8 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
-	<!-- app_links owns native callback delivery; disable Flutter's competing
-	     default deep-link route handling. -->
+	<!-- app_links가 네이티브 콜백 전달을 담당하므로 충돌하는 Flutter의
+	     기본 딥 링크 라우트 처리를 비활성화한다. -->
 	<key>FlutterDeepLinkingEnabled</key>
 	<false/>
 	<key>CFBundleURLTypes</key>

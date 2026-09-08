@@ -3,8 +3,8 @@ import 'dart:ui';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
 
-/// A narrow seam around share_plus so the one-shot invite dialog can be
-/// tested without opening a platform share sheet.
+/// 일회성 초대 대화상자를 플랫폼 공유 시트 없이 테스트할 수 있게 share_plus를 감싸는
+/// 좁은 접점이다.
 abstract interface class InviteShareService {
   Future<ShareResult> shareInvite({
     required String code,
@@ -36,9 +36,9 @@ class SharePlusInviteShareService implements InviteShareService {
     Uri? link,
     Rect? sharePositionOrigin,
   }) {
-    // Share text rather than passing `uri` alongside `text`: share_plus
-    // intentionally rejects that combination.  This also gives desktop and
-    // web a useful code-only fallback when no HTTPS origin is configured.
+    // `text`와 함께 `uri`를 넘기지 말고 텍스트를 공유한다. share_plus가 이 조합을
+    // 의도적으로 거부하기 때문이다. HTTPS 출처가 설정되지 않았을 때 데스크톱과
+    // 웹에도 유용한 코드 전용 대체 동작을 제공한다.
     final body = link == null
         ? 'Moduly 그룹 초대 코드\n$code'
         : 'Moduly 그룹 초대\n$code\n$link';

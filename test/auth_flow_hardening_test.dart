@@ -135,124 +135,115 @@ Future<void> _settle() async {
 }
 
 void main() {
-  test(
-    'stale sign-in completion cannot restore state after sign-out',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('오래된 로그인 완료가 로그아웃 후 상태를 복원할 수 없다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      final signingIn = controller.signIn('alice@example.com', 'password');
-      await _settle();
-      expect(controller.isSaving, isTrue);
+    final signingIn = controller.signIn('alice@example.com', 'password');
+    await _settle();
+    expect(controller.isSaving, isTrue);
 
-      await controller.signOut();
-      auth.signInLoads.single.complete(_alice);
-      await signingIn;
+    await controller.signOut();
+    auth.signInLoads.single.complete(_alice);
+    await signingIn;
 
-      expect(controller.user, isNull);
-      expect(controller.groups, isEmpty);
-      expect(controller.errorMessage, isNull);
-      expect(controller.isSaving, isFalse);
-      expect(auth.currentUser, isNull);
-      expect(auth.signOutCalls, greaterThanOrEqualTo(1));
-    },
-  );
+    expect(controller.user, isNull);
+    expect(controller.groups, isEmpty);
+    expect(controller.errorMessage, isNull);
+    expect(controller.isSaving, isFalse);
+    expect(auth.currentUser, isNull);
+    expect(auth.signOutCalls, greaterThanOrEqualTo(1));
+  });
 
-  test(
-    'stale signed-in event after sign-out is fenced until a new login',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('로그아웃 후 오래된 로그인 이벤트를 새 로그인까지 차단한다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      final signingIn = controller.signIn('alice@example.com', 'password');
-      await _settle();
-      await controller.signOut();
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
-      );
-      await _settle();
-      expect(controller.user, isNull);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-      expect(auth.currentUser, isNull);
-      expect(auth.signOutCalls, greaterThanOrEqualTo(1));
+    final signingIn = controller.signIn('alice@example.com', 'password');
+    await _settle();
+    await controller.signOut();
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
+    );
+    await _settle();
+    expect(controller.user, isNull);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+    expect(auth.currentUser, isNull);
+    expect(auth.signOutCalls, greaterThanOrEqualTo(1));
 
-      auth.signInLoads.single.complete(_alice);
-      await signingIn;
-      expect(controller.user, isNull);
-      expect(controller.isSaving, isFalse);
-      expect(auth.currentUser, isNull);
-    },
-  );
+    auth.signInLoads.single.complete(_alice);
+    await signingIn;
+    expect(controller.user, isNull);
+    expect(controller.isSaving, isFalse);
+    expect(auth.currentUser, isNull);
+  });
 
-  test(
-    'sign-out preserves its failure when SDK emits signed-out first',
-    () async {
-      final auth = _AuthDouble()
-        ..emitSignedOutBeforeSignOutError = true
-        ..signOutError = const AuthException('network');
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
-      controller.user = _alice;
-      controller.groups = const <PlannerGroup>[_group];
-      controller.selectedGroup = _group;
-      controller.events = <PlannerEvent>[
-        PlannerEvent(
-          id: 'private-signout-failure',
-          groupId: _group.id,
-          title: 'Private',
-          startAt: DateTime.utc(2026, 1, 1, 9),
-          endAt: DateTime.utc(2026, 1, 1, 10),
-          ownerId: _alice.id,
+  test('SDK가 로그아웃 이벤트를 먼저 내보내도 로그아웃 실패를 보존한다', () async {
+    final auth = _AuthDouble()
+      ..emitSignedOutBeforeSignOutError = true
+      ..signOutError = const AuthException('network');
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_group];
+    controller.selectedGroup = _group;
+    controller.events = <PlannerEvent>[
+      PlannerEvent(
+        id: 'private-signout-failure',
+        groupId: _group.id,
+        title: 'Private',
+        startAt: DateTime.utc(2026, 1, 1, 9),
+        endAt: DateTime.utc(2026, 1, 1, 10),
+        ownerId: _alice.id,
+      ),
+    ];
+
+    await expectLater(
+      controller.signOut(),
+      throwsA(
+        isA<AuthException>().having(
+          (error) => error.message,
+          'message',
+          authSessionErrorMessage,
         ),
-      ];
+      ),
+    );
+    await _settle();
 
-      await expectLater(
-        controller.signOut(),
-        throwsA(
-          isA<AuthException>().having(
-            (error) => error.message,
-            'message',
-            authSessionErrorMessage,
-          ),
-        ),
-      );
-      await _settle();
+    expect(controller.user, isNull);
+    expect(controller.groups, isEmpty);
+    expect(controller.selectedGroup, isNull);
+    expect(controller.events, isEmpty);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+    expect(controller.errorMessage, authSessionErrorMessage);
+    expect(auth.currentUser, isNull);
+    expect(auth.signOutCalls, 1);
+  });
 
-      expect(controller.user, isNull);
-      expect(controller.groups, isEmpty);
-      expect(controller.selectedGroup, isNull);
-      expect(controller.events, isEmpty);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-      expect(controller.errorMessage, authSessionErrorMessage);
-      expect(auth.currentUser, isNull);
-      expect(auth.signOutCalls, 1);
-    },
-  );
-
-  test('new direct login waits for a pending sign-out settlement', () async {
+  test('새 직접 로그인이 진행 중인 로그아웃 완료를 기다린다', () async {
     final auth = _AuthDouble()
       ..signOutGate = Completer<void>()
       ..emitSignedOutBeforeSignOutGate = true;
@@ -270,8 +261,8 @@ void main() {
     await _settle();
     expect(auth.signOutCalls, 1);
 
-    // The sign-out has already cleared the private UI, but its remote
-    // revoke is still pending. Do not let this login race that old session.
+    // 로그아웃으로 비공개 UI는 이미 지워졌지만 원격 세션 취소는 아직
+    // 진행 중이다. 이 로그인과 이전 세션이 경합하지 않게 한다.
     final signingIn = controller.signIn('alice@example.com', 'password');
     await _settle();
     expect(auth.signInLoads, isEmpty);
@@ -288,136 +279,124 @@ void main() {
     expect(auth.currentUser?.id, _alice.id);
   });
 
-  test(
-    'ordinary sign-out permits a new direct login event before its result',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('일반 로그아웃이 결과 전에 새 직접 로그인 이벤트를 허용한다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      await controller.signOut();
-      final direct = controller.signIn('alice@example.com', 'password');
-      await _settle();
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
-      );
-      await _settle();
-      expect(controller.isSaving, isTrue);
+    await controller.signOut();
+    final direct = controller.signIn('alice@example.com', 'password');
+    await _settle();
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
+    );
+    await _settle();
+    expect(controller.isSaving, isTrue);
 
-      auth.signInLoads.single.complete(_alice);
-      await direct;
-      expect(controller.user?.id, _alice.id);
-      expect(auth.currentUser?.id, _alice.id);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+    auth.signInLoads.single.complete(_alice);
+    await direct;
+    expect(controller.user?.id, _alice.id);
+    expect(auth.currentUser?.id, _alice.id);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test(
-    'ordinary sign-out permits matching email confirmation for a new signup',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('일반 로그아웃이 새 가입과 일치하는 이메일 확인을 허용한다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      await controller.signOut();
-      final signingUp = controller.signUp(
-        'pending@example.com',
-        'password',
-        'Pending',
-      );
-      await _settle();
-      auth.signUpLoads.single.complete(
-        const PendingEmailConfirmation(email: 'pending@example.com'),
-      );
-      await signingUp;
-      expect(controller.authFlowState, AuthFlowState.pendingEmailConfirmation);
+    await controller.signOut();
+    final signingUp = controller.signUp(
+      'pending@example.com',
+      'password',
+      'Pending',
+    );
+    await _settle();
+    auth.signUpLoads.single.complete(
+      const PendingEmailConfirmation(email: 'pending@example.com'),
+    );
+    await signingUp;
+    expect(controller.authFlowState, AuthFlowState.pendingEmailConfirmation);
 
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.signedIn,
-          user: PlannerUser(id: 'pending-user', email: 'pending@example.com'),
-        ),
-      );
-      await _settle();
-      expect(controller.user?.id, 'pending-user');
-      expect(controller.authFlowState, AuthFlowState.signedIn);
-    },
-  );
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.signedIn,
+        user: PlannerUser(id: 'pending-user', email: 'pending@example.com'),
+      ),
+    );
+    await _settle();
+    expect(controller.user?.id, 'pending-user');
+    expect(controller.authFlowState, AuthFlowState.signedIn);
+  });
 
-  test(
-    'signed-out event fences a pending sign-in even with no current identity',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('현재 사용자가 없어도 로그아웃 이벤트가 대기 로그인을 차단한다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      final signingIn = controller.signIn('alice@example.com', 'password');
-      await _settle();
-      auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
-      auth.signInLoads.single.complete(_alice);
-      await signingIn;
-      await _settle();
+    final signingIn = controller.signIn('alice@example.com', 'password');
+    await _settle();
+    auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
+    auth.signInLoads.single.complete(_alice);
+    await signingIn;
+    await _settle();
 
-      expect(controller.user, isNull);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+    expect(controller.user, isNull);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test(
-    'stale sign-up completion cannot overwrite a newer auth spinner',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('오래된 가입 완료가 최신 인증 진행 표시를 덮어쓸 수 없다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      final first = controller.signUp('first@example.com', 'password', 'First');
-      await _settle();
-      final second = controller.signUp(
-        'second@example.com',
-        'password',
-        'Second',
-      );
-      await _settle();
-      auth.signUpLoads[0].complete(AuthenticatedSignUp(user: _alice));
-      await first;
-      expect(controller.isSaving, isTrue);
-      auth.signUpLoads[1].complete(AuthenticatedSignUp(user: _bob));
-      await second;
-      expect(controller.user?.id, _bob.id);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+    final first = controller.signUp('first@example.com', 'password', 'First');
+    await _settle();
+    final second = controller.signUp(
+      'second@example.com',
+      'password',
+      'Second',
+    );
+    await _settle();
+    auth.signUpLoads[0].complete(AuthenticatedSignUp(user: _alice));
+    await first;
+    expect(controller.isSaving, isTrue);
+    auth.signUpLoads[1].complete(AuthenticatedSignUp(user: _bob));
+    await second;
+    expect(controller.user?.id, _bob.id);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test('stale resend and reset finally blocks preserve newer state', () async {
+  test('오래된 재전송 및 재설정 finally 블록이 최신 상태를 보존한다', () async {
     final auth = _AuthDouble();
     final controller = PlannerController(
       auth: auth,
@@ -445,7 +424,7 @@ void main() {
     expect(controller.isSaving, isFalse);
   });
 
-  test('OAuth remains busy until terminal event, then clears safely', () async {
+  test('OAuth가 종료 이벤트까지 진행 상태를 유지한 뒤 안전하게 해제된다', () async {
     final auth = _AuthDouble();
     final repository = _GroupDouble();
     final controller = PlannerController(
@@ -473,7 +452,7 @@ void main() {
     expect(controller.user?.id, _alice.id);
   });
 
-  test('OAuth timeout clears busy state with safe Korean copy', () async {
+  test('OAuth 시간 초과가 안전한 한국어 문구와 함께 진행 상태를 해제한다', () async {
     final auth = _AuthDouble();
     final controller = PlannerController(
       auth: auth,
@@ -493,270 +472,251 @@ void main() {
     expect(controller.errorMessage, socialAuthTimeoutMessage);
   });
 
-  test(
-    'late OAuth callback after timeout cannot beat a direct sign-in',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-        oauthTimeout: const Duration(milliseconds: 1),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('시간 초과 후 늦은 OAuth 콜백이 직접 로그인을 앞설 수 없다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+      oauthTimeout: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      await controller.signInWithOAuth(SocialAuthProvider.google);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(controller.errorMessage, socialAuthTimeoutMessage);
-      expect(controller.user, isNull);
+    await controller.signInWithOAuth(SocialAuthProvider.google);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(controller.errorMessage, socialAuthTimeoutMessage);
+    expect(controller.user, isNull);
 
-      final direct = controller.signIn('alice@example.com', 'password');
-      await _settle();
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _bob),
-      );
-      await _settle();
-      expect(controller.user, isNull);
-      expect(controller.isSaving, isTrue);
+    final direct = controller.signIn('alice@example.com', 'password');
+    await _settle();
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _bob),
+    );
+    await _settle();
+    expect(controller.user, isNull);
+    expect(controller.isSaving, isTrue);
 
-      auth.signInLoads.single.complete(_alice);
-      await direct;
-      expect(controller.user?.id, _alice.id);
-      expect(controller.isSaving, isFalse);
-    },
-  );
+    auth.signInLoads.single.complete(_alice);
+    await direct;
+    expect(controller.user?.id, _alice.id);
+    expect(controller.isSaving, isFalse);
+  });
 
-  test(
-    'a failed direct login after a fenced callback revokes the SDK session',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-        oauthTimeout: const Duration(milliseconds: 1),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('차단된 콜백 후 직접 로그인 실패가 SDK 세션을 취소한다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+      oauthTimeout: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      await controller.signInWithOAuth(SocialAuthProvider.google);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      final direct = controller.signIn('alice@example.com', 'password');
-      await _settle();
+    await controller.signInWithOAuth(SocialAuthProvider.google);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final direct = controller.signIn('alice@example.com', 'password');
+    await _settle();
 
-      // The provider callback is fenced while the explicit login owns the
-      // pending operation; its observation is remembered for failure cleanup.
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _bob),
-      );
-      await _settle();
-      expect(controller.user, isNull);
-      expect(auth.signOutCalls, 0);
+    // 명시적 로그인이 대기 중 작업을 소유하는 동안 공급자 콜백을 차단하고,
+    // 실패 정리에 사용할 수 있도록 콜백이 관찰되었다는 사실은 기억한다.
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _bob),
+    );
+    await _settle();
+    expect(controller.user, isNull);
+    expect(auth.signOutCalls, 0);
 
-      auth.signInLoads.single.completeError(
-        const AuthException(authSignInErrorMessage),
-      );
-      await expectLater(direct, throwsA(isA<AuthException>()));
-      await _settle();
+    auth.signInLoads.single.completeError(
+      const AuthException(authSignInErrorMessage),
+    );
+    await expectLater(direct, throwsA(isA<AuthException>()));
+    await _settle();
 
-      expect(controller.user, isNull);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-      expect(controller.isSaving, isFalse);
-      expect(auth.currentUser, isNull);
-      expect(auth.signOutCalls, 1);
-    },
-  );
+    expect(controller.user, isNull);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+    expect(controller.isSaving, isFalse);
+    expect(auth.currentUser, isNull);
+    expect(auth.signOutCalls, 1);
+  });
 
-  test(
-    'new login waits for fail-closed SDK revocation before launching',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-        oauthTimeout: const Duration(milliseconds: 1),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('새 로그인이 실행 전에 안전 실패형 SDK 세션 취소를 기다린다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+      oauthTimeout: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      await controller.signInWithOAuth(SocialAuthProvider.google);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      final direct = controller.signIn('alice@example.com', 'password');
-      await _settle();
-      auth.signInLoads.single.complete(_alice);
-      await direct;
+    await controller.signInWithOAuth(SocialAuthProvider.google);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final direct = controller.signIn('alice@example.com', 'password');
+    await _settle();
+    auth.signInLoads.single.complete(_alice);
+    await direct;
 
-      auth.signOutGate = Completer<void>();
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _bob),
-      );
-      await _settle();
-      expect(auth.signOutCalls, 1);
+    auth.signOutGate = Completer<void>();
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _bob),
+    );
+    await _settle();
+    expect(auth.signOutCalls, 1);
 
-      final retry = controller.signIn('bob@example.com', 'password');
-      await _settle();
-      expect(auth.signInLoads, hasLength(1));
+    final retry = controller.signIn('bob@example.com', 'password');
+    await _settle();
+    expect(auth.signInLoads, hasLength(1));
 
-      auth.signOutGate!.complete();
-      await _settle();
-      expect(auth.signInLoads, hasLength(2));
-      auth.signInLoads.last.complete(_bob);
-      await retry;
-      expect(controller.user?.id, _bob.id);
-    },
-  );
+    auth.signOutGate!.complete();
+    await _settle();
+    expect(auth.signInLoads, hasLength(2));
+    auth.signInLoads.last.complete(_bob);
+    await retry;
+    expect(controller.user?.id, _bob.id);
+  });
 
-  test(
-    'a late OAuth callback cannot replace an identity after direct commit',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-        oauthTimeout: const Duration(milliseconds: 1),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('직접 커밋 후 늦은 OAuth 콜백이 사용자를 교체할 수 없다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+      oauthTimeout: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      await controller.signInWithOAuth(SocialAuthProvider.google);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      final direct = controller.signIn('alice@example.com', 'password');
-      await _settle();
-      auth.signInLoads.single.complete(_alice);
-      await direct;
-      expect(controller.user?.id, _alice.id);
+    await controller.signInWithOAuth(SocialAuthProvider.google);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final direct = controller.signIn('alice@example.com', 'password');
+    await _settle();
+    auth.signInLoads.single.complete(_alice);
+    await direct;
+    expect(controller.user?.id, _alice.id);
 
-      // The timed-out provider callback is an untrusted, mismatched
-      // identity. Fail closed so the SDK session and planner cannot diverge.
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _bob),
-      );
-      await _settle();
-      expect(controller.user, isNull);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-      expect(auth.currentUser, isNull);
-      expect(auth.signOutCalls, 1);
-    },
-  );
+    // 시간 초과된 공급자 콜백은 신뢰할 수 없고 일치하지 않는 사용자다.
+    // SDK 세션과 플래너 상태가 어긋나지 않도록 안전하게 실패 처리한다.
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _bob),
+    );
+    await _settle();
+    expect(controller.user, isNull);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+    expect(auth.currentUser, isNull);
+    expect(auth.signOutCalls, 1);
+  });
 
-  test(
-    'sign-out clears fenced identity and later direct login reclaims ownership',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-        oauthTimeout: const Duration(milliseconds: 1),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('로그아웃이 차단된 사용자를 지우고 이후 직접 로그인이 소유권을 되찾는다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+      oauthTimeout: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      // Timeout creates the persistent social tombstone. A direct login may
-      // then explicitly claim Alice as the committed identity.
-      await controller.signInWithOAuth(SocialAuthProvider.google);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      final aliceLogin = controller.signIn('alice@example.com', 'password');
-      await _settle();
-      auth.signInLoads.single.complete(_alice);
-      await aliceLogin;
-      expect(controller.user?.id, _alice.id);
+    // 시간 초과 시 소셜 로그인 차단 표식을 영구적으로 만든다. 이후 직접
+    // 로그인은 Alice를 확정된 사용자로 명시적으로 설정할 수 있다.
+    await controller.signInWithOAuth(SocialAuthProvider.google);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final aliceLogin = controller.signIn('alice@example.com', 'password');
+    await _settle();
+    auth.signInLoads.single.complete(_alice);
+    await aliceLogin;
+    expect(controller.user?.id, _alice.id);
 
-      // Explicit sign-out forgets the prior expected identity. A delayed
-      // callback for that identity must remain fenced and cannot resurrect it.
-      await controller.signOut();
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
-      );
-      await _settle();
-      expect(controller.user, isNull);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
+    // 명시적 로그아웃은 이전에 예상한 사용자를 잊는다. 그 사용자에 대한
+    // 지연 콜백은 계속 차단되어야 하며 사용자를 되살릴 수 없다.
+    await controller.signOut();
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
+    );
+    await _settle();
+    expect(controller.user, isNull);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
 
-      // A subsequent direct login can claim a different account. Its own
-      // update is accepted while the new owner is current.
-      final bobLogin = controller.signIn('bob@example.com', 'password');
-      await _settle();
-      auth.signInLoads.last.complete(_bob);
-      await bobLogin;
-      expect(controller.user?.id, _bob.id);
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.userUpdated,
-          user: PlannerUser(
-            id: 'bob',
-            email: 'bob@example.com',
-            displayName: 'Bob Updated',
-          ),
+    // 이후 직접 로그인은 다른 계정을 설정할 수 있다. 새 소유자가 현재
+    // 사용자로 유지되는 동안 그 계정 자체의 갱신은 허용한다.
+    final bobLogin = controller.signIn('bob@example.com', 'password');
+    await _settle();
+    auth.signInLoads.last.complete(_bob);
+    await bobLogin;
+    expect(controller.user?.id, _bob.id);
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.userUpdated,
+        user: PlannerUser(
+          id: 'bob',
+          email: 'bob@example.com',
+          displayName: 'Bob Updated',
         ),
-      );
-      await _settle();
-      expect(controller.user?.displayName, 'Bob Updated');
+      ),
+    );
+    await _settle();
+    expect(controller.user?.displayName, 'Bob Updated');
 
-      // A still-later callback for the old Alice account is untrusted. It
-      // revokes the SDK session and clears Bob too, rather than preserving a
-      // controller/SDK account mismatch.
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
-      );
-      await _settle();
-      expect(controller.user, isNull);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-      expect(auth.currentUser, isNull);
-    },
-  );
+    // 더 늦게 도착한 이전 Alice 계정의 콜백은 신뢰할 수 없다. 컨트롤러와
+    // SDK의 계정 불일치를 유지하는 대신 SDK 세션을 취소하고 Bob도 지운다.
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
+    );
+    await _settle();
+    expect(controller.user, isNull);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+    expect(auth.currentUser, isNull);
+  });
 
-  test(
-    'external signed-out clears fenced identity before a delayed callback',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-        oauthTimeout: const Duration(milliseconds: 1),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('외부 로그아웃이 지연 콜백 전에 차단된 사용자를 지운다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+      oauthTimeout: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      await controller.signInWithOAuth(SocialAuthProvider.google);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      final direct = controller.signIn('alice@example.com', 'password');
-      await _settle();
-      auth.signInLoads.single.complete(_alice);
-      await direct;
-      expect(controller.user?.id, _alice.id);
+    await controller.signInWithOAuth(SocialAuthProvider.google);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final direct = controller.signIn('alice@example.com', 'password');
+    await _settle();
+    auth.signInLoads.single.complete(_alice);
+    await direct;
+    expect(controller.user?.id, _alice.id);
 
-      // This event may come from another tab/session and must synchronously
-      // fence the identity recorded for the old OAuth launch.
-      auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
-      auth.emit(
-        const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
-      );
-      await _settle();
+    // 이 이벤트는 다른 탭이나 세션에서 올 수 있으므로 이전 OAuth 실행에
+    // 기록된 사용자를 동기적으로 차단해야 한다.
+    auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
+    auth.emit(
+      const AuthRepositoryEvent(type: AuthEventType.signedIn, user: _alice),
+    );
+    await _settle();
 
-      expect(controller.user, isNull);
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-      expect(auth.currentUser, isNull);
-      expect(auth.signOutCalls, greaterThanOrEqualTo(1));
-    },
-  );
+    expect(controller.user, isNull);
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+    expect(auth.currentUser, isNull);
+    expect(auth.signOutCalls, greaterThanOrEqualTo(1));
+  });
 
-  test('a fresh OAuth launch after timeout can own a new identity', () async {
+  test('시간 초과 후 새 OAuth 실행이 새 사용자를 소유할 수 있다', () async {
     final auth = _AuthDouble();
     final controller = PlannerController(
       auth: auth,
@@ -782,128 +742,119 @@ void main() {
     expect(controller.isSocialAuthInFlight, isFalse);
   });
 
-  test(
-    'password recovery remains available after an OAuth timeout fence',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-        oauthTimeout: const Duration(milliseconds: 1),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('OAuth 시간 초과 차단 후에도 비밀번호 복구를 사용할 수 있다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+      oauthTimeout: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      await controller.signInWithOAuth(SocialAuthProvider.google);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.passwordRecovery,
-          user: _bob,
+    await controller.signInWithOAuth(SocialAuthProvider.google);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.passwordRecovery,
+        user: _bob,
+      ),
+    );
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.userUpdated,
+        user: PlannerUser(
+          id: 'bob',
+          email: 'bob@example.com',
+          displayName: 'Recovered',
         ),
-      );
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.userUpdated,
-          user: PlannerUser(
-            id: 'bob',
-            email: 'bob@example.com',
-            displayName: 'Recovered',
-          ),
+      ),
+    );
+    await _settle();
+
+    expect(controller.authFlowState, AuthFlowState.passwordRecovery);
+    expect(controller.user?.displayName, 'Recovered');
+  });
+
+  test('OAuth 시간 초과 차단 후 이메일 확인을 완료할 수 있다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+      oauthTimeout: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
+
+    await controller.signInWithOAuth(SocialAuthProvider.google);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final signingUp = controller.signUp(
+      'pending@example.com',
+      'password',
+      'Pending',
+    );
+    await _settle();
+    auth.signUpLoads.single.complete(
+      const PendingEmailConfirmation(email: 'pending@example.com'),
+    );
+    await signingUp;
+
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.signedIn,
+        user: PlannerUser(
+          id: 'pending-user',
+          email: 'pending@example.com',
+          displayName: 'Pending',
         ),
-      );
-      await _settle();
+      ),
+    );
+    await _settle();
+    expect(controller.user?.id, 'pending-user');
+    expect(controller.authFlowState, AuthFlowState.signedIn);
+  });
 
-      expect(controller.authFlowState, AuthFlowState.passwordRecovery);
-      expect(controller.user?.displayName, 'Recovered');
-    },
-  );
+  test('OAuth 실행 자체에 시간 제한이 있고 늦은 실행이 진행 상태를 되살리지 못한다', () async {
+    final auth = _AuthDouble()..oauthGate = Completer<bool>();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+      oauthTimeout: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-  test(
-    'email confirmation can complete after an OAuth timeout fence',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-        oauthTimeout: const Duration(milliseconds: 1),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
-
-      await controller.signInWithOAuth(SocialAuthProvider.google);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      final signingUp = controller.signUp(
-        'pending@example.com',
-        'password',
-        'Pending',
-      );
-      await _settle();
-      auth.signUpLoads.single.complete(
-        const PendingEmailConfirmation(email: 'pending@example.com'),
-      );
-      await signingUp;
-
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.signedIn,
-          user: PlannerUser(
-            id: 'pending-user',
-            email: 'pending@example.com',
-            displayName: 'Pending',
-          ),
+    final launch = controller.signInWithOAuth(SocialAuthProvider.google);
+    await expectLater(
+      launch,
+      throwsA(
+        isA<AuthException>().having(
+          (error) => error.message,
+          'message',
+          socialAuthTimeoutMessage,
         ),
-      );
-      await _settle();
-      expect(controller.user?.id, 'pending-user');
-      expect(controller.authFlowState, AuthFlowState.signedIn);
-    },
-  );
+      ),
+    );
+    expect(controller.isSocialAuthInFlight, isFalse);
+    expect(controller.isSaving, isFalse);
+    expect(controller.errorMessage, socialAuthTimeoutMessage);
 
-  test(
-    'OAuth launch itself is bounded and late launch cannot resurrect busy state',
-    () async {
-      final auth = _AuthDouble()..oauthGate = Completer<bool>();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-        oauthTimeout: const Duration(milliseconds: 1),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+    auth.oauthGate!.complete(true);
+    await _settle();
+    expect(controller.user, isNull);
+    expect(controller.isSaving, isFalse);
+  });
 
-      final launch = controller.signInWithOAuth(SocialAuthProvider.google);
-      await expectLater(
-        launch,
-        throwsA(
-          isA<AuthException>().having(
-            (error) => error.message,
-            'message',
-            socialAuthTimeoutMessage,
-          ),
-        ),
-      );
-      expect(controller.isSocialAuthInFlight, isFalse);
-      expect(controller.isSaving, isFalse);
-      expect(controller.errorMessage, socialAuthTimeoutMessage);
-
-      auth.oauthGate!.complete(true);
-      await _settle();
-      expect(controller.user, isNull);
-      expect(controller.isSaving, isFalse);
-    },
-  );
-
-  test('rapid signed-in then user-updated events still load groups', () async {
+  test('빠른 로그인 및 사용자 갱신 이벤트 뒤에도 그룹을 불러온다', () async {
     final auth = _AuthDouble();
     final repository = _GroupDouble();
     final controller = PlannerController(auth: auth, repository: repository);
@@ -935,119 +886,110 @@ void main() {
     expect(controller.groups.map((group) => group.id), <String>[_group.id]);
   });
 
-  test(
-    'rapid password-recovery then user-updated keeps recovery state',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
+  test('빠른 비밀번호 복구 후 사용자 갱신이 복구 상태를 유지한다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
 
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.passwordRecovery,
-          user: _alice,
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.passwordRecovery,
+        user: _alice,
+      ),
+    );
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.userUpdated,
+        user: PlannerUser(
+          id: 'alice',
+          email: 'alice@example.com',
+          displayName: 'Recovery User',
         ),
-      );
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.userUpdated,
-          user: PlannerUser(
-            id: 'alice',
-            email: 'alice@example.com',
-            displayName: 'Recovery User',
-          ),
-        ),
-      );
-      await _settle();
+      ),
+    );
+    await _settle();
 
-      expect(controller.authFlowState, AuthFlowState.passwordRecovery);
-      expect(controller.user?.displayName, 'Recovery User');
-    },
-  );
+    expect(controller.authFlowState, AuthFlowState.passwordRecovery);
+    expect(controller.user?.displayName, 'Recovery User');
+  });
 
-  test(
-    'rapid password-recovery then signed-out clears private state',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
-      controller.user = _alice;
-      controller.groups = const <PlannerGroup>[_group];
-      controller.events = <PlannerEvent>[
-        PlannerEvent(
-          id: 'recovery-private',
-          groupId: _group.id,
-          title: 'Private',
-          startAt: DateTime.utc(2026, 1, 1, 9),
-          endAt: DateTime.utc(2026, 1, 1, 10),
-          ownerId: _alice.id,
-        ),
-      ];
+  test('빠른 비밀번호 복구 후 로그아웃이 비공개 상태를 지운다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_group];
+    controller.events = <PlannerEvent>[
+      PlannerEvent(
+        id: 'recovery-private',
+        groupId: _group.id,
+        title: 'Private',
+        startAt: DateTime.utc(2026, 1, 1, 9),
+        endAt: DateTime.utc(2026, 1, 1, 10),
+        ownerId: _alice.id,
+      ),
+    ];
 
-      auth.emit(
-        const AuthRepositoryEvent(
-          type: AuthEventType.passwordRecovery,
-          user: _alice,
-        ),
-      );
-      auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
-      await _settle();
+    auth.emit(
+      const AuthRepositoryEvent(
+        type: AuthEventType.passwordRecovery,
+        user: _alice,
+      ),
+    );
+    auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
+    await _settle();
 
-      expect(controller.authFlowState, AuthFlowState.signedOut);
-      expect(controller.user, isNull);
-      expect(controller.groups, isEmpty);
-      expect(controller.events, isEmpty);
-    },
-  );
+    expect(controller.authFlowState, AuthFlowState.signedOut);
+    expect(controller.user, isNull);
+    expect(controller.groups, isEmpty);
+    expect(controller.events, isEmpty);
+  });
 
-  test(
-    'signed-out auth event clears private state before its queue runs',
-    () async {
-      final auth = _AuthDouble();
-      final controller = PlannerController(
-        auth: auth,
-        repository: LocalScheduleRepository(),
-      );
-      addTearDown(() {
-        controller.dispose();
-        auth.dispose();
-      });
-      await _settle();
-      controller.user = _alice;
-      controller.groups = const <PlannerGroup>[_group];
-      controller.events = <PlannerEvent>[
-        PlannerEvent(
-          id: 'private',
-          groupId: _group.id,
-          title: 'Private',
-          startAt: DateTime.utc(2026, 1, 1, 9),
-          endAt: DateTime.utc(2026, 1, 1, 10),
-          ownerId: _alice.id,
-        ),
-      ];
-      var notifications = 0;
-      controller.addListener(() => notifications++);
+  test('로그아웃 인증 이벤트가 큐 실행 전에 비공개 상태를 지운다', () async {
+    final auth = _AuthDouble();
+    final controller = PlannerController(
+      auth: auth,
+      repository: LocalScheduleRepository(),
+    );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settle();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_group];
+    controller.events = <PlannerEvent>[
+      PlannerEvent(
+        id: 'private',
+        groupId: _group.id,
+        title: 'Private',
+        startAt: DateTime.utc(2026, 1, 1, 9),
+        endAt: DateTime.utc(2026, 1, 1, 10),
+        ownerId: _alice.id,
+      ),
+    ];
+    var notifications = 0;
+    controller.addListener(() => notifications++);
 
-      auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
-      await _settle();
-      expect(controller.user, isNull);
-      expect(controller.groups, isEmpty);
-      expect(controller.events, isEmpty);
-      expect(notifications, greaterThan(0));
-    },
-  );
+    auth.emit(const AuthRepositoryEvent(type: AuthEventType.signedOut));
+    await _settle();
+    expect(controller.user, isNull);
+    expect(controller.groups, isEmpty);
+    expect(controller.events, isEmpty);
+    expect(notifications, greaterThan(0));
+  });
 }

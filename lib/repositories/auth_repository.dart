@@ -1,4 +1,4 @@
-// Public constructor names intentionally differ from private fields.
+// 공개 생성자 이름은 의도적으로 비공개 필드와 다르게 둔다.
 // ignore_for_file: prefer_initializing_formals
 
 import 'dart:async';
@@ -19,33 +19,33 @@ const String authCallbackPath = '/auth-callback';
 const int authPasswordMinimumLength = 6;
 const int authDisplayNameMaximumLength = 120;
 
-/// Returns the redirect URI used by the current Flutter platform.
+/// 현재 Flutter 플랫폼이 사용하는 리디렉션 URI를 반환한다.
 ///
-/// Native targets use the registered custom scheme so Supabase can return to
-/// the application through the platform deep-link handler. Browsers must stay
-/// on their current HTTPS/HTTP origin; a custom scheme is not navigable from a
-/// web page and would strand the OAuth or email flow. [baseUri] and [isWeb]
-/// are injectable so the platform policy can be tested without a browser.
+/// 네이티브 대상은 등록된 사용자 정의 스킴을 사용해 Supabase가 플랫폼 딥 링크 처리기를
+/// 통해 앱으로 돌아올 수 있게 한다. 브라우저는 현재 HTTPS/HTTP 출처에 머물러야 한다.
+/// 웹 페이지에서는 사용자 정의 스킴으로 이동할 수 없어 OAuth나 이메일 흐름이 중단되기
+/// 때문이다. 브라우저 없이 플랫폼 정책을 테스트할 수 있도록 [baseUri]와 [isWeb]을
+/// 주입할 수 있다.
 String resolveAuthCallbackRedirect({bool? isWeb, Uri? baseUri}) {
   if (!(isWeb ?? kIsWeb)) return authCallbackRedirect;
 
   final base = baseUri ?? Uri.base;
   final scheme = base.scheme.toLowerCase();
-  // Uri.base is always an HTTP(S) origin in a browser. Keep the fallback
-  // relative rather than ever returning the native custom scheme when a test
-  // host or an unusual embedding does not expose an origin.
+  // 브라우저에서 Uri.base는 항상 HTTP(S) 출처다. 테스트 호스트나 특수한 임베딩이
+  // 출처를 노출하지 않을 때 네이티브 사용자 정의 스킴을 반환하지 말고 상대 경로를
+  // 대체값으로 유지한다.
   if ((scheme != 'http' && scheme != 'https') || base.host.isEmpty) {
     return authCallbackPath;
   }
   return Uri(
     scheme: scheme,
     host: base.host,
-    port: base.hasPort ? base.port : 0,
+    port: base.hasPort ? base.port : null,
     path: authCallbackPath,
   ).toString();
 }
 
-/// Compatibility name for callers that describe this as a platform redirect.
+/// 이를 플랫폼 리디렉션이라고 부르는 호출자를 위한 호환 이름이다.
 String authCallbackRedirectForPlatform({bool? isWeb, Uri? baseUri}) =>
     resolveAuthCallbackRedirect(isWeb: isWeb, baseUri: baseUri);
 
@@ -102,8 +102,8 @@ const String socialAuthUnknownErrorMessage =
 
 /// 원격 인증 오류를 화면에 전달할 때 사용하는 작업별 안전한 문구다.
 ///
-/// Supabase/Auth provider 응답에는 서버 내부 상태, 계정 존재 여부, 또는
-/// provider 설정 정보가 포함될 수 있다. 저장소 경계를 넘는 오류는 이 목록의
+/// Supabase/Auth 공급자 응답에는 서버 내부 상태, 계정 존재 여부 또는 공급자 설정
+/// 정보가 포함될 수 있다. 저장소 경계를 넘는 오류는 이 목록의
 /// 문구로만 변환해 UI가 원시 예외를 표시하지 않도록 한다.
 const String authSignInErrorMessage = '로그인 정보를 확인해 주세요.';
 const String authSignUpErrorMessage = '가입을 완료하지 못했어요. 입력 내용을 확인하고 다시 시도해 주세요.';
@@ -305,8 +305,8 @@ class AuthRepository {
         }
         return _plannerUser(user, fallbackEmail: normalizedEmail);
       } catch (_) {
-        // Do not expose whether the email exists or leak provider/server
-        // details such as status codes, endpoint names, or response bodies.
+        // 이메일의 존재 여부나 상태 코드, 엔드포인트 이름, 응답 본문 같은
+        // 공급자/서버 세부 정보를 노출하지 않는다.
         throw const AuthException(authSignInErrorMessage);
       }
     }
@@ -432,8 +432,8 @@ class AuthRepository {
         }
         return AuthenticatedSignUp(user: plannerUser);
       } catch (_) {
-        // Keep duplicate-account, weak-password, and infrastructure failures
-        // indistinguishable to callers and free of raw provider details.
+        // 중복 계정, 약한 비밀번호, 인프라 실패를 호출자가 구분할 수 없게 하고
+        // 원시 공급자 세부 정보를 포함하지 않는다.
         throw const AuthException(authSignUpErrorMessage);
       }
     }
@@ -478,7 +478,7 @@ class AuthRepository {
           emailRedirectTo: resolveAuthCallbackRedirect(),
         );
       } catch (_) {
-        // Do not tell the caller whether this address belongs to an account.
+        // 이 주소가 계정에 속하는지 호출자에게 알리지 않는다.
         throw const AuthException(authResendSignupErrorMessage);
       }
       return;
@@ -548,8 +548,8 @@ class AuthRepository {
         }
         return _plannerUser(user);
       } catch (_) {
-        // Recovery links are short-lived and provider responses can contain
-        // session/account details. Expose only the action the user can take.
+        // 복구 링크는 수명이 짧고 공급자 응답에 세션/계정 세부 정보가 있을 수 있다.
+        // 사용자가 할 수 있는 동작만 노출한다.
         throw const AuthException(authRecoveredPasswordErrorMessage);
       }
     }
@@ -640,18 +640,17 @@ class AuthRepository {
 
   Future<void> signOut() async {
     final generation = ++_authOperationGeneration;
-    // A sign-out is a terminal operation for an OAuth launch too. Clear this
-    // synchronously so a slow browser launch cannot keep a new login blocked.
+    // 로그아웃은 OAuth 실행에서도 최종 작업이다. 느린 브라우저 실행 때문에 새 로그인이
+    // 계속 차단되지 않도록 이를 동기적으로 지운다.
     _finishOAuthFlow();
     final remote = _client;
     if (remote != null) {
       try {
         await remote.auth.signOut();
       } catch (_) {
-        // Provider/server responses can contain internal details. Keep
-        // explicit sign-out failures on the same stable, user-safe message as
-        // the controller, while the local session remains cleared by the
-        // preceding SIGNED_OUT event when Supabase emitted it.
+        // 공급자/서버 응답에는 내부 세부 정보가 있을 수 있다. 명시적인 로그아웃 실패에는
+        // 컨트롤러와 같은 고정된 사용자 안전 메시지를 사용한다. Supabase가 SIGNED_OUT
+        // 이벤트를 보냈다면 로컬 세션은 앞선 이벤트에 의해 지워진 상태로 유지된다.
         throw const AuthException(authSessionErrorMessage);
       }
     }
@@ -678,10 +677,9 @@ class AuthRepository {
     _finishOAuthFlow();
     final subscription = _authSubscription;
     _authSubscription = null;
-    // `dispose` is intentionally synchronous for Provider/Riverpod teardown.
-    // Marking the repository disposed before cancellation makes callbacks that
-    // were already queued harmless while the subscription's asynchronous
-    // cancellation completes. The error callback applies the same guard.
+    // Provider/Riverpod 해제를 위해 `dispose`는 의도적으로 동기식이다. 취소 전에
+    // 저장소를 해제된 것으로 표시하면 구독의 비동기 취소가 끝나는 동안 이미 대기열에
+    // 들어간 콜백이 무해해진다. 오류 콜백에도 같은 가드를 적용한다.
     if (subscription != null) unawaited(_cancelAuthSubscription(subscription));
     unawaited(_events.close());
   }
@@ -692,8 +690,8 @@ class AuthRepository {
     try {
       await subscription.cancel();
     } catch (_) {
-      // A custom stream implementation may fail synchronously or
-      // asynchronously from cancel; teardown must remain best-effort.
+      // 사용자 지정 스트림 구현은 취소 시 동기 또는 비동기로 실패할 수 있다. 해제는
+      // 가능한 범위에서 수행한다.
     }
   }
 
@@ -710,9 +708,8 @@ class AuthRepository {
     if (mappedType == AuthEventType.signedIn ||
         mappedType == AuthEventType.signedOut ||
         mappedType == AuthEventType.passwordRecovery) {
-      // A provider event is authoritative and supersedes an older local auth
-      // request. The controller performs the same ownership check before
-      // committing its user/planner state.
+      // 공급자 이벤트를 기준으로 삼으며 이전 로컬 인증 요청보다 우선한다. 컨트롤러도
+      // 사용자/플래너 상태를 커밋하기 전에 같은 소유권 검사를 수행한다.
       ++_authOperationGeneration;
       if (mappedType == AuthEventType.signedIn ||
           mappedType == AuthEventType.passwordRecovery) {
@@ -732,9 +729,9 @@ class AuthRepository {
 
   void _handleSupabaseAuthError(Object error, StackTrace stackTrace) {
     if (_disposed || _events.isClosed) return;
-    // Never forward provider/server details through the app-owned stream. The
-    // controller may surface stream errors in a banner, so expose only a
-    // stable, operation-neutral message. The stack is deliberately omitted.
+    // 앱 소유 스트림으로 공급자/서버 세부 정보를 절대 전달하지 않는다. 컨트롤러가
+    // 스트림 오류를 배너에 표시할 수 있으므로 고정되고 작업 중립적인 메시지만
+    // 노출한다. 스택은 의도적으로 생략한다.
     _events.addError(
       const AuthException(authSessionErrorMessage),
       StackTrace.empty,

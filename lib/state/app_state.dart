@@ -7,8 +7,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../core/appearance_preferences.dart';
 import '../core/config/app_config.dart';
+import '../core/appearance_preferences.dart';
 import '../core/invite_link.dart';
 import '../core/invite_code_utils.dart';
 import '../core/pending_invite_store.dart';
@@ -88,10 +88,10 @@ enum AuthFlowState {
   passwordRecovery,
 }
 
-/// Coalesced metadata refresh request emitted by a group lifecycle signal.
-/// Keeping the operation context with the request lets a delayed roster read
-/// fail closed when selection, identity, or planner revision changes before
-/// the debounce timer fires.
+/// 그룹 수명 주기 신호가 생성한 병합된 메타데이터 새로 고침 요청이다.
+/// 요청에 작업 컨텍스트를 함께 보관하면 디바운스 타이머가 실행되기 전에 선택,
+/// 신원 또는 플래너 리비전이 바뀌었을 때 지연된 구성원 목록 읽기를 안전하게
+/// 차단할 수 있다.
 class _GroupMetadataRefreshRequest {
   const _GroupMetadataRefreshRequest({
     required this.operation,
@@ -111,14 +111,13 @@ final plannerControllerProvider = ChangeNotifierProvider<PlannerController>((
     auth: ref.watch(authRepositoryProvider),
     repository: ref.watch(scheduleRepositoryProvider),
     appearancePreferencesStore: ref.watch(appearancePreferencesStoreProvider),
-    // The notification controller is an invalidation sink, not planner
-    // input. Watching it would recreate PlannerController on every
-    // permission/reconcile notify and feed an auth/bootstrap loop back into
-    // the notification provider. Read the stable instance once instead.
+    // 알림 컨트롤러는 무효화 결과를 받는 곳이지 플래너 입력이 아니다. 이를
+    // 관찰하면 권한/조정 알림마다 PlannerController를 다시 만들고 인증/부트스트랩
+    // 루프를 알림 공급자에 되돌려 보낸다. 대신 안정적인 인스턴스를 한 번만 읽는다.
     notifications: ref.read(notificationControllerProvider),
   );
   return controller;
-});
+}, dependencies: <ProviderOrFamily>[notificationControllerProvider]);
 
 class PlannerController extends ChangeNotifier {
   PlannerController({
@@ -145,14 +144,14 @@ class PlannerController extends ChangeNotifier {
       throw ArgumentError.value(
         pendingInviteTtl,
         'pendingInviteTtl',
-        'must be positive',
+        '0보다 커야 합니다',
       );
     }
     if (searchDebounce < Duration.zero) {
       throw ArgumentError.value(
         searchDebounce,
         'searchDebounce',
-        'must not be negative',
+        '음수가 될 수 없습니다',
       );
     }
     _authSubscription = _auth.onAuthStateChange.listen(
@@ -194,9 +193,9 @@ class PlannerController extends ChangeNotifier {
     await _appearancePreferencesWriteQueue;
   }
 
-  /// Notification reconciliation follows already-committed planner changes.
-  /// Neither a synchronous throw nor an asynchronously rejected future may
-  /// escape as an unhandled error or reverse the original mutation.
+  /// 알림 조정은 이미 커밋된 인증/그룹/일정 변경의 부수 효과다. 구현이 Future를
+  /// 만들기 전에 동기적으로 던지거나 나중에 거부해도 원 작업의 성공을 뒤집거나
+  /// 처리되지 않은 비동기 오류로 새지 않게 한다.
   void _runNotificationSideEffect(
     Future<void> Function(NotificationInvalidationSink notifications) operation,
   ) {
@@ -210,9 +209,9 @@ class PlannerController extends ChangeNotifier {
   List<PlannerMember> members = const <PlannerMember>[];
   List<InviteCode> _invites = const <InviteCode>[];
 
-  /// Invite rows are never allowed to retain the one-shot plaintext token at
-  /// the controller boundary.  A repository/fake may return a token-bearing
-  /// row, but every list assignment is defensively copied with `token: null`.
+  /// 컨트롤러 경계에서 초대 행이 일회성 평문 토큰을 보관하지 못하게 한다.
+  /// 저장소나 가짜 구현이 토큰을 포함한 행을 반환할 수 있으므로 목록에 할당할
+  /// 때마다 방어적으로 `token: null`을 지정해 복사한다.
   List<InviteCode> get invites => _invites;
 
   set invites(Iterable<InviteCode> value) {
@@ -222,14 +221,20 @@ class PlannerController extends ChangeNotifier {
   List<PlannerEvent> _events = const <PlannerEvent>[];
   List<PlannerEvent> get events => _events;
 
-  /// Preserve the public assignment used by older test doubles while keeping
-  /// every event snapshot immutable at the controller boundary.
+  /// 이전 테스트 대역에서 사용하는 공개 할당 방식을 유지하면서 컨트롤러 경계의
+  /// 모든 일정 스냅샷을 불변으로 둔다.
   set events(Iterable<PlannerEvent> value) {
     _events = List<PlannerEvent>.unmodifiable(value);
   }
 
   PlannerGroup? selectedGroup;
-  DateTime selectedDay = DateTime.now();
+  DateTime _selectedDay = CalendarDateBounds.clamp(DateTime.now());
+  DateTime get selectedDay => _selectedDay;
+
+  set selectedDay(DateTime value) {
+    _selectedDay = CalendarDateBounds.clamp(value);
+  }
+
   CalendarViewMode calendarView = CalendarViewMode.day;
   EventRange? selectedEventRange;
   bool hasMoreEvents = false;
@@ -264,31 +269,28 @@ class PlannerController extends ChangeNotifier {
   int _authOperationToken = 0;
   int _authOperationGeneration = 0;
   bool _authStateChangingOperationInFlight = false;
-  // Planner operation owned by an explicit sign-out. Supabase can emit its
-  // local SIGNED_OUT event before the remote revoke Future completes (and may
-  // then report a revoke failure); that event must preserve this operation's
-  // token so the caller can still surface the failure.
+  // 명시적 로그아웃이 소유하는 플래너 작업이다. Supabase는 원격 폐기 Future가
+  // 완료되기 전에 로컬 SIGNED_OUT 이벤트를 내보낸 뒤 폐기 실패를 보고할 수 있다.
+  // 호출자가 실패를 계속 표시할 수 있도록 해당 이벤트가 이 작업 토큰을 유지해야 한다.
   int? _signOutOperationToken;
   String? _signOutFailureMessage;
-  // Do not start a new auth owner while an explicit sign-out is still
-  // revoking the previous SDK session. Supabase may emit SIGNED_OUT before
-  // the revoke Future settles, so this gate serializes the next operation.
+  // 명시적 로그아웃이 이전 SDK 세션을 폐기하는 동안에는 새 인증 소유자를 시작하지
+  // 않는다. Supabase가 폐기 Future 완료 전에 SIGNED_OUT을 내보낼 수 있으므로 이
+  // 게이트가 다음 작업을 직렬화한다.
   Future<void>? _signOutSettlement;
   Completer<void>? _signOutSettlementCompleter;
   bool _ignoreExternalIdentityEvents = false;
-  // OAuth has no callback request id in Supabase's public event payload. Once
-  // a launch times out/fails, retain a tombstone so a late provider callback
-  // cannot switch accounts after a different explicit login commits.
+  // Supabase 공개 이벤트 페이로드의 OAuth에는 콜백 요청 ID가 없다. 실행이 시간
+  // 초과되거나 실패하면 다른 명시적 로그인이 커밋된 뒤 늦은 공급자 콜백이 계정을
+  // 전환하지 못하도록 툼스톤을 유지한다.
   bool _staleSocialAuthFence = false;
   String? _staleSocialExpectedIdentity;
-  // A recovery event can be followed by userUpdated before its queued
-  // handler runs. Keep that intent long enough for the coalesced update to
-  // pass the social tombstone's account check.
+  // 대기열의 복구 이벤트 처리기가 실행되기 전에 userUpdated가 뒤따를 수 있다.
+  // 병합된 업데이트가 소셜 툼스톤의 계정 검사를 통과할 만큼 해당 의도를 유지한다.
   String? _queuedPasswordRecoveryIdentity;
-  // Tracks whether the fenced identity came from an explicit auth result.
-  // While a newer password operation is still waiting, a mismatched provider
-  // event is ignored; once a result is committed, the same mismatch fails
-  // closed and revokes the SDK session.
+  // 차단된 신원이 명시적 인증 결과에서 왔는지 추적한다. 더 새로운 비밀번호 작업이
+  // 대기 중이면 일치하지 않는 공급자 이벤트를 무시한다. 결과가 커밋된 뒤 같은
+  // 불일치가 발생하면 안전하게 차단하고 SDK 세션을 폐기한다.
   bool _staleSocialIdentityCommitted = false;
   bool _staleSocialPendingMismatchObserved = false;
   bool _fencedIdentityRevocationInFlight = false;
@@ -304,10 +306,9 @@ class PlannerController extends ChangeNotifier {
   int _plannerRevision = 0;
   int _plannerSessionGeneration = 0;
   int _operationToken = 0;
-  // Monotonic planner-operation generation used to prevent an older
-  // conflict-reload continuation from overwriting a newer operation's error.
-  // Conflict-owned refreshes preserve this value across their internal
-  // loadGroups/selectGroup sequence; every external operation advances it.
+  // 이전 충돌 재조회 후속 작업이 새 작업의 오류를 덮어쓰지 못하게 하는 단조 증가
+  // 플래너 작업 세대 값이다. 충돌이 소유한 새로 고침은 내부
+  // loadGroups/selectGroup 과정에서 이 값을 유지하고, 모든 외부 작업은 값을 높인다.
   int _operationGeneration = 0;
   int _savingOperationToken = 0;
   bool _inviteCodeInFlight = false;
@@ -323,9 +324,9 @@ class PlannerController extends ChangeNotifier {
   final Set<Completer<void>> _rangeRefreshAwaiters = <Completer<void>>{};
   Timer? _rangeInvalidationTimer;
   String? _rangeKey;
-  // Search is an independent projection from the selected calendar range.
-  // It owns its own debounce, generation, cursor and loading flags so a late
-  // search response can never overwrite calendar pages (or vice versa).
+  // 검색은 선택한 캘린더 범위와 독립된 프로젝션이다. 자체 디바운스, 세대, 커서 및
+  // 로딩 플래그를 사용하므로 늦게 도착한 검색 응답이 캘린더 페이지를 덮어쓰거나
+  // 그 반대 상황이 발생하지 않는다.
   String searchQuery = '';
   List<PlannerEvent> _searchResults = const <PlannerEvent>[];
   List<PlannerEvent> get searchResults => _searchResults;
@@ -353,17 +354,15 @@ class PlannerController extends ChangeNotifier {
   String? _searchKey;
   bool _searchActive = false;
   final Set<String> _terminalGroupOperations = <String>{};
-  // Leave/archive and a remote lifecycle tombstone are terminal from the
-  // controller's point of view.  Keeping this separate from the in-flight
-  // operation set prevents a stale groups refresh from reintroducing private
-  // data after the mutation has succeeded.  A successful explicit rejoin
-  // clears the tombstone for an ordinary (non-archived) leave.
+  // 나가기/보관 및 원격 수명 주기 툼스톤은 컨트롤러 관점에서 최종 상태다. 진행 중
+  // 작업 집합과 이를 분리하면 변경 성공 후 오래된 그룹 새로 고침이 비공개 데이터를
+  // 다시 가져오는 일을 막을 수 있다. 명시적 재참여에 성공하면 보관이 아닌 일반
+  // 나가기에 대한 툼스톤을 지운다.
   final Set<String> _terminalGroupTombstones = <String>{};
   int _inviteOperation = 0;
-  // Pending invite intents are intentionally independent from planner
-  // clearing/auth operation generations.  An intent captured while signed
-  // out must survive the first successful login, but an explicit sign-out or
-  // subsequent identity switch must invalidate it synchronously.
+  // 대기 중인 초대 의도는 플래너 지우기/인증 작업 세대와 의도적으로 독립되어 있다.
+  // 로그아웃 상태에서 포착한 의도는 첫 로그인 성공까지 유지되어야 하지만, 명시적
+  // 로그아웃이나 이후 신원 전환 시에는 동기적으로 무효화해야 한다.
   String? _pendingInviteToken;
   DateTime? _pendingInviteExpiresAt;
   String? _pendingInviteReturnRoute;
@@ -373,10 +372,9 @@ class PlannerController extends ChangeNotifier {
   String? _pendingInviteError;
   int _pendingInviteGeneration = 0;
   int _pendingInviteSessionGeneration = 0;
-  // Planner/group operations advance `_plannerRevision` without clearing an
-  // invite intent.  Capture the revision at each preview/accept attempt so a
-  // callback that belongs to an older selected-group context cannot commit a
-  // projection into a newer one.
+  // 플래너/그룹 작업은 초대 의도를 지우지 않고 `_plannerRevision`을 높인다. 미리 보기와
+  // 수락을 시도할 때마다 리비전을 캡처하여 이전 선택 그룹 컨텍스트의 콜백이 새
+  // 컨텍스트에 프로젝션을 커밋하지 못하게 한다.
   int _pendingInvitePlannerRevision = 0;
   int _pendingInviteAcceptGeneration = 0;
   bool _pendingInvitePreviewInFlight = false;
@@ -396,9 +394,8 @@ class PlannerController extends ChangeNotifier {
 
   bool get isAuthenticated => user != null;
 
-  /// Whether this adapter can perform an authoritative point lookup for a
-  /// detail route. Legacy full-stream test/double adapters intentionally do
-  /// not opt into this path.
+  /// 이 어댑터가 상세 경로에 대해 서버 기준 단건 조회를 수행할 수 있는지 나타낸다.
+  /// 기존 전체 스트림 테스트/대역 어댑터는 의도적으로 이 경로를 사용하지 않는다.
   bool get supportsEventById =>
       _usesBoundedEventRangeReads && _repository is EventByIdReadCapability;
 
@@ -407,9 +404,8 @@ class PlannerController extends ChangeNotifier {
   bool get supportsEventOccurrenceByKey =>
       _usesBoundedEventRangeReads &&
       _repository is EventOccurrenceReadCapability &&
-      // Local subclasses are commonly used as legacy test doubles that only
-      // populate EventById. Keep their historical path unless the concrete
-      // adapter explicitly opts into the occurrence projection.
+      // 로컬 하위 클래스는 보통 EventById만 채우는 기존 테스트 대역으로 사용된다.
+      // 구체적인 어댑터가 발생 항목 프로젝션 사용을 명시하지 않으면 기존 경로를 유지한다.
       !(_repository is LocalScheduleRepository &&
           _repository.runtimeType != LocalScheduleRepository);
 
@@ -430,10 +426,10 @@ class PlannerController extends ChangeNotifier {
     if (repository is LocalScheduleRepository) {
       return repository.requireExactEventMutationResults;
     }
-    // Any non-local adapter that advertises participant mutation is a
-    // production capability and must echo the exact persisted assignment.
-    // Older non-capability adapters are allowed only the omitted-field legacy
-    // creator fallback below; explicit member lists fail before mutation.
+    // 참여자 변경을 지원한다고 알리는 비로컬 어댑터는 프로덕션 기능이므로 저장된
+    // 할당을 정확히 되돌려줘야 한다. 이 기능이 없는 이전 어댑터에는 생략된 필드에
+    // 대한 아래의 기존 작성자 대체 처리만 허용하며, 명시적 멤버 목록은 변경 전에
+    // 실패한다.
     return repository is EventMemberAssignmentCapability;
   }
 
@@ -450,9 +446,8 @@ class PlannerController extends ChangeNotifier {
   SocialAuthProvider? get socialAuthProviderInFlight =>
       _socialAuthProviderInFlight;
 
-  /// Public invite projection.  The bearer token remains private to this
-  /// controller and its ephemeral store; UI code receives only sanitized
-  /// preview/status data.
+  /// 공개 초대 프로젝션이다. Bearer 토큰은 이 컨트롤러와 임시 저장소 안에서만
+  /// 비공개로 유지하며, UI 코드는 정제된 미리 보기/상태 데이터만 받는다.
   PendingInviteSnapshot? get pendingInvite {
     if (_pendingInviteState == PendingInviteState.none) return null;
     return PendingInviteSnapshot(
@@ -474,9 +469,8 @@ class PlannerController extends ChangeNotifier {
   bool get isPreviewingInvite => _pendingInvitePreviewInFlight;
   bool get isAcceptingInvite => _pendingInviteAcceptInFlight;
 
-  /// Binds platform deep-link intake without coupling the controller to a
-  /// native/web plugin.  A replacement stream retires the previous
-  /// subscription; every URI is validated before it can create state.
+  /// 컨트롤러를 네이티브/웹 플러그인과 결합하지 않고 플랫폼 딥 링크 입력을 연결한다.
+  /// 스트림을 교체하면 이전 구독을 종료하며, 모든 URI는 상태를 만들기 전에 검증된다.
   void bindInviteLinkStream(
     Stream<Uri> links, {
     AppConfig? config,
@@ -556,8 +550,8 @@ class PlannerController extends ChangeNotifier {
         errorMessage = _friendlyError(error);
       }
     } finally {
-      // loadGroups starts its own operation. Do not let this older bootstrap
-      // turn off a spinner owned by a newer auth/load request.
+      // loadGroups는 자체 작업을 시작한다. 이 이전 부트스트랩이 더 새로운 인증/조회
+      // 요청이 소유한 진행 표시를 끄지 못하게 한다.
       if (_plannerRevision == operation) {
         isLoading = false;
         notifyListeners();
@@ -566,9 +560,8 @@ class PlannerController extends ChangeNotifier {
   }
 
   Future<void> _hydratePendingInvite() async {
-    // A slow storage read must not be able to resurrect an intent that was
-    // explicitly cleared (or invalidated by a newer auth/planner session)
-    // while the read was pending.
+    // 느린 저장소 읽기가 대기 중인 동안 명시적으로 지웠거나 더 새로운 인증/플래너
+    // 세션이 무효화한 의도를 되살리지 못하게 한다.
     final hydrationGeneration = _pendingInviteGeneration;
     final hydrationSessionGeneration = _plannerSessionGeneration;
     PendingInviteRecord? stored;
@@ -589,8 +582,8 @@ class PlannerController extends ChangeNotifier {
       _queuePendingStoreClear();
       return;
     }
-    // The store has already enforced its persisted expiry.  Legacy stores
-    // without a deadline get a bounded in-tab fallback.
+    // 저장소가 저장된 만료 시각을 이미 적용했다. 기한이 없는 이전 저장소에는 제한된
+    // 탭 내부 대체 처리를 적용한다.
     final expiresAt =
         stored.expiresAt ?? DateTime.now().toUtc().add(_pendingInviteTtl);
     if (!expiresAt.isAfter(DateTime.now().toUtc())) {
@@ -609,9 +602,9 @@ class PlannerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Captures a strictly validated link while keeping the raw URI out of
-  /// controller state.  Invalid or unconfigured links are ignored so a
-  /// malformed deep link cannot become a user-visible token oracle.
+  /// 원본 URI를 컨트롤러 상태에 넣지 않고 엄격하게 검증된 링크를 포착한다. 잘못되거나
+  /// 설정되지 않은 링크를 무시하여 비정상 딥 링크가 사용자에게 노출되는 토큰
+  /// 오라클이 되지 못하게 한다.
   bool captureInviteUri(
     Uri uri, {
     required AppConfig config,
@@ -631,9 +624,9 @@ class PlannerController extends ChangeNotifier {
     return captureInviteToken(parsed.token, returnRoute: returnRoute);
   }
 
-  /// Captures a canonical token supplied by platform routing.  Manual code
-  /// entry continues through [joinGroup]; this method intentionally rejects
-  /// the local `family` demo magic code and display separators.
+  /// 플랫폼 라우팅에서 제공한 정규 토큰을 포착한다. 수동 코드 입력은 계속
+  /// [joinGroup]을 사용하며, 이 메서드는 로컬 `family` 데모 매직 코드와 표시용
+  /// 구분자를 의도적으로 거부한다.
   bool captureInviteToken(String token, {String? returnRoute}) {
     final normalized = normalizeStrictInviteToken(token);
     if (normalized == null) return false;
@@ -701,8 +694,8 @@ class PlannerController extends ChangeNotifier {
       sessionGeneration: sessionGeneration,
       plannerRevision: plannerRevision,
     )) {
-      // A second route/widget callback for this same intent joins the
-      // existing request instead of issuing another oracle call.
+      // 같은 의도에 대한 두 번째 경로/위젯 콜백은 별도의 오라클 호출을 만들지 않고
+      // 기존 요청에 합류한다.
       return _pendingInvitePreviewFuture!;
     }
     final requestId = ++_pendingInvitePreviewRequestCounter;
@@ -793,9 +786,9 @@ class PlannerController extends ChangeNotifier {
 
   Future<InvitePreview?> retryPendingInvite() => previewPendingInvite();
 
-  /// Performs the explicit accept exactly once.  The pending token is
-  /// cleared immediately after the server join commits, before selecting the
-  /// group, so a subsequent group-load failure cannot cause a second join.
+  /// 명시적 수락을 정확히 한 번 수행한다. 서버 참여가 커밋된 직후 그룹을 선택하기
+  /// 전에 대기 중인 토큰을 지워, 이후 그룹 조회 실패가 두 번째 참여를 일으키지
+  /// 못하게 한다.
   Future<PlannerGroup?> acceptPendingInvite() async {
     await _pendingHydration;
     final token = _pendingInviteToken;
@@ -806,11 +799,10 @@ class PlannerController extends ChangeNotifier {
         _pendingInviteAcceptInFlight) {
       return null;
     }
-    // A preview can intentionally report `alreadyMember: true` even when
-    // the token has since expired/revoked/exhausted. The membership may have
-    // changed between preview and accept, so never trust this hint to bypass
-    // the authoritative idempotent join RPC. Only a non-member with a locally
-    // expired preview is terminal before making that request.
+    // 토큰이 그사이 만료·폐기·소진되었더라도 미리 보기는 의도적으로
+    // `alreadyMember: true`를 보고할 수 있다. 미리 보기와 수락 사이에 멤버십이
+    // 바뀔 수 있으므로 이 힌트를 신뢰해 서버 기준의 멱등 참여 RPC를 우회하지 않는다.
+    // 로컬에서 미리 보기가 만료된 비멤버만 요청 전에 최종 상태로 처리한다.
     if (!preview.alreadyMember && preview.isExpired) {
       _expirePendingInvite();
       return null;
@@ -835,10 +827,9 @@ class PlannerController extends ChangeNotifier {
         sessionGeneration: sessionGeneration,
         plannerRevision: plannerRevision,
       )) {
-        // The join RPC has already committed. If only the selected planner
-        // context became stale, clear this exact generation before returning
-        // so a caller cannot retry the same bearer token. A newer token or
-        // identity has its own generation and remains untouched.
+        // 참여 RPC는 이미 커밋되었다. 선택된 플래너 컨텍스트만 오래된 경우 반환 전에
+        // 이 세대만 지워 호출자가 같은 Bearer 토큰을 다시 시도하지 못하게 한다.
+        // 새 토큰이나 신원에는 자체 세대가 있으므로 그대로 둔다.
         _clearPendingInviteIfCurrent(
           generation: generation,
           token: token,
@@ -848,10 +839,9 @@ class PlannerController extends ChangeNotifier {
         return null;
       }
       _clearPendingInvite();
-      // Accepting a newly committed membership is the explicit resurrection
-      // boundary for a group previously tombstoned by leave/archive.  Keep
-      // this behind the exact pending-invite/session guard above so a stale
-      // accept completion cannot revive another account's group projection.
+      // 새로 커밋된 멤버십을 수락하는 시점은 나가기/보관으로 툼스톤 처리된 그룹을
+      // 명시적으로 되살리는 경계다. 위의 정확한 대기 초대/세션 가드 뒤에서만 처리하여
+      // 오래된 수락 완료가 다른 계정의 그룹 프로젝션을 되살리지 못하게 한다.
       _terminalGroupTombstones.remove(joined.id);
       if (!groups.any((candidate) => candidate.id == joined.id)) {
         groups = <PlannerGroup>[...groups, joined];
@@ -871,10 +861,9 @@ class PlannerController extends ChangeNotifier {
       return joined;
     } catch (error) {
       if (error is InviteJoinCommittedException) {
-        // The repository has already committed membership but could not load
-        // the resulting group projection. Clear this exact bearer intent even
-        // when a planner revision changed; retrying would submit the token a
-        // second time. A newer token or identity remains untouched.
+        // 저장소가 멤버십은 이미 커밋했지만 결과 그룹 프로젝션을 불러오지 못했다.
+        // 다시 시도하면 토큰을 두 번 제출하게 되므로 플래너 리비전이 바뀌었더라도
+        // 이 Bearer 의도만 지운다. 새 토큰이나 신원은 그대로 둔다.
         final exactPendingContext = _isCurrentPendingInvite(
           generation: generation,
           token: token,
@@ -921,8 +910,8 @@ class PlannerController extends ChangeNotifier {
 
   void cancelPendingInvite() => _clearPendingInvite();
 
-  /// Account-deletion flows can use the same privacy fence as explicit
-  /// cancellation without depending on the invite implementation details.
+  /// 계정 삭제 흐름은 초대 구현 세부 사항에 의존하지 않고 명시적 취소와 같은
+  /// 개인정보 보호 차단선을 사용할 수 있다.
   void clearPendingInvite() => _clearPendingInvite();
 
   void _bindPendingInviteToUser(String userId) {
@@ -975,9 +964,9 @@ class PlannerController extends ChangeNotifier {
 
   void _setPendingInviteError(Object error, {bool notify = true}) {
     if (error is InviteUnavailableException) {
-      // Expiry retires the generation, so the preview finally block will not
-      // emit its usual state-change notification. Always notify here even
-      // when the caller suppressed the transient catch notification.
+      // 만료 시 세대가 종료되므로 미리 보기의 `finally` 블록은 일반 상태 변경 알림을
+      // 보내지 않는다. 호출자가 일시적인 `catch` 알림을 억제했더라도 여기서는 항상
+      // 알린다.
       _expirePendingInvite(error: error, notify: true);
       return;
     }
@@ -986,10 +975,9 @@ class PlannerController extends ChangeNotifier {
     if (notify) notifyListeners();
   }
 
-  /// Retires the bearer token and persisted intent while retaining a
-  /// token-free terminal error long enough for the landing page to explain
-  /// why no preview is available. The route can be dismissed without a
-  /// subsequent retry accidentally probing an expired token.
+  /// Bearer 토큰과 저장된 의도를 종료하되, 랜딩 페이지에서 미리 보기를 사용할 수
+  /// 없는 이유를 설명할 만큼 토큰 없는 최종 오류를 유지한다. 경로를 닫아도 이후
+  /// 재시도에서 만료된 토큰을 실수로 조회하지 않는다.
   void _expirePendingInvite({
     Object error = const InviteUnavailableException.invalidOrExpired(),
     bool notify = true,
@@ -1019,10 +1007,9 @@ class PlannerController extends ChangeNotifier {
   void _clearPendingInvite() {
     if (_pendingInviteState == PendingInviteState.none &&
         _pendingInviteToken == null) {
-      // Even before hydration has completed, an explicit cancel/sign-out is a
-      // privacy fence. Advance the generation so a slow persisted-store read
-      // cannot repopulate the just-cleared intent, and clear any stale record
-      // best-effort without emitting a no-op notification.
+      // 복원이 완료되기 전이라도 명시적 취소/로그아웃은 개인정보 보호 차단선이다.
+      // 세대를 높여 느린 영구 저장소 읽기가 방금 지운 의도를 다시 채우지 못하게 하고,
+      // 무동작 알림을 보내지 않은 채 오래된 레코드를 가능한 범위에서 지운다.
       ++_pendingInviteGeneration;
       _clearPendingInvitePreviewFuture();
       _pendingInviteExpiryTimer?.cancel();
@@ -1124,7 +1111,7 @@ class PlannerController extends ChangeNotifier {
       try {
         await _pendingInviteStore.write(token, expiresAt);
       } catch (_) {
-        // Persistence is best effort; live controller state remains valid.
+        // 저장은 가능한 범위에서 시도하며, 현재 컨트롤러 상태는 계속 유효하다.
       }
     });
   }
@@ -1134,7 +1121,7 @@ class PlannerController extends ChangeNotifier {
       try {
         await _pendingInviteStore.clear();
       } catch (_) {
-        // Best effort and intentionally silent.
+        // 가능한 범위에서 처리하며 의도적으로 알리지 않는다.
       }
     });
   }
@@ -1175,8 +1162,8 @@ class PlannerController extends ChangeNotifier {
     final generation = ++_socialAuthGeneration;
     _socialAuthOperationToken = operation;
     _socialAuthProviderInFlight = provider;
-    // This is an intentional new OAuth request, so it owns a fresh callback
-    // stream instead of inheriting a prior timed-out launch's tombstone.
+    // 의도적으로 시작한 새 OAuth 요청이므로, 이전에 시간 초과된 실행의 툼스톤을
+    // 상속하지 않고 새로운 콜백 스트림을 소유한다.
     _staleSocialAuthFence = false;
     _staleSocialExpectedIdentity = null;
     _queuedPasswordRecoveryIdentity = null;
@@ -1210,9 +1197,8 @@ class PlannerController extends ChangeNotifier {
       final friendly = _friendlySocialError(error);
       if (_isCurrentSocialAuth(operation, generation)) {
         errorMessage = friendly;
-        // A provider callback may arrive after launch failure/timeout. Keep
-        // that callback fenced until a subsequent explicit auth operation
-        // commits an identity.
+        // 실행 실패/시간 초과 후 공급자 콜백이 도착할 수 있다. 이후 명시적 인증
+        // 작업이 신원을 커밋할 때까지 해당 콜백을 차단한다.
         _fenceStaleSocialAuth();
         _finishSocialAuth(operation, generation);
       }
@@ -1253,9 +1239,9 @@ class PlannerController extends ChangeNotifier {
         user = null;
         authFlowState = AuthFlowState.pendingEmailConfirmation;
         pendingConfirmationEmail = result.email;
-        // A new explicit email-confirmation flow owns the pending address,
-        // even when a previous OAuth launch left a stale social fence.  The
-        // matching-address check below still rejects unrelated callbacks.
+        // 이전 OAuth 실행이 오래된 소셜 차단선을 남겼더라도 새 명시적 이메일 확인
+        // 흐름이 대기 중인 주소를 소유한다. 아래의 주소 일치 검사는 관계없는 콜백을
+        // 계속 거부한다.
         if (_staleSocialAuthFence) {
           _staleSocialExpectedIdentity = null;
           _staleSocialIdentityCommitted = false;
@@ -1316,9 +1302,9 @@ class PlannerController extends ChangeNotifier {
   }
 
   Future<void> signOut() async {
-    // Serialize consecutive explicit sign-outs as well as new auth requests.
-    // The first call owns the SDK revoke; a second call waits until that
-    // ownership has settled before taking a new operation token.
+    // 연속된 명시적 로그아웃과 새 인증 요청을 직렬화한다. 첫 호출이 SDK 폐기를
+    // 소유하며, 두 번째 호출은 해당 소유권이 정리될 때까지 기다린 뒤 새 작업 토큰을
+    // 가져간다.
     await _awaitSignOutSettlement();
     final operation = ++_operationToken;
     final settlementCompleter = Completer<void>();
@@ -1332,18 +1318,17 @@ class PlannerController extends ChangeNotifier {
     _queuedAuthIdentity = null;
     _staleSocialAuthFence = true;
     _ignoreExternalIdentityEvents = true;
-    // Keep an existing stale-social tombstone active, but forget the identity
-    // it previously committed.  A callback for that account after sign-out
-    // must not be accepted as a new session.
+    // 기존의 오래된 소셜 툼스톤은 활성 상태로 유지하되 이전에 커밋한 신원은 잊는다.
+    // 로그아웃 후 해당 계정의 콜백을 새 세션으로 받아들여서는 안 된다.
     _staleSocialExpectedIdentity = null;
     _queuedPasswordRecoveryIdentity = null;
     _staleSocialIdentityCommitted = false;
     _staleSocialPendingMismatchObserved = false;
-    // Explicit sign-out is a terminal privacy boundary for invite intents.
+    // 명시적 로그아웃은 초대 의도에 대한 최종 개인정보 보호 경계다.
     _clearPendingInvite();
     try {
-      // Clear local state before waiting for a potentially slow remote revoke.
-      // The clear helper mutates synchronously before its first await.
+      // 느릴 수 있는 원격 폐기를 기다리기 전에 로컬 상태를 지운다. 지우기 도우미는
+      // 첫 `await` 전에 동기적으로 상태를 변경한다.
       final clear = _clearPlannerData(invalidateOperation: false);
       authFlowState = AuthFlowState.signedOut;
       pendingConfirmationEmail = null;
@@ -1365,9 +1350,9 @@ class PlannerController extends ChangeNotifier {
       authFlowState = AuthFlowState.signedOut;
       pendingConfirmationEmail = null;
       passwordResetRequestedEmail = null;
-      // Sign-out failures can contain provider/server details even when the
-      // repository is replaced by a test double. Keep the UI and rethrown
-      // exception on the same stable, user-safe session message.
+      // 저장소를 테스트 대역으로 교체해도 로그아웃 실패에는 공급자/서버 세부 정보가
+      // 포함될 수 있다. UI와 다시 던지는 예외에 동일하고 안정적인 사용자 안전 세션
+      // 메시지를 사용한다.
       final safeFailure = failure == null
           ? null
           : const AuthException(authSessionErrorMessage);
@@ -1613,9 +1598,8 @@ class PlannerController extends ChangeNotifier {
   }
 
   int _beginAuthOperation({required bool sessionChanging}) {
-    // Auth requests use a generation separate from planner revisions. A
-    // group refresh may advance [_operationToken] while the auth request is
-    // still the owner of the auth spinner.
+    // 인증 요청은 플래너 리비전과 별도의 세대를 사용한다. 인증 요청이 인증 진행
+    // 표시를 계속 소유하는 동안 그룹 새로 고침이 [_operationToken]을 높일 수 있다.
     final operation = _beginOperation();
     if (_signOutOperationToken != null && _signOutOperationToken != operation) {
       _signOutOperationToken = null;
@@ -1627,9 +1611,8 @@ class PlannerController extends ChangeNotifier {
     _authStateChangingOperationInFlight = sessionChanging;
     _queuedAuthIdentity = user?.id;
     if (sessionChanging && _staleSocialAuthFence) {
-      // A new explicit password/recovery operation must own its eventual
-      // result; do not let a prior timed-out callback match the old account
-      // while this request is pending.
+      // 새 명시적 비밀번호/복구 작업이 최종 결과를 소유해야 한다. 이 요청이 대기
+      // 중일 때 이전에 시간 초과된 콜백이 기존 계정과 일치하지 못하게 한다.
       _staleSocialExpectedIdentity = null;
       _staleSocialIdentityCommitted = false;
       _staleSocialPendingMismatchObserved = false;
@@ -1659,8 +1642,8 @@ class PlannerController extends ChangeNotifier {
 
   void _commitSocialAuthIdentity(String? identity) {
     if (!_staleSocialAuthFence || identity == null) return;
-    // An explicit password/recovery result is a new owner.  It may replace
-    // the identity recorded for an earlier timed-out social launch.
+    // 명시적 비밀번호/복구 결과가 새 소유자다. 이전에 시간 초과된 소셜 실행에서
+    // 기록한 신원을 교체할 수 있다.
     _staleSocialExpectedIdentity = identity;
     _staleSocialIdentityCommitted = true;
     _staleSocialPendingMismatchObserved = false;
@@ -1675,11 +1658,10 @@ class PlannerController extends ChangeNotifier {
         event.type != AuthEventType.userUpdated) {
       return true;
     }
-    // A direct password operation owns the result, not its provider event;
-    // suppress callbacks until that operation returns a user. Email
-    // confirmation is allowed once the pending address is known and matches.
-    // Check this exception before the expected identity so a new sign-up can
-    // intentionally establish a different account after an older login.
+    // 공급자 이벤트가 아니라 직접 비밀번호 작업이 결과를 소유한다. 해당 작업이
+    // 사용자를 반환할 때까지 콜백을 억제한다. 대기 중인 주소가 확인되어 일치하면
+    // 이메일 확인을 허용한다. 예상 신원보다 이 예외를 먼저 검사하여 이전 로그인
+    // 후 새 가입이 의도적으로 다른 계정을 설정할 수 있게 한다.
     final incomingEmail = event.user?.email.trim().toLowerCase();
     final pendingEmail = pendingConfirmationEmail?.trim().toLowerCase();
     if (pendingEmail != null &&
@@ -1701,8 +1683,8 @@ class PlannerController extends ChangeNotifier {
   void _failClosedForFencedIdentity({bool showError = true}) {
     if (_disposed || _fencedIdentityRevocationInFlight) return;
     _fencedIdentityRevocationInFlight = true;
-    // Publish the gate before any synchronous notifications so a listener
-    // that immediately retries auth cannot race the remote revoke.
+    // 동기 알림을 보내기 전에 게이트를 게시하여 즉시 인증을 다시 시도하는 리스너와
+    // 원격 폐기 사이에 경쟁 상태가 생기지 않게 한다.
     final completion = Completer<void>();
     final revocation = completion.future;
     _fencedIdentityRevocation = revocation;
@@ -1714,9 +1696,9 @@ class PlannerController extends ChangeNotifier {
     _staleSocialExpectedIdentity = null;
     _staleSocialIdentityCommitted = false;
     _ignoreExternalIdentityEvents = true;
-    // Clear private planner state synchronously before revoking the SDK
-    // session. The revocation itself is best effort; either outcome remains
-    // a signed-out, privacy-preserving controller state.
+    // SDK 세션을 폐기하기 전에 비공개 플래너 상태를 동기적으로 지운다. 폐기 자체는
+    // 가능한 범위에서 시도하며, 결과와 관계없이 로그아웃된 개인정보 보호 컨트롤러
+    // 상태를 유지한다.
     unawaited(_clearPlannerData());
     authFlowState = AuthFlowState.signedOut;
     pendingConfirmationEmail = null;
@@ -1734,8 +1716,8 @@ class PlannerController extends ChangeNotifier {
       await _auth.signOut();
     } catch (_) {
       if (!_disposed) {
-        // Never expose provider/server details while preserving the safe
-        // signed-out state established above.
+        // 위에서 설정한 안전한 로그아웃 상태를 유지하면서 공급자/서버 세부 정보를
+        // 절대 노출하지 않는다.
         errorMessage = authSessionErrorMessage;
         notifyListeners();
       }
@@ -1756,9 +1738,9 @@ class PlannerController extends ChangeNotifier {
         _auth.currentUser == null) {
       return;
     }
-    // A stale password request can still establish a Supabase session after
-    // sign-out. Treat that late completion like an unexpected identity event
-    // and revoke it without exposing a provider error.
+    // 오래된 비밀번호 요청이 로그아웃 후에도 Supabase 세션을 만들 수 있다. 늦게
+    // 완료된 요청을 예기치 않은 신원 이벤트처럼 취급하고 공급자 오류를 노출하지
+    // 않은 채 폐기한다.
     _failClosedForFencedIdentity(showError: false);
   }
 
@@ -1768,8 +1750,8 @@ class PlannerController extends ChangeNotifier {
     try {
       await pending;
     } catch (_) {
-      // Revocation failures are already represented by the safe session error
-      // above. Auth operations may retry only after the attempt settles.
+      // 폐기 실패는 위의 안전한 세션 오류로 이미 표현된다. 인증 작업은 폐기 시도가
+      // 끝난 뒤에만 다시 시도할 수 있다.
     }
   }
 
@@ -1779,8 +1761,8 @@ class PlannerController extends ChangeNotifier {
     try {
       await pending;
     } catch (_) {
-      // The explicit sign-out caller surfaces its own safe error. Waiting auth
-      // operations may proceed only after the revoke attempt has settled.
+      // 명시적 로그아웃 호출자는 자체 안전 오류를 표시한다. 대기 중인 인증 작업은
+      // 폐기 시도가 끝난 뒤에만 진행할 수 있다.
     }
   }
 
@@ -1835,10 +1817,9 @@ class PlannerController extends ChangeNotifier {
     if (!_staleSocialPendingMismatchObserved) return;
     final sdkUser = _auth.currentUser;
     if (sdkUser != null && sdkUser.id != authenticated.id) {
-      // A provider callback changed the SDK session while this explicit auth
-      // operation was pending. Without callback request IDs, accepting either
-      // account would leave the controller and Supabase on different JWTs;
-      // revoke both and fail closed instead.
+      // 이 명시적 인증 작업이 대기 중일 때 공급자 콜백이 SDK 세션을 변경했다. 콜백
+      // 요청 ID가 없으므로 어느 계정을 받아들여도 컨트롤러와 Supabase가 서로 다른
+      // JWT를 사용하게 된다. 대신 둘 다 폐기하고 안전하게 차단한다.
       _failClosedForFencedIdentity();
       throw const AuthException(authSessionErrorMessage);
     }
@@ -1861,13 +1842,13 @@ class PlannerController extends ChangeNotifier {
 
   bool _isOperationGenerationCurrent(
     int generation, {
-    required String userId,
-    required String groupId,
+    required String? userId,
+    String? groupId,
   }) {
-    return !_disposed &&
-        _operationGeneration == generation &&
-        user?.id == userId &&
-        selectedGroup?.id == groupId;
+    if (_disposed || _operationGeneration != generation) return false;
+    if (user?.id != userId) return false;
+    if (groupId != null && selectedGroup?.id != groupId) return false;
+    return true;
   }
 
   void _startSaving(int operation) {
@@ -1918,15 +1899,14 @@ class PlannerController extends ChangeNotifier {
 
   void _enqueueAuthEvent(AuthRepositoryEvent event) {
     if (event.type == AuthEventType.signedOut) {
-      // Supabase may emit an initial ambient SIGNED_OUT event while a user is
-      // opening an invite in a logged-out tab.  Preserve that pending intent;
-      // only an explicit sign-out/known committed identity is a privacy fence.
+      // 사용자가 로그아웃된 탭에서 초대를 여는 동안 Supabase가 초기 주변
+      // SIGNED_OUT 이벤트를 내보낼 수 있다. 대기 중인 의도를 유지한다. 명시적
+      // 로그아웃이나 커밋된 것으로 확인된 신원만 개인정보 보호 차단선이다.
       if (user != null || _signOutOperationToken != null) {
         _clearPendingInvite();
       }
-      // Signed-out is a synchronous fence even when no identity is currently
-      // visible. Forget any identity previously committed behind a social
-      // tombstone before a delayed callback can be inspected.
+      // 현재 표시되는 신원이 없어도 로그아웃 상태는 동기 차단선이다. 지연된 콜백을
+      // 검사하기 전에 소셜 툼스톤 뒤에서 이전에 커밋한 모든 신원을 잊는다.
       _staleSocialAuthFence = true;
       _staleSocialExpectedIdentity = null;
       _queuedPasswordRecoveryIdentity = null;
@@ -1940,10 +1920,9 @@ class PlannerController extends ChangeNotifier {
         ? null
         : event.user?.id ?? _auth.currentUser?.id;
     if (!_isAllowedWhileSocialAuthFenced(event, incomingId)) {
-      // Without callback request IDs, preserving the already committed
-      // identity is safer while a newer explicit password operation is still
-      // pending. Once no operation owns the session, fail closed instead of
-      // leaving the SDK and controller on different accounts.
+      // 콜백 요청 ID가 없으므로 새 명시적 비밀번호 작업이 대기 중일 때는 이미
+      // 커밋된 신원을 유지하는 편이 더 안전하다. 어떤 작업도 세션을 소유하지 않게
+      // 되면 SDK와 컨트롤러가 서로 다른 계정에 남지 않도록 안전하게 차단한다.
       final pendingExplicitOperation =
           _authOperationInFlight &&
           _authStateChangingOperationInFlight &&
@@ -1961,16 +1940,15 @@ class PlannerController extends ChangeNotifier {
         _ignoreExternalIdentityEvents &&
         _socialAuthProviderInFlight == null &&
         !_staleSocialAuthFence) {
-      // An auth event can be delivered after an explicit sign-out because a
-      // provider callback was already queued. Revoke the SDK session as well
-      // as clearing planner state; keeping only a signed-out UI would leave
-      // the SDK on a different account.
+      // 공급자 콜백이 이미 대기열에 들어갔다면 명시적 로그아웃 후에도 인증 이벤트가
+      // 전달될 수 있다. 플래너 상태를 지우면서 SDK 세션도 폐기한다. 로그아웃 UI만
+      // 유지하면 SDK가 다른 계정에 남게 된다.
       _failClosedForFencedIdentity();
       return;
     }
     final expectedId = _queuedAuthIdentity ?? user?.id;
-    // SIGNED_OUT is a fence even when the controller already has no user:
-    // an in-flight password request may still complete with a user later.
+    // 컨트롤러에 이미 사용자가 없어도 SIGNED_OUT은 차단선이다. 진행 중인 비밀번호
+    // 요청이 나중에 사용자를 반환하며 완료될 수 있다.
     final identityChanged = event.type == AuthEventType.signedOut
         ? true
         : incomingId != null && incomingId != expectedId;
@@ -1978,12 +1956,11 @@ class PlannerController extends ChangeNotifier {
       final preserveSignOutOperation =
           event.type == AuthEventType.signedOut &&
           _signOutOperationToken == _operationToken;
-      // A switch from one known identity to another is a synchronous privacy
-      // boundary.  Clear the bearer intent before the queued planner clear so
-      // a caller cannot observe the old token while the auth event is waiting
-      // behind an older operation.  The first signed-in event after a logged-
-      // out capture intentionally keeps the intent and binds it in the queued
-      // handler below; ambient SIGNED_OUT events likewise preserve it.
+      // 확인된 신원 사이의 전환은 동기 개인정보 보호 경계다. 대기 중인 플래너 지우기
+      // 전에 Bearer 의도를 지워, 인증 이벤트가 이전 작업 뒤에서 기다리는 동안
+      // 호출자가 기존 토큰을 보지 못하게 한다. 로그아웃 상태에서 포착한 뒤 첫 로그인
+      // 이벤트는 의도적으로 의도를 유지하고 아래 대기열 처리기에서 연결한다. 주변
+      // SIGNED_OUT 이벤트도 마찬가지로 의도를 유지한다.
       if (event.type != AuthEventType.signedOut &&
           (user != null || _queuedAuthIdentity != null)) {
         _clearPendingInvite();
@@ -1993,18 +1970,17 @@ class PlannerController extends ChangeNotifier {
       if (event.type == AuthEventType.signedOut) {
         _ignoreExternalIdentityEvents = true;
       }
-      // A signed-out/new-identity event supersedes a pending auth request.
-      // Preserve an explicit sign-in operation's spinner long enough for its
-      // own completion; the operation generation remains independent of the
-      // planner revision changed by the privacy clear.
+      // 로그아웃/새 신원 이벤트는 대기 중인 인증 요청을 대체한다. 명시적 로그인
+      // 작업이 자체적으로 완료될 때까지 해당 진행 표시를 유지한다. 작업 세대는
+      // 개인정보 지우기로 바뀐 플래너 리비전과 계속 독립되어 있다.
       if (event.type == AuthEventType.signedOut ||
           !_authStateChangingOperationInFlight) {
         _invalidateAuthOperations();
       }
       final preserveSaving =
           _authOperationToken != 0 || _socialAuthProviderInFlight != null;
-      // Invalidate and clear before the queued handler waits on an older
-      // auth event or group request.
+      // 대기열 처리기가 이전 인증 이벤트나 그룹 요청을 기다리기 전에 무효화하고
+      // 지운다.
       unawaited(
         _clearPlannerData(
           invalidateOperation: !preserveSignOutOperation,
@@ -2169,15 +2145,14 @@ class PlannerController extends ChangeNotifier {
     bool invalidateOperation = true,
     bool clearSaving = true,
   }) async {
-    // A full identity/privacy clear starts a new planner session even when a
-    // test double happens to sign back in as the same user id.  Terminal
-    // group mutations capture this generation and must not alter a newer
-    // session when their old network Future finally settles.
+    // 테스트 대역이 우연히 같은 사용자 ID로 다시 로그인하더라도 신원/개인정보를
+    // 완전히 지우면 새 플래너 세션을 시작한다. 최종 그룹 변경은 이 세대를 캡처하며,
+    // 기존 네트워크 Future가 뒤늦게 완료되더라도 새 세션을 변경해서는 안 된다.
     _plannerSessionGeneration++;
     _plannerRevision++;
-    // Notification state has its own serialized privacy boundary. Queue the
-    // sign-out cancellation before clearing the planner identity so a stale
-    // account cannot retain local reminders during account switches.
+    // 알림 상태에는 자체 직렬화된 개인정보 보호 경계가 있다. 플래너 신원을 지우기
+    // 전에 로그아웃 취소를 대기열에 넣어 계정 전환 중 오래된 계정이 로컬 알림을
+    // 유지하지 못하게 한다.
     _runNotificationSideEffect((notifications) => notifications.onSignedOut());
     if (invalidateOperation) {
       _operationToken++;
@@ -2204,8 +2179,8 @@ class PlannerController extends ChangeNotifier {
     showAllMembers = true;
     isLoading = false;
     if (clearSaving) isSaving = false;
-    // Identity changes are privacy-sensitive. Notify before awaiting stream
-    // cancellation so old planner widgets disappear synchronously.
+    // 신원 변경은 개인정보에 민감하다. 스트림 취소를 기다리기 전에 알림을 보내
+    // 기존 플래너 위젯이 동기적으로 사라지게 한다.
     notifyListeners();
     final subscription = _eventSubscription;
     _eventSubscription = null;
@@ -2216,18 +2191,18 @@ class PlannerController extends ChangeNotifier {
     try {
       await subscription?.cancel();
     } catch (_) {
-      // Clearing private state is more important than a failing stream
-      // cancellation. The stream callback is still guarded by the revision.
+      // 스트림 취소 실패보다 비공개 상태를 지우는 것이 더 중요하다. 스트림 콜백은
+      // 여전히 리비전으로 보호된다.
     }
     try {
       await invalidationSubscription?.cancel();
     } catch (_) {
-      // Invalidation cancellation is best effort during a privacy clear.
+      // 개인정보를 지울 때 무효화 취소는 가능한 범위에서 시도한다.
     }
     try {
       await lifecycleSubscription?.cancel();
     } catch (_) {
-      // Lifecycle cancellation is best effort during a privacy clear.
+      // 개인정보를 지울 때 수명 주기 취소는 가능한 범위에서 시도한다.
     }
   }
 
@@ -2266,30 +2241,30 @@ class PlannerController extends ChangeNotifier {
     try {
       await subscription?.cancel();
     } catch (_) {
-      // A stale subscription cannot keep private data alive. Its callbacks
-      // are guarded by the operation revision.
+      // 오래된 구독이 비공개 데이터를 계속 유지할 수 없다. 해당 콜백은 작업
+      // 리비전으로 보호된다.
     }
     try {
       await invalidationSubscription?.cancel();
     } catch (_) {
-      // Invalidation cancellation is best effort during a group clear.
+      // 그룹을 지울 때 무효화 취소는 가능한 범위에서 시도한다.
     }
     try {
       await lifecycleSubscription?.cancel();
     } catch (_) {
-      // A lifecycle stream cannot block selected-group invalidation.
+      // 수명 주기 스트림이 선택 그룹 무효화를 막을 수 없다.
     }
   }
 
-  /// Atomically removes [groupId] from the visible list and invalidates every
-  /// selected-group callback before waiting for stream cancellation. The
-  /// returned Future only represents best-effort subscription cleanup; callers
-  /// must not restore the removed group when a subsequent reload fails.
+  /// 스트림 취소를 기다리기 전에 표시 목록에서 [groupId]를 원자적으로 제거하고 모든
+  /// 선택 그룹 콜백을 무효화한다. 반환된 Future는 가능한 범위에서 수행하는 구독
+  /// 정리만 나타낸다. 이후 다시 불러오기에 실패해도 호출자가 제거한 그룹을 복원하면
+  /// 안 된다.
   Future<void> _invalidateGroupScopedData({String? removeGroupId}) {
-    // A stale leave/archive completion can arrive after the user has already
-    // switched to another group.  Remove the terminal row from the list but
-    // do not wipe the new group's selection/cache in that case.  A selected
-    // group (or a no-id privacy clear) still takes the full invalidation path.
+    // 사용자가 이미 다른 그룹으로 전환한 뒤 오래된 나가기/보관 완료가 도착할 수
+    // 있다. 이때 목록에서 최종 상태의 행은 제거하되 새 그룹의 선택/캐시는 지우지
+    // 않는다. 선택된 그룹이나 ID 없는 개인정보 지우기는 계속 전체 무효화 경로를
+    // 사용한다.
     final clearSelected =
         removeGroupId == null || selectedGroup?.id == removeGroupId;
     if (removeGroupId != null) {
@@ -2360,9 +2335,9 @@ class PlannerController extends ChangeNotifier {
         groupId,
       );
     }
-    // Legacy fakes predate requester-scoped streams. Keep their unscoped read
-    // path available only in non-release test/dev builds; production adapters
-    // implement UserScopedEventReadCapability and never reach this fallback.
+    // 이전 가짜 구현은 요청자 범위 스트림보다 먼저 만들어졌다. 범위 없는 읽기 경로는
+    // 릴리스가 아닌 테스트/개발 빌드에서만 유지한다. 프로덕션 어댑터는
+    // UserScopedEventReadCapability를 구현하므로 이 대체 경로에 도달하지 않는다.
     if (!kReleaseMode) return _repository.watchEvents(groupId);
     return Stream<List<PlannerEvent>>.error(
       const ScheduleCapabilityException('사용자 범위 일정 스트림을 지원하지 않는 저장소입니다.'),
@@ -2382,13 +2357,12 @@ class PlannerController extends ChangeNotifier {
     )) {
       return;
     }
-    // Repository lifecycle reads are requester/group scoped, but keep the
-    // controller closed against a malformed adapter response as well. A
-    // cross-group row must never replace the currently selected group.
+    // 저장소 수명 주기 읽기는 요청자/그룹 범위지만 잘못된 어댑터 응답에도 컨트롤러가
+    // 안전하게 차단되도록 한다. 다른 그룹의 행이 현재 선택 그룹을 대체해서는 안 된다.
     if (incoming != null && incoming.id != groupId) return;
     if (incoming == null || incoming.isArchived) {
-      // Do not await before clearing state: a remote archive/null event must
-      // immediately hide the group's private data and invalidate callbacks.
+      // 상태를 지우기 전에 기다리지 않는다. 원격 보관/null 이벤트는 그룹의 비공개
+      // 데이터를 즉시 숨기고 콜백을 무효화해야 한다.
       _runNotificationSideEffect(
         (notifications) => notifications.cancelForGroup(groupId),
       );
@@ -2403,10 +2377,9 @@ class PlannerController extends ChangeNotifier {
         _usesBoundedEventRangeReads) {
       _beginSelectedRange(fetch: true);
     }
-    // A lifecycle update can also carry an owner/version change (for example
-    // after a remote transfer).  Refresh the member and invite projections so
-    // edit/transfer affordances do not keep stale roles while preserving the
-    // just-updated group object immediately above.
+    // 수명 주기 업데이트에는 원격 이전 후처럼 소유자/버전 변경도 포함될 수 있다.
+    // 바로 위에서 갱신한 그룹 객체는 유지하면서 멤버와 초대 프로젝션을 새로 고쳐,
+    // 수정/이전 동작에 오래된 역할이 남지 않게 한다.
     _scheduleGroupScopedMetadataRefresh(
       operation: operation,
       userId: userId,
@@ -2414,10 +2387,9 @@ class PlannerController extends ChangeNotifier {
     );
   }
 
-  /// Debounces bursts of membership/group lifecycle notifications into one
-  /// complete member/invite projection read.  A second signal that arrives
-  /// while the read is in flight is retained and retried after that read, so
-  /// an older response cannot become the final roster snapshot.
+  /// 짧은 시간에 몰린 멤버십/그룹 수명 주기 알림을 디바운스하여 한 번의 완전한
+  /// 멤버/초대 프로젝션 읽기로 합친다. 읽기가 진행 중일 때 두 번째 신호가 오면
+  /// 유지했다가 읽기 후 다시 시도하므로 이전 응답이 최종 구성원 스냅샷이 될 수 없다.
   void _scheduleGroupScopedMetadataRefresh({
     required int operation,
     required String userId,
@@ -2447,8 +2419,8 @@ class PlannerController extends ChangeNotifier {
       _groupMetadataRefreshTimer = null;
       if (_disposed || token != _groupMetadataRefreshToken) return;
       if (_groupMetadataRefreshInFlight) {
-        // The in-flight read's finally block re-arms the timer for the latest
-        // pending request. Keep that request intact until then.
+        // 진행 중인 읽기의 `finally` 블록이 가장 최근 대기 요청을 위해 타이머를 다시
+        // 설정한다. 그때까지 해당 요청을 그대로 유지한다.
         return;
       }
       final request = _pendingGroupMetadataRefresh;
@@ -2482,8 +2454,8 @@ class PlannerController extends ChangeNotifier {
     } finally {
       _groupMetadataRefreshInFlight = false;
       if (_pendingGroupMetadataRefresh != null && !_disposed) {
-        // A signal may have arrived while membersForGroup/inviteCodesForGroup
-        // was pending. Re-arm without losing the newest operation context.
+        // membersForGroup/inviteCodesForGroup가 대기 중일 때 신호가 도착했을 수 있다.
+        // 가장 새로운 작업 컨텍스트를 잃지 않고 다시 예약한다.
         _armGroupMetadataRefreshTimer();
       }
     }
@@ -2506,8 +2478,8 @@ class PlannerController extends ChangeNotifier {
     try {
       nextMembers = await _repository.membersForGroup(groupId);
     } catch (_) {
-      // Realtime group metadata remains usable even if an auxiliary profile
-      // projection is temporarily unavailable.
+      // 보조 프로필 프로젝션을 일시적으로 사용할 수 없어도 Realtime 그룹 메타데이터는
+      // 계속 사용할 수 있다.
     }
     if (!_isCurrentPlannerContext(
       operation,
@@ -2519,8 +2491,8 @@ class PlannerController extends ChangeNotifier {
     try {
       nextInvites = await _repository.inviteCodesForGroup(groupId);
     } catch (_) {
-      // Invite rows are owner-scoped and may legitimately be unavailable to a
-      // member; retain the last visible value in that case.
+      // 초대 행은 소유자 범위이므로 멤버가 정상적으로 접근하지 못할 수 있다. 이때는
+      // 마지막으로 표시된 값을 유지한다.
     }
     if (!_isCurrentPlannerContext(
       operation,
@@ -2547,15 +2519,14 @@ class PlannerController extends ChangeNotifier {
     final operation = ++_plannerRevision;
     final selectedGroupId = selectedGroup?.id;
     isLoading = true;
-    // A conflict-owned refresh must not erase a newer operation's diagnostic
-    // while its network read is pending.  The caller will restore the
-    // original conflict message only when this generation still owns the
-    // context after the refresh completes.
+    // 충돌이 소유한 새로 고침은 네트워크 읽기가 대기 중일 때 새 작업의 진단 정보를
+    // 지우면 안 된다. 새로 고침이 끝난 뒤에도 이 세대가 컨텍스트를 소유할 때만
+    // 호출자가 원래 충돌 메시지를 복원한다.
     if (!preserveOperationGeneration) errorMessage = null;
     notifyListeners();
     try {
-      // Stage the response until the user and selection that initiated this
-      // request are still current. A sign-out or a newer refresh must win.
+      // 이 요청을 시작한 사용자와 선택이 여전히 현재 상태인지 확인할 때까지 응답을
+      // 보류한다. 로그아웃이나 더 새로운 새로 고침이 우선해야 한다.
       final fetchedGroups = (await _repository.groupsForUser(current.id))
           .where((group) => !_terminalGroupTombstones.contains(group.id))
           .toList(growable: false);
@@ -2576,8 +2547,8 @@ class PlannerController extends ChangeNotifier {
             .where((group) => group.id == selectedGroupId)
             .firstOrNull;
         if (refreshedSelection == null) {
-          // Membership was removed (or the group was deleted). Do not leave
-          // the old selection or its events/members reachable.
+          // 멤버십이 제거되었거나 그룹이 삭제되었다. 이전 선택이나 해당 일정/멤버에
+          // 접근할 수 있는 상태로 두지 않는다.
           _terminalGroupTombstones.add(selectedGroupId);
           await _clearGroupScopedData();
           if (_plannerRevision == operation && user?.id == current.id) {
@@ -2592,8 +2563,8 @@ class PlannerController extends ChangeNotifier {
           preservedOperationGeneration: operationGeneration,
         );
       } else if (_hasGroupScopedData) {
-        // This is defensive for callers that cleared selectedGroup directly;
-        // a refresh with no selection must not retain an orphaned cache.
+        // selectedGroup을 직접 지운 호출자를 위한 방어 처리다. 선택 없이 새로 고칠
+        // 때 고립된 캐시를 유지해서는 안 된다.
         await _clearGroupScopedData();
       }
     } catch (error) {
@@ -2625,16 +2596,16 @@ class PlannerController extends ChangeNotifier {
     int? preservedOperationGeneration,
   }) async {
     if (_terminalGroupOperations.contains(groupId)) {
-      // A leave/archive completion has already invalidated this group. Ignore
-      // stale taps and late list callbacks until the terminal operation ends.
+      // 나가기/보관 완료로 이미 이 그룹을 무효화했다. 최종 작업이 끝날 때까지 오래된
+      // 탭 동작과 늦은 목록 콜백을 무시한다.
       return;
     }
     final group = groups
         .where((candidate) => candidate.id == groupId)
         .firstOrNull;
-    // A terminal mutation or a remote archive may remove the row between a
-    // list tap and this callback.  Treat that stale selection as a no-op
-    // instead of throwing from `firstWhere` and reviving cached data.
+    // 목록을 탭한 시점과 이 콜백 사이에 최종 변경 또는 원격 보관이 행을 제거할 수
+    // 있다. 이 오래된 선택은 `firstWhere`에서 예외를 던져 캐시 데이터를 되살리는
+    // 대신 무동작으로 처리한다.
     if (group == null) return;
     final userId = user?.id;
     if (userId == null) return;
@@ -2680,17 +2651,17 @@ class PlannerController extends ChangeNotifier {
       try {
         await previousSubscription?.cancel();
       } catch (_) {
-        // A cancelled stream cannot be allowed to block the new selection.
+        // 취소된 스트림이 새 선택을 막게 두지 않는다.
       }
       try {
         await previousInvalidationSubscription?.cancel();
       } catch (_) {
-        // A stale invalidation stream cannot block the new selection.
+        // 오래된 무효화 스트림이 새 선택을 막게 두지 않는다.
       }
       try {
         await previousLifecycleSubscription?.cancel();
       } catch (_) {
-        // A stale lifecycle stream cannot block the new selection.
+        // 오래된 수명 주기 스트림이 새 선택을 막게 두지 않는다.
       }
       if (!_isCurrentPlannerContext(
         operation,
@@ -2700,10 +2671,9 @@ class PlannerController extends ChangeNotifier {
         return;
       }
 
-      // Event and lifecycle streams are privacy/availability-critical. Start
-      // both before the auxiliary member/invite reads below: those reads may
-      // be slow or remain pending while a remote archive/deactivation still
-      // needs to clear the selected group immediately.
+      // 일정 및 수명 주기 스트림은 개인정보 보호/가용성에 중요하다. 아래의 보조
+      // 멤버/초대 읽기보다 둘을 먼저 시작한다. 이러한 읽기가 느리거나 대기 중이어도
+      // 원격 보관/비활성화가 선택 그룹을 즉시 지워야 할 수 있다.
       StreamSubscription<List<PlannerEvent>>? nextSubscription;
       StreamSubscription<void>? nextInvalidationSubscription;
       StreamSubscription<PlannerGroup?>? nextLifecycleSubscription;
@@ -2737,8 +2707,8 @@ class PlannerController extends ChangeNotifier {
           try {
             await subscription.cancel();
           } catch (_) {
-            // A stale stream cannot block a newer selection or a privacy
-            // clear. Its callbacks remain guarded by the operation context.
+            // 오래된 스트림이 새 선택이나 개인정보 지우기를 막을 수 없다. 해당 콜백은
+            // 작업 컨텍스트로 계속 보호된다.
           }
         }
       }
@@ -2824,8 +2794,8 @@ class PlannerController extends ChangeNotifier {
             await cancelPendingSubscriptions();
             return;
           }
-          // Publish the subscription before awaiting metadata so a lifecycle
-          // tombstone can cancel it even while either REST read is pending.
+          // 어느 REST 읽기가 대기 중이더라도 수명 주기 툼스톤이 취소할 수 있도록
+          // 메타데이터를 기다리기 전에 구독을 게시한다.
           _eventSubscription = subscription;
         } catch (error) {
           streamFailed = true;
@@ -2880,9 +2850,8 @@ class PlannerController extends ChangeNotifier {
             await cancelPendingSubscriptions();
             return;
           }
-          // As with events, publish this before the metadata reads. If the
-          // listener synchronously reports a tombstone, the context check
-          // below prevents a stale subscription from being retained.
+          // 일정과 마찬가지로 메타데이터 읽기 전에 이를 게시한다. 리스너가 툼스톤을
+          // 동기적으로 보고하면 아래 컨텍스트 검사가 오래된 구독이 유지되는 일을 막는다.
           _groupLifecycleSubscription = subscription;
         } catch (error) {
           metadataError ??= _friendlyError(error);
@@ -3045,9 +3014,9 @@ class PlannerController extends ChangeNotifier {
     required String timezone,
   }) {
     final capability = _repository;
-    // Preserve the old three-positional contract for the historical default
-    // timezone. This also lets legacy test doubles override createGroup
-    // without accidentally bypassing their controlled Future.
+    // 기존 기본 시간대에 대한 세 개의 위치 인자 계약을 유지한다. 이를 통해 이전
+    // 테스트 대역이 제어하는 Future를 실수로 우회하지 않고 createGroup을 재정의할
+    // 수도 있다.
     if (timezone == defaultPlannerTimezone) {
       return _repository.createGroup(ownerId, name, description);
     }
@@ -3065,9 +3034,8 @@ class PlannerController extends ChangeNotifier {
         );
   }
 
-  /// Updates the selected group's mutable metadata with optimistic locking.
-  /// The form owns its draft values, so a conflict refreshes the latest group
-  /// while leaving those values untouched in the screen.
+  /// 낙관적 잠금을 사용해 선택 그룹의 변경 가능한 메타데이터를 수정한다. 양식이
+  /// 초안 값을 소유하므로 충돌 시 화면의 값을 그대로 둔 채 최신 그룹을 새로 고친다.
   Future<PlannerGroup> updateGroup({
     required String name,
     required String description,
@@ -3092,7 +3060,7 @@ class PlannerController extends ChangeNotifier {
     );
   }
 
-  /// Positional alias for screens that use the shorter edit terminology.
+  /// 더 짧은 수정 용어를 사용하는 화면을 위한 위치 인자 별칭이다.
   Future<PlannerGroup> editGroup(
     String name,
     String description, {
@@ -3105,9 +3073,9 @@ class PlannerController extends ChangeNotifier {
     expectedVersion: expectedVersion,
   );
 
-  /// Explicit-version alias useful to preflight/edit flows. The actor is
-  /// always the authenticated controller user; a caller-supplied actor is
-  /// accepted only as a compatibility check and is never trusted for auth.
+  /// 사전 검사/수정 흐름에 유용한 명시적 버전 별칭이다. 행위자는 항상 인증된
+  /// 컨트롤러 사용자다. 호출자가 제공한 행위자는 호환성 검사 용도로만 허용하며
+  /// 인증에는 절대 신뢰하지 않는다.
   Future<PlannerGroup> updateGroupIfVersion({
     required String groupId,
     required String name,
@@ -3181,8 +3149,8 @@ class PlannerController extends ChangeNotifier {
         return updated;
       }
       _replaceGroup(updated);
-      // A metadata edit also refreshes members, invites and realtime events;
-      // this ensures a changed timezone immediately updates calendar walls.
+      // 메타데이터를 수정하면 멤버, 초대 및 실시간 일정도 새로 고친다. 변경된
+      // 시간대가 캘린더 경계를 즉시 갱신하도록 보장한다.
       await loadGroups();
       return updated;
     } catch (error) {
@@ -3211,8 +3179,8 @@ class PlannerController extends ChangeNotifier {
     }
   }
 
-  /// Leaves the selected group as the authenticated member. The repository
-  /// rejects owners; ownership transfer is intentionally a separate action.
+  /// 인증된 멤버로서 선택 그룹에서 나간다. 저장소는 소유자의 나가기를 거부하며,
+  /// 소유권 이전은 의도적으로 별도 작업으로 둔다.
   Future<void> leaveGroup() async {
     final current = user;
     final group = selectedGroup;
@@ -3247,18 +3215,16 @@ class PlannerController extends ChangeNotifier {
           _plannerSessionGeneration != sessionGeneration) {
         return;
       }
-      // Only the session that committed the terminal mutation may purge its
-      // account's native reminders.  If A -> B completed while this RPC was
-      // in flight, B's namespace must not be cancelled; B's own auth fence
-      // performs any required old-account cleanup.
+      // 최종 변경을 커밋한 세션만 해당 계정의 네이티브 알림을 제거할 수 있다. 이 RPC가
+      // 진행 중일 때 A -> B 전환이 완료되었다면 B의 네임스페이스를 취소해서는 안 된다.
+      // 필요한 기존 계정 정리는 B 자체의 인증 차단선이 수행한다.
       _runNotificationSideEffect(
         (notifications) => notifications.cancelForGroup(groupId),
       );
-      // Invalidate synchronously before any reload/cancellation await. A
-      // failing network reload must not resurrect the left group.  This is
-      // intentionally performed even when another selection/auth operation
-      // made the original leave callback stale; the terminal mutation still
-      // has to remove its group row from the visible list.
+      // 다시 불러오기/취소를 기다리기 전에 동기적으로 무효화한다. 네트워크 재조회에
+      // 실패해도 나간 그룹이 되살아나면 안 된다. 다른 선택/인증 작업 때문에 원래
+      // 나가기 콜백이 오래된 경우에도 의도적으로 수행한다. 최종 변경은 표시 목록에서
+      // 해당 그룹 행을 계속 제거해야 한다.
       final clear = _invalidateGroupScopedData(removeGroupId: groupId);
       await clear;
       if (!_disposed && user?.id == userId && selectedGroup == null) {
@@ -3285,8 +3251,8 @@ class PlannerController extends ChangeNotifier {
 
   Future<void> leaveSelectedGroup() => leaveGroup();
 
-  /// Transfers ownership to an active member and reloads all group-scoped
-  /// data so member roles and invite visibility are immediately consistent.
+  /// 활성 멤버에게 소유권을 이전하고 그룹 범위 데이터를 모두 다시 불러와 멤버 역할과
+  /// 초대 표시 여부를 즉시 일관되게 만든다.
   Future<PlannerGroup> transferGroupOwnership({
     required String newOwnerId,
     int? expectedVersion,
@@ -3370,9 +3336,8 @@ class PlannerController extends ChangeNotifier {
     expectedVersion: expectedVersion,
   );
 
-  /// Archives the selected group. The operation is terminal on the
-  /// repository; local subscriptions and caches are cleared before the group
-  /// list is refreshed.
+  /// 선택 그룹을 보관한다. 이 작업은 저장소에서 최종 상태이며, 그룹 목록을 새로
+  /// 고치기 전에 로컬 구독과 캐시를 지운다.
   Future<void> archiveGroup({int? expectedVersion}) async {
     final current = user;
     final group = selectedGroup;
@@ -3415,15 +3380,14 @@ class PlannerController extends ChangeNotifier {
       if (archivedVersion <= version) {
         throw const ScheduleConflictException('그룹 보관 버전을 확인할 수 없습니다.');
       }
-      // Match leaveGroup's session fence: an old account's terminal RPC may
-      // still settle after A -> B, but it must never purge B's native set.
+      // leaveGroup의 세션 차단선과 맞춘다. A -> B 전환 후에도 이전 계정의 최종 RPC가
+      // 완료될 수 있지만 B의 네이티브 집합을 제거해서는 안 된다.
       _runNotificationSideEffect(
         (notifications) => notifications.cancelForGroup(groupId),
       );
-      // Remove the archived group before awaiting stream cancellation or a
-      // network reload. This terminal invalidation survives reload failures
-      // and is applied even if a concurrent group switch made this callback
-      // stale.
+      // 스트림 취소나 네트워크 재조회를 기다리기 전에 보관된 그룹을 제거한다. 이 최종
+      // 무효화는 재조회 실패 후에도 유지되며, 동시 그룹 전환으로 이 콜백이 오래되어도
+      // 적용된다.
       final clear = _invalidateGroupScopedData(removeGroupId: groupId);
       await clear;
       if (!_disposed && user?.id == userId && selectedGroup == null) {
@@ -3482,10 +3446,9 @@ class PlannerController extends ChangeNotifier {
     if (!_isCurrentPlannerContext(revision, userId: userId, groupId: groupId)) {
       return;
     }
-    // Keep a generation marker around the conflict-owned refresh. The
-    // refresh itself advances planner revision/tokens, but it must not make a
-    // later operation look stale to this continuation. Any external/newer
-    // operation advances the marker and wins the error state.
+    // 충돌이 소유한 새로 고침에 세대 표시를 유지한다. 새로 고침 자체가 플래너
+    // 리비전/토큰을 높이지만 이 후속 작업에서 이후 작업이 오래된 것처럼 보이게 하면
+    // 안 된다. 모든 외부/새 작업은 표시 값을 높이고 오류 상태의 우선권을 갖는다.
     final reloadGeneration = _operationGeneration;
     await loadGroups(preserveOperationGeneration: true);
     if (_disposed ||
@@ -3525,9 +3488,9 @@ class PlannerController extends ChangeNotifier {
       )) {
         return;
       }
-      // Joining is the only explicit path that can make a previously left
-      // group visible again.  Do this only after the operation/context guard
-      // so a stale join completion cannot resurrect another session's data.
+      // 참여는 이전에 나간 그룹을 다시 표시할 수 있는 유일한 명시적 경로다. 오래된
+      // 참여 완료가 다른 세션의 데이터를 되살리지 못하도록 작업/컨텍스트 가드 뒤에서만
+      // 수행한다.
       _terminalGroupTombstones.remove(group.id);
       if (!groups.any((candidate) => candidate.id == group.id)) {
         groups = <PlannerGroup>[...groups, group];
@@ -3596,8 +3559,8 @@ class PlannerController extends ChangeNotifier {
             plannerRevision: revision,
           );
       if (!isCurrent) {
-        // Do not return a plaintext token to a caller whose auth/group
-        // context changed while the create RPC was pending.
+        // 생성 RPC가 대기 중일 때 인증/그룹 컨텍스트가 바뀐 호출자에게 평문 토큰을
+        // 반환하지 않는다.
         throw const InviteOperationStaleException();
       }
       _upsertInvite(invite);
@@ -3629,9 +3592,9 @@ class PlannerController extends ChangeNotifier {
             members.any((member) => member.id == current.id && member.isOwner));
   }
 
-  /// Event body writes/deletes remain creator-only.  Group owners receive a
-  /// separate participant-list capability and must not gain body edit rights
-  /// merely because they can administer the group.
+  /// 일정 본문 쓰기/삭제는 계속 작성자만 할 수 있다. 그룹 소유자에게는 별도의 참여자
+  /// 목록 기능을 제공하며, 그룹을 관리할 수 있다는 이유만으로 본문 수정 권한이
+  /// 생겨서는 안 된다.
   bool canEditEventParticipants(PlannerEvent event) {
     final current = user;
     final group = selectedGroup;
@@ -3648,11 +3611,10 @@ class PlannerController extends ChangeNotifier {
     return event.ownerId == current.id || isGroupOwner;
   }
 
-  /// Loads a detail-route event that may fall outside the current bounded
-  /// calendar page. The result is deliberately kept out of [events] so it
-  /// cannot disturb page cursors or the selected-range projection; the editor
-  /// owns the returned detail snapshot. A late response after sign-out,
-  /// identity change, or group switch is discarded rather than exposed.
+  /// 현재 제한된 캘린더 페이지 밖에 있을 수 있는 상세 경로 일정을 불러온다. 페이지
+  /// 커서나 선택 범위 프로젝션에 영향을 주지 않도록 결과를 의도적으로 [events]에
+  /// 넣지 않으며, 반환된 상세 스냅샷은 편집기가 소유한다. 로그아웃, 신원 변경 또는
+  /// 그룹 전환 후 늦게 도착한 응답은 노출하지 않고 버린다.
   Future<PlannerEvent?> loadEventById(
     String eventId, {
     String occurrenceKey = 'single',
@@ -3671,8 +3633,8 @@ class PlannerController extends ChangeNotifier {
           (event) =>
               event.id == eventId &&
               event.occurrenceKey == occurrenceKey &&
-              // A recurring base is never a detail occurrence, even if a
-              // legacy stream accidentally exposes it with key `single`.
+              // 이전 스트림이 실수로 `single` 키를 붙여 노출하더라도 반복 기준 일정은
+              // 상세 발생 항목이 아니다.
               (occurrenceKey != 'single' || event.recurrenceRule == null) &&
               !event.isDeleted,
         )
@@ -3709,12 +3671,11 @@ class PlannerController extends ChangeNotifier {
       }
       return event;
     }
-    // The default detail key is also used by legacy deep links. A recurring
-    // anchor must resolve through the materialized occurrence capability (the
-    // remote point RPC aliases `single` to ordinal zero); falling back to the
-    // legacy parent-row read would expose a non-editable series base and could
-    // let an editor mutate the wrong identity. Legacy test doubles that do not
-    // opt into the capability retain the EventById path below.
+    // 기본 상세 키는 이전 딥 링크에서도 사용된다. 반복 기준점은 구체화된 발생 항목
+    // 기능을 통해 해석해야 한다. 원격 단건 RPC는 `single`을 순번 0의 별칭으로
+    // 처리한다. 이전 상위 행 읽기로 대체하면 수정할 수 없는 시리즈 기준을 노출하고
+    // 편집기가 잘못된 식별자를 변경할 수 있다. 이 기능을 사용하지 않는 이전 테스트
+    // 대역은 아래 EventById 경로를 유지한다.
     if (supportsEventOccurrenceByKey) {
       final occurrenceCapability = repository as EventOccurrenceReadCapability;
       final revision = _plannerRevision;
@@ -4033,19 +3994,17 @@ class PlannerController extends ChangeNotifier {
     final participantId = showAllMembers ? null : selectedMemberId;
     final nextKey = _rangeIdentity(range, participantId);
     if (selectedEventRange == range && _rangeKey == nextKey) {
-      // Month and agenda cells can change the selected day while keeping the
-      // same fetched range. Preserve the current snapshot instead of
-      // blanking and reloading an identical page; callers can use the public
-      // refresh method when an explicit revalidation is needed.
+      // 월간 및 일정 목록 셀은 가져온 범위를 유지하면서 선택한 날짜를 바꿀 수 있다.
+      // 같은 페이지를 비운 뒤 다시 불러오지 말고 현재 스냅샷을 유지한다. 명시적
+      // 재검증이 필요하면 호출자가 공개 새로 고침 메서드를 사용할 수 있다.
       notifyListeners();
       return;
     }
     _rangeInvalidationTimer?.cancel();
     _rangeInvalidationTimer = null;
     _rangeGeneration++;
-    // A new range supersedes any in-flight first-page/load-more request. Old
-    // futures retain their captured generation and therefore cannot clear or
-    // overwrite the flags owned by this new request.
+    // 새 범위는 진행 중인 첫 페이지/추가 조회 요청을 모두 대체한다. 이전 Future는
+    // 캡처한 세대를 유지하므로 이 새 요청이 소유한 플래그를 지우거나 덮어쓸 수 없다.
     _releaseQueuedRangeRefreshWaiters();
     _rangeRefreshInFlight = false;
     _rangeRefreshOwnerGeneration = null;
@@ -4141,7 +4100,7 @@ class PlannerController extends ChangeNotifier {
   }
 
   void setSelectedDay(DateTime day) {
-    selectedDay = dateOnly(day);
+    selectedDay = CalendarDateBounds.clamp(day);
     if (selectedGroup != null && _usesBoundedEventRangeReads) {
       _beginSelectedRange(fetch: true);
       return;
@@ -4170,10 +4129,9 @@ class PlannerController extends ChangeNotifier {
 
   Future<void> refreshSelectedEventRange({bool force = true}) async {
     if (!_usesBoundedEventRangeReads) {
-      // Older adapters do not expose bounded pages, but the home screen's
-      // RefreshIndicator still has to refresh their selected-group stream.
-      // Route through the established groups/selectGroup lifecycle so the
-      // legacy watcher is cancelled and restarted with the same auth guards.
+      // 이전 어댑터는 제한된 페이지를 노출하지 않지만 홈 화면의 RefreshIndicator는
+      // 해당 선택 그룹 스트림을 계속 새로 고쳐야 한다. 확립된 groups/selectGroup
+      // 수명 주기를 거쳐 이전 감시자를 취소하고 같은 인증 가드로 다시 시작한다.
       final current = user;
       final group = selectedGroup;
       if (current == null || group == null) return;
@@ -4281,11 +4239,10 @@ class PlannerController extends ChangeNotifier {
       )) {
         rangeError = _friendlyError(error);
         isOffline = true;
-        // A successful authorization denial is authoritative: retaining a
-        // prior group-scoped snapshot would expose private rows after the
-        // membership/group became unavailable.  Transport/parse failures are
-        // different and intentionally preserve the last-good snapshot during
-        // a forced revalidation.
+        // 성공적으로 확인된 권한 거부는 서버 기준 결과다. 멤버십/그룹을 사용할 수
+        // 없어진 뒤 이전 그룹 범위 스냅샷을 유지하면 비공개 행이 노출된다. 전송/파싱
+        // 실패는 이와 다르므로 강제 재검증 중에도 의도적으로 마지막 정상 스냅샷을
+        // 유지한다.
         if (!preserveCurrentEvents || _isAuthoritativeRangeDenial(error)) {
           events = const <PlannerEvent>[];
           _rangeCursor = null;
@@ -4396,10 +4353,9 @@ class PlannerController extends ChangeNotifier {
         participantId: participantId,
         limit: 100,
       );
-      // A parent invalidation can insert an event that is also present in a
-      // page already in flight.  Identical immutable payloads are safe
-      // idempotent duplicates; a same-id payload with any changed field is a
-      // conflicting response and must fail closed.
+      // 상위 무효화는 이미 가져오는 중인 페이지에도 있는 일정을 삽입할 수 있다.
+      // 동일한 불변 페이로드는 안전한 멱등 중복이다. 같은 ID의 페이로드에서 필드가
+      // 하나라도 바뀌었다면 충돌 응답이므로 안전하게 차단해야 한다.
       for (final event in page.events) {
         final previous = events
             .where((item) => item.identityKey == event.identityKey)
@@ -4459,20 +4415,19 @@ class PlannerController extends ChangeNotifier {
     }
   }
 
-  /// Whether a search projection is currently owned by the selected group.
-  /// The query may be empty when the caller intentionally searches by period
-  /// and/or member filters alone.
+  /// 현재 선택 그룹이 검색 프로젝션을 소유하는지 나타낸다. 호출자가 기간 및/또는
+  /// 멤버 필터만으로 의도적으로 검색할 때는 검색어가 비어 있을 수 있다.
   bool get hasActiveSearch => _searchActive;
 
-  /// Updates the query and schedules a debounced search.  Invalid non-empty
-  /// terms are rejected locally and never reach a repository/RPC.
+  /// 검색어를 갱신하고 디바운스된 검색을 예약한다. 잘못된 비어 있지 않은 검색어는
+  /// 로컬에서 거부하며 저장소/RPC에 전달하지 않는다.
   void setSearchQuery(String query) {
     unawaited(searchEvents(query: query));
   }
 
-  /// Updates the optional period/creator/participant filters and schedules a
-  /// debounced search.  `clear*` flags make clearing one nullable filter
-  /// explicit while retaining convenient partial updates for UI callers.
+  /// 선택적 기간/작성자/참여자 필터를 갱신하고 디바운스된 검색을 예약한다. `clear*`
+  /// 플래그는 널 허용 필터 하나를 지우는 동작을 명시하면서 UI 호출자에게 편리한
+  /// 부분 갱신을 유지한다.
   void setSearchFilters({
     EventRange? range,
     String? creatorId,
@@ -4491,10 +4446,9 @@ class PlannerController extends ChangeNotifier {
     unawaited(searchEvents());
   }
 
-  /// Applies any supplied search inputs and either starts immediately or
-  /// waits for the configured debounce interval.  The returned future settles
-  /// when an immediate request completes; debounced calls return after the
-  /// request has been scheduled so text-field updates remain non-blocking.
+  /// 제공된 검색 입력을 적용하고 즉시 시작하거나 설정된 디바운스 간격만큼 기다린다.
+  /// 반환된 Future는 즉시 요청이 완료되면 끝난다. 디바운스된 호출은 요청을 예약한
+  /// 뒤 반환하여 텍스트 필드 갱신을 비차단 상태로 유지한다.
   Future<void> searchEvents({
     String? query,
     EventRange? range,
@@ -4515,9 +4469,9 @@ class PlannerController extends ChangeNotifier {
       }
     } catch (error) {
       _resetSearchState(clearQuery: false);
-      // Keep the draft/query and validation message visible to the field, but
-      // mark the projection inactive so realtime invalidation cannot retry an
-      // invalid term outside this validation boundary.
+      // 초안/검색어와 검증 메시지는 필드에 계속 표시하되 프로젝션을 비활성으로
+      // 표시하여 실시간 무효화가 이 검증 경계 밖에서 잘못된 검색어를 다시 시도하지
+      // 못하게 한다.
       _searchActive = false;
       searchError = _friendlyError(error);
       notifyListeners();
@@ -4534,8 +4488,8 @@ class PlannerController extends ChangeNotifier {
     );
   }
 
-  /// Forces revalidation of the current search without mutating the selected
-  /// calendar range or its pagination state.
+  /// 선택한 캘린더 범위나 페이지 구분 상태를 바꾸지 않고 현재 검색을 강제로
+  /// 재검증한다.
   Future<void> refreshSearch({bool force = true}) async {
     if (!_searchActive) return;
     if (!force && searchResults.isNotEmpty) return;
@@ -4550,9 +4504,9 @@ class PlannerController extends ChangeNotifier {
     );
   }
 
-  /// Cancels pending debounce/in-flight ownership and clears all private
-  /// search state.  Futures cannot be forcibly aborted, but their captured
-  /// generation makes every late success/error a no-op.
+  /// 대기 중인 디바운스/진행 중 소유권을 취소하고 모든 비공개 검색 상태를 지운다.
+  /// Future를 강제로 중단할 수는 없지만 캡처된 세대 덕분에 늦은 성공/오류는 모두
+  /// 무동작이 된다.
   void cancelSearch() {
     _resetSearchState();
     notifyListeners();
@@ -4732,10 +4686,10 @@ class PlannerController extends ChangeNotifier {
     notifyListeners();
     if (range == null || user == null || selectedGroup == null) return;
     if (_repository is! EventSearchCapability) {
-      // Keep unsupported adapters from exposing an apparently active search
-      // projection/retry action that can never issue a request.  The draft
-      // inputs remain available for a future repository swap, but this
-      // controller instance is inactive until explicitly re-entered.
+      // 지원하지 않는 어댑터가 요청을 보낼 수 없으면서 활성처럼 보이는 검색
+      // 프로젝션/재시도 동작을 노출하지 못하게 한다. 향후 저장소 교체를 위해 초안
+      // 입력은 유지하지만, 명시적으로 다시 진입할 때까지 이 컨트롤러 인스턴스는
+      // 비활성 상태다.
       _searchActive = false;
       searchError = const ScheduleCapabilityException(
         '검색을 지원하지 않는 저장소입니다.',
@@ -4862,10 +4816,9 @@ class PlannerController extends ChangeNotifier {
           searchCursor = null;
           hasMoreSearchResults = false;
         } else {
-          // A forced refresh temporarily clears continuation state while the
-          // first page is in flight.  Preserve the prior page's keyset on a
-          // transient/validation conflict so the user can still load more
-          // last-good results after retrying the refresh.
+          // 강제 새로 고침은 첫 페이지를 가져오는 동안 연속 상태를 일시적으로 지운다.
+          // 일시적 오류/검증 충돌 시 이전 페이지의 키셋을 유지하여 사용자가 새로 고침을
+          // 다시 시도한 뒤에도 마지막 정상 결과를 추가로 불러올 수 있게 한다.
           searchCursor = previousSearchCursor;
           hasMoreSearchResults = previousHasMoreSearchResults;
         }
@@ -5034,9 +4987,9 @@ class PlannerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Membership refreshes can remove the currently selected member even when
-  /// another client performed the deactivation. Clear the stale filter so a
-  /// deactivated identity cannot leave the calendar in a misleading state.
+  /// 다른 클라이언트가 비활성화했더라도 멤버십 새로 고침이 현재 선택 멤버를 제거할
+  /// 수 있다. 오래된 필터를 지워 비활성 신원 때문에 캘린더가 오해를 부르는 상태로
+  /// 남지 않게 한다.
   void _setMembersSnapshot(Iterable<PlannerMember> incoming) {
     members = List<PlannerMember>.unmodifiable(incoming);
     final selected = selectedMemberId;
@@ -5145,12 +5098,10 @@ class PlannerController extends ChangeNotifier {
           }
           return EventSaveSnapshot(normalizedCreated);
         }
-        // A capable adapter promises atomic event+participant creation.  A
-        // legacy adapter may still create the default creator-only event only
-        // when the draft genuinely omitted its participant field.  An
-        // explicit empty list is a real unassigned assignment and cannot be
-        // silently converted to the creator by an adapter without the
-        // capability.
+        // 기능을 지원하는 어댑터는 일정과 참여자를 원자적으로 생성한다고 보장한다.
+        // 이전 어댑터는 초안에서 참여자 필드를 실제로 생략했을 때만 작성자 전용 기본
+        // 일정을 만들 수 있다. 명시적인 빈 목록은 실제 미할당 값이므로 해당 기능이
+        // 없는 어댑터가 조용히 작성자로 바꿀 수 없다.
         if (normalizedDraft.hasExplicitMemberIds &&
             _repository is! EventMemberAssignmentCapability) {
           throw const ScheduleCapabilityException('일정 멤버 지정을 지원하지 않는 저장소입니다.');
@@ -5176,11 +5127,10 @@ class PlannerController extends ChangeNotifier {
           requestedMemberIds: normalizedDraft.hasExplicitMemberIds
               ? requestedMemberIds
               : <String>[userId],
-          // Only pre-capability adapters may need the historical client
-          // default when their response omitted the creator assignment.
-          // A capable adapter promises the exact persisted member set, so
-          // an omitted creator in its response is malformed rather than a
-          // value the controller may fabricate locally.
+          // 기능 추가 전 어댑터가 응답에서 작성자 할당을 생략했을 때만 기존 클라이언트
+          // 기본값이 필요할 수 있다. 기능을 지원하는 어댑터는 저장된 멤버 집합을
+          // 정확히 반환한다고 보장하므로 응답에서 작성자가 빠졌다면 컨트롤러가
+          // 로컬에서 만들어도 되는 값이 아니라 잘못된 응답이다.
           allowLegacyCreatorDefault: !_requiresExactEventMutationResults,
         );
         _upsertEvent(normalizedCreated);
@@ -5191,10 +5141,9 @@ class PlannerController extends ChangeNotifier {
         if (existing.groupId != groupId || existing.isDeleted) {
           throw const ScheduleConflictException('일정을 찾을 수 없습니다.');
         }
-        // Participant-only writes use the assignment capability, not the
-        // author-only recurrence/body RPC. A group owner may administer the
-        // participant set of another member's series while retaining the
-        // existing body-edit authorization boundary.
+        // 참여자 전용 쓰기는 작성자 전용 반복/본문 RPC가 아니라 할당 기능을 사용한다.
+        // 그룹 소유자는 기존 본문 수정 권한 경계를 유지하면서 다른 멤버 시리즈의
+        // 참여자 집합을 관리할 수 있다.
         final existingRequestedMemberIds = normalizedDraft.hasExplicitMemberIds
             ? requestedMemberIds
             : canonicalEventMemberIds(existing.memberIds);
@@ -5295,9 +5244,9 @@ class PlannerController extends ChangeNotifier {
             expectedVersion: existing.version + 1,
             requestedMemberIds: existingRequestedMemberIds,
           );
-          // Assignment RPCs return the logical series anchor. Refresh the
-          // bounded projection for recurring rows so an occurrence does not
-          // acquire a synthetic `single` duplicate in controller state.
+          // 할당 RPC는 논리적 시리즈 기준점을 반환한다. 반복 행의 제한된 프로젝션을
+          // 새로 고쳐 발생 항목이 컨트롤러 상태에서 인위적인 `single` 중복을 얻지
+          // 않게 한다.
           if (_usesBoundedEventRangeReads &&
               (existing.recurrenceRule != null ||
                   existing.occurrenceKey != 'single')) {
@@ -5357,8 +5306,8 @@ class PlannerController extends ChangeNotifier {
                       : 0)) {
             throw const ScheduleConflictException('일정 변경 응답을 확인할 수 없습니다.');
           }
-          // Scope RPCs return a committed receipt rather than a projection.
-          // Refetch authoritatively; never fan out a stale occurrence locally.
+          // 범위 RPC는 프로젝션 대신 커밋된 결과 확인을 반환한다. 서버 기준으로 다시
+          // 조회하며 오래된 발생 항목을 로컬에서 여러 항목으로 확산하지 않는다.
           if (receipt.changed) {
             notificationMutationCommitted = true;
             await refreshSelectedEventRange(force: true);
@@ -5720,11 +5669,11 @@ class PlannerController extends ChangeNotifier {
     events = List<PlannerEvent>.unmodifiable(next);
   }
 
-  /// Merge an invite returned by a mutation with an in-flight lifecycle
-  /// metadata refresh. Both responses can contain the same row id; replacing
-  /// by id keeps the visible projection canonical instead of prepending a
-  /// duplicate when the mutation Future settles last. The creation RPC is the
-  /// one-shot plaintext boundary; cached/listed rows must never retain it.
+  /// 변경 작업이 반환한 초대를 진행 중인 수명 주기 메타데이터 새로 고침과 병합한다.
+  /// 두 응답에 같은 행 ID가 있을 수 있다. ID로 교체하면 변경 Future가 마지막에
+  /// 완료되어도 중복을 앞에 추가하지 않고 표시 프로젝션을 정규 상태로 유지한다.
+  /// 생성 RPC는 일회성 평문 경계이며 캐시되거나 목록에 표시된 행은 이를 보관해서는
+  /// 안 된다.
   void _upsertInvite(InviteCode incoming) {
     final sanitized = _inviteWithoutToken(incoming);
     final index = invites.indexWhere((invite) => invite.id == sanitized.id);
@@ -5870,14 +5819,19 @@ class PlannerController extends ChangeNotifier {
             scale > AppearancePreferences.maxTextScale) {
           throw const FormatException('화면 설정을 확인해 주세요.');
         }
-        if (!darkModeWasChanged) darkMode = loaded.darkMode;
-        if (!textScaleWasChanged) textScale = scale;
+        if (!darkModeWasChanged) {
+          darkMode = loaded.darkMode;
+        }
+        if (!textScaleWasChanged) {
+          textScale = scale;
+        }
       }
       _appearancePreferencesHydrated = true;
       appearancePreferencesError = null;
       notifyListeners();
-      // Merge changes made while the initial read was pending and persist one
-      // authoritative snapshot instead of briefly overwriting untouched data.
+      // hydration 중 변경은 기본값 snapshot으로 미리 쓰지 않고, 읽은 값과 병합된
+      // 현재 상태 하나만 영구화한다. 앱 종료나 후속 쓰기 실패 사이에도 손대지 않은
+      // 필드가 잠시 기본값으로 덮이지 않는다.
       if (_appearancePreferencesWritePending) {
         _appearancePreferencesWritePending = false;
         _persistAppearancePreferences();
@@ -5905,8 +5859,8 @@ class PlannerController extends ChangeNotifier {
     final write = _appearancePreferencesWriteQueue.then(
       (_) => _appearancePreferencesStore.save(snapshot),
     );
-    // Consume a failed write so later slider changes still reach storage.
-    // Only the latest UI revision is allowed to update the visible status.
+    // 실패한 쓰기도 대기열에서 소비해 뒤따르는 슬라이더 변경이 저장소에 도달하게
+    // 한다. 최신 UI 리비전의 결과만 상태 문구를 갱신한다.
     _appearancePreferencesWriteQueue = write.then<void>(
       (_) {
         if (_disposed || revision != _appearancePreferencesRevision) return;
@@ -5927,7 +5881,9 @@ class PlannerController extends ChangeNotifier {
     _appearancePreferencesRevision += 1;
     _darkModeChangedDuringHydration = true;
     darkMode = value;
-    if (_appearancePreferencesHydrated) appearancePreferencesError = null;
+    if (_appearancePreferencesHydrated) {
+      appearancePreferencesError = null;
+    }
     notifyListeners();
     _persistAppearancePreferences();
   }
@@ -5942,7 +5898,9 @@ class PlannerController extends ChangeNotifier {
           AppearancePreferences.maxTextScale,
         )
         .toDouble();
-    if (_appearancePreferencesHydrated) appearancePreferencesError = null;
+    if (_appearancePreferencesHydrated) {
+      appearancePreferencesError = null;
+    }
     notifyListeners();
     _persistAppearancePreferences();
   }
@@ -5999,9 +5957,9 @@ class PlannerController extends ChangeNotifier {
     return '잠시 후 다시 시도해 주세요.';
   }
 
-  /// Identifies an authoritative access loss without guessing from localized
-  /// error text.  PostgREST's `42501` is the SQL insufficient-privilege code;
-  /// the explicit HTTP/auth statuses cover session revocation responses.
+  /// 현지화된 오류 문구를 추측하지 않고 서버에서 확인된 접근 권한 상실을 식별한다.
+  /// PostgREST의 `42501`은 SQL 권한 부족 코드이며, 명시적 HTTP/인증 상태는 세션
+  /// 폐기 응답을 포함한다.
   bool _isAuthoritativeRangeDenial(Object error) {
     if (error is ScheduleAuthorizationException) return true;
     if (error is PostgrestException) {
@@ -6018,9 +5976,9 @@ class PlannerController extends ChangeNotifier {
     return false;
   }
 
-  /// Exposes the structural lifecycle/authorization classification to detail
-  /// routes. Localized error strings are intentionally not inspected by the
-  /// editor when deciding whether a missing event is terminal or retryable.
+  /// 상세 경로에 구조화된 수명 주기/권한 분류를 노출한다. 편집기는 없는 일정이 최종
+  /// 상태인지 다시 시도할 수 있는지 결정할 때 현지화된 오류 문자열을 의도적으로
+  /// 검사하지 않는다.
   bool isAuthoritativeAccessDenial(Object error) =>
       _isAuthoritativeRangeDenial(error);
 

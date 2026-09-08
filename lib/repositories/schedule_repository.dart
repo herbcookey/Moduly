@@ -15,19 +15,18 @@ abstract class ScheduleRepository {
   Future<List<PlannerMember>> membersForGroup(String groupId);
   Stream<List<PlannerEvent>> watchEvents(String groupId);
 
-  /// Legacy three-positional creation contract. Implementations that support
-  /// caller-selected timezones additionally implement
-  /// [TimezoneGroupCreationCapability] below. Keeping this signature narrow
-  /// means existing test/fake repositories continue to compile unchanged.
+  /// 위치 인수 세 개를 사용하는 기존 생성 계약이다. 호출자가 선택한 시간대를
+  /// 지원하는 구현은 아래 [TimezoneGroupCreationCapability]도 구현한다. 이 시그니처를
+  /// 좁게 유지하면 기존 테스트/가짜 저장소를 변경하지 않고 계속 컴파일할 수 있다.
   Future<PlannerGroup> createGroup(
     String ownerId,
     String name,
     String description,
   );
 
-  /// Updates the selected group under an optimistic-lock version check. The
-  /// actor is a local authorization hint for the preview adapter; the
-  /// Supabase adapter derives identity from auth.uid and never serializes it.
+  /// 낙관적 잠금 버전 검사 아래에서 선택된 그룹을 갱신한다. 행위자는 미리보기
+  /// 어댑터용 로컬 권한 참고 정보다. Supabase 어댑터는 auth.uid에서 신원을 유도하며
+  /// 이를 직렬화하지 않는다.
   Future<PlannerGroup> updateGroupIfVersion({
     required String actorId,
     required String groupId,
@@ -39,9 +38,8 @@ abstract class ScheduleRepository {
     const ScheduleCapabilityException('그룹 편집을 지원하지 않는 저장소입니다.'),
   );
 
-  /// Removes the calling user's active membership. Owners must transfer
-  /// ownership before leaving. Implementations derive actor identity from the
-  /// local argument or auth.uid as appropriate.
+  /// 호출 사용자의 활성 멤버십을 제거한다. 소유자는 나가기 전에 소유권을 이전해야 한다.
+  /// 구현은 상황에 맞게 로컬 인수 또는 auth.uid에서 행위자 신원을 유도한다.
   Future<void> leaveGroup({
     required String actorId,
     required String groupId,
@@ -58,8 +56,8 @@ abstract class ScheduleRepository {
     const ScheduleCapabilityException('그룹 소유권 이전을 지원하지 않는 저장소입니다.'),
   );
 
-  /// Archives the group and returns the new terminal version. Archived groups
-  /// are omitted from membership/group reads and cannot be restored.
+  /// 그룹을 보관하고 새 최종 버전을 반환한다. 보관된 그룹은 멤버십/그룹 읽기에서
+  /// 제외되며 복원할 수 없다.
   Future<int> archiveGroupIfVersion({
     required String actorId,
     required String groupId,
@@ -124,9 +122,8 @@ abstract class ScheduleRepository {
   });
 }
 
-/// Optional capability for repositories that can persist an exact caller
-/// selected IANA timezone while retaining the legacy [ScheduleRepository]
-/// creation method for external implementations.
+/// 외부 구현을 위한 레거시 [ScheduleRepository] 생성 메서드를 유지하면서 호출자가
+/// 선택한 정확한 IANA 시간대를 저장할 수 있는 저장소용 선택 기능이다.
 abstract interface class TimezoneGroupCreationCapability {
   Future<PlannerGroup> createGroupWithTimezone(
     String ownerId,
@@ -136,28 +133,26 @@ abstract interface class TimezoneGroupCreationCapability {
   });
 }
 
-/// Optional capability used by the controller for reads that must be scoped
-/// to the requester's active membership. The legacy [watchEvents] method is
-/// retained for old test doubles only; production adapters implement this
-/// interface and are always selected by [PlannerController].
+/// 요청자의 활성 멤버십 범위로 제한해야 하는 읽기에 컨트롤러가 사용하는 선택 기능이다.
+/// 레거시 [watchEvents] 메서드는 이전 테스트 대역만을 위해 유지한다. 프로덕션 어댑터는
+/// 이 인터페이스를 구현하며 [PlannerController]가 항상 이를 선택한다.
 abstract interface class UserScopedEventReadCapability {
   Stream<List<PlannerEvent>> watchEventsForUser(String userId, String groupId);
 }
 
-/// Optional lifecycle stream for remote membership/group invalidation. A null
-/// or archived value means the selected group is no longer usable.
+/// 원격 멤버십/그룹 무효화를 위한 선택적 수명 주기 스트림이다. `null` 또는 보관된
+/// 값은 선택한 그룹을 더는 사용할 수 없다는 뜻이다.
 abstract interface class GroupLifecycleCapability {
   Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId);
 }
 
-/// Optional capability for bounded calendar reads.  Keeping this additive to
-/// [ScheduleRepository] preserves compatibility with older test doubles and
-/// adapters while allowing production controllers to fail closed instead of
-/// downloading every event in a group.
+/// 제한된 달력 읽기를 위한 선택 기능이다. [ScheduleRepository]에 추가하는 방식으로
+/// 유지하면 이전 테스트 대역 및 어댑터와의 호환성을 지키면서, 프로덕션 컨트롤러가
+/// 그룹의 모든 일정을 내려받는 대신 실패 시 차단할 수 있다.
 abstract interface class BoundedEventRangeReadCapability {
-  /// Reads one keyset page for an authenticated group member.  [userId] is a
-  /// local context hint only; remote adapters derive identity from auth.uid
-  /// and must never serialize it as an actor/query parameter.
+  /// 인증된 그룹 멤버를 위해 키셋 페이지 하나를 읽는다. [userId]는 로컬 컨텍스트
+  /// 힌트일 뿐이다. 원격 어댑터는 auth.uid에서 신원을 유도하며 행위자/쿼리
+  /// 매개변수로 절대 직렬화하면 안 된다.
   Future<EventRangePage> eventsForRange({
     required String userId,
     required String groupId,
@@ -167,21 +162,19 @@ abstract interface class BoundedEventRangeReadCapability {
     String? participantId,
   });
 
-  /// Emits a change-only signal for parent `events` rows.  The stream must
-  /// not perform an initial full event read; callers fetch the current range
-  /// through [eventsForRange] and use this stream only for invalidation.
+  /// 상위 `events` 행의 변경 전용 신호를 내보낸다. 스트림은 처음에 전체 일정을
+  /// 읽으면 안 된다. 호출자는 [eventsForRange]로 현재 범위를 가져오고 이 스트림은
+  /// 무효화 용도로만 사용한다.
   Stream<void> watchEventInvalidations(String userId, String groupId);
 }
 
-/// Optional capability for bounded, server-backed event search.  Keeping this
-/// additive to [ScheduleRepository] preserves source compatibility with
-/// legacy adapters and test doubles while allowing production controllers to
-/// fail closed instead of falling back to an unbounded event download.
+/// 제한된 서버 기반 일정 검색을 위한 선택 기능이다. [ScheduleRepository]에 추가하는
+/// 방식으로 유지하면 기존 어댑터 및 테스트 대역과 소스 호환성을 지키면서 프로덕션
+/// 컨트롤러가 제한 없는 일정 다운로드로 대체하지 않고 실패 시 차단할 수 있다.
 abstract interface class EventSearchCapability {
-  /// Reads one keyset page of events visible to an authenticated active group
-  /// member.  [query] is trim-normalized; an empty query is valid for
-  /// period/filter-only searches.  Remote adapters derive actor identity from
-  /// their auth session and must never serialize [userId].
+  /// 인증된 활성 그룹 멤버가 볼 수 있는 일정의 키셋 페이지 하나를 읽는다. [query]는
+  /// 앞뒤 공백을 제거해 정규화하며 빈 검색어는 기간/필터 전용 검색에 유효하다. 원격
+  /// 어댑터는 인증 세션에서 행위자 신원을 유도하며 [userId]를 절대 직렬화하면 안 된다.
   Future<EventRangePage> searchEvents({
     required String userId,
     required String groupId,
@@ -194,9 +187,8 @@ abstract interface class EventSearchCapability {
   });
 }
 
-/// Optional point lookup used by deep links/details routes. It is separate
-/// from bounded pages so an event outside the current calendar range can be
-/// opened without polluting that range's pagination projection.
+/// 딥 링크/상세 경로에서 사용하는 선택적 단건 조회다. 제한된 페이지와 분리하여 현재
+/// 캘린더 범위 밖의 일정을 열어도 해당 범위의 페이지 구분 프로젝션을 오염시키지 않는다.
 abstract interface class EventByIdReadCapability {
   Future<PlannerEvent?> eventById({
     required String userId,
@@ -205,9 +197,8 @@ abstract interface class EventByIdReadCapability {
   });
 }
 
-/// Additive occurrence point lookup.  Keeping this separate means old detail
-/// route test doubles that implement [EventByIdReadCapability] continue to
-/// compile while recurring routes can use the exact occurrence key.
+/// 추가형 발생분 지점 조회다. 이를 분리하면 [EventByIdReadCapability]을 구현하는 이전
+/// 상세 경로 테스트 대역이 계속 컴파일되고 반복 경로는 정확한 발생 키를 사용할 수 있다.
 abstract interface class EventOccurrenceReadCapability {
   Future<PlannerEvent?> eventOccurrenceByKey({
     required String userId,
@@ -217,16 +208,14 @@ abstract interface class EventOccurrenceReadCapability {
   });
 }
 
-/// Optional capability for repositories that can atomically replace the
-/// participant rows belonging to an existing event.  The base repository
-/// deliberately does not require this method so older adapters and tests keep
-/// compiling; callers must fail closed when they need a custom participant
-/// list but the adapter does not implement this capability.
+/// 기존 일정에 속한 참여자 행을 원자적으로 교체할 수 있는 저장소용 선택 기능이다.
+/// 이전 어댑터와 테스트가 계속 컴파일되도록 기본 저장소에서는 의도적으로 이 메서드를
+/// 요구하지 않는다. 사용자 지정 참여자 목록이 필요하지만 어댑터가 이 기능을 구현하지
+/// 않았다면 호출자는 실패 시 차단해야 한다.
 ///
-/// [actorId] is a local authorization hint only.  The Supabase implementation
-/// derives the actor from `auth.uid()` and never sends this value over the
-/// wire.  Implementations also promise that their existing create/update
-/// methods persist memberIds atomically when this capability is present.
+/// [actorId]는 로컬 권한 힌트일 뿐이다. Supabase 구현은 `auth.uid()`에서 행위자를
+/// 유도하며 이 값을 전송하지 않는다. 또한 이 기능이 있으면 구현의 기존 생성/갱신
+/// 메서드가 memberIds를 원자적으로 저장해야 한다.
 abstract interface class EventMemberAssignmentCapability {
   Future<PlannerEvent> replaceEventMembers(
     String eventId, {
@@ -236,14 +225,12 @@ abstract interface class EventMemberAssignmentCapability {
   });
 }
 
-/// Authenticated capability for replacing the participant assignment of a
-/// recurring series.  Recurring assignments are series-wide and must retain
-/// the event creator; the operation therefore uses the recurrence RPC and
-/// returns its committed receipt instead of the legacy event-row payload.
+/// 반복 시리즈의 참여자 배정을 교체하는 인증된 기능이다. 반복 배정은 시리즈 전체에
+/// 적용되며 일정 작성자를 유지해야 한다. 따라서 이 작업은 반복 RPC를 사용하고 기존
+/// 일정 행 페이로드 대신 커밋된 처리 결과를 반환한다.
 ///
-/// Keeping this additive prevents older singleton-only adapters and test
-/// doubles from accidentally taking the recurring path through the legacy
-/// participant RPC.
+/// 추가형으로 유지하면 이전의 단일 일정 전용 어댑터 및 테스트 대역이 기존 참여자
+/// RPC를 통해 실수로 반복 경로를 타지 않는다.
 abstract interface class RecurringEventMemberAssignmentCapability {
   Future<RecurrenceMutationReceipt> replaceRecurringEventMembers({
     required PlannerEvent event,
@@ -253,10 +240,9 @@ abstract interface class RecurringEventMemberAssignmentCapability {
   });
 }
 
-/// Recurring-series capability.  Kept additive to [ScheduleRepository] so
-/// legacy adapters/fakes retain the singleton API.  Scope writes return a
-/// committed receipt; callers must refetch their bounded range rather than
-/// fan out an optimistic occurrence projection.
+/// 반복 시리즈 기능이다. 기존 어댑터/가짜 구현이 단일 일정 API를 유지하도록
+/// [ScheduleRepository]에 추가하는 방식으로 둔다. 범위 쓰기는 커밋된 처리 결과를
+/// 반환한다. 호출자는 낙관적 발생 프로젝션을 펼치는 대신 제한된 범위를 다시 가져와야 한다.
 abstract interface class RecurrenceCapability {
   Future<PlannerEvent> createRecurringEvent(
     String userId,
@@ -282,10 +268,9 @@ abstract interface class RecurrenceCapability {
   });
 }
 
-/// Optional authenticated capability for reading the non-sensitive group
-/// projection behind an invite token.  The token is a local context hint;
-/// Supabase adapters derive the actor from auth.uid() and send only `p_token`
-/// to the RPC.
+/// 초대 토큰 뒤의 민감하지 않은 그룹 프로젝션을 읽기 위한 선택적 인증 기능이다.
+/// 토큰은 로컬 컨텍스트 참고 정보다. Supabase 어댑터는 auth.uid()에서 행위자를 유도하고
+/// RPC에는 `p_token`만 보낸다.
 abstract interface class InvitePreviewCapability {
   Future<InvitePreview> previewInvite({
     required String userId,
@@ -300,16 +285,15 @@ class ScheduleConflictException implements Exception {
   String toString() => message;
 }
 
-/// A structured authorization/lifecycle denial.  State uses this marker to
-/// clear a cached private range after an authoritative access loss, while
-/// preserving last-good rows for unrelated transient transport failures.
+/// 구조화된 권한/수명 주기 거부다. 상태는 이 표시를 사용해 신뢰할 수 있는 접근 권한
+/// 상실 후 캐시된 비공개 범위를 지우고, 관련 없는 일시적 전송 실패에는 마지막으로
+/// 정상인 행을 보존한다.
 class ScheduleAuthorizationException extends ScheduleConflictException {
   const ScheduleAuthorizationException(super.message);
 }
 
-/// Raised when a repository implementation is intentionally unable to expose
-/// a mutating capability. This is distinct from a successful no-op and keeps
-/// fakes/configuration-blocked adapters honest.
+/// 저장소 구현이 변경 기능을 의도적으로 노출할 수 없을 때 발생한다. 성공한 무동작과
+/// 구분되어 가짜 구현/설정 차단 어댑터가 사실에 맞게 동작하도록 한다.
 class ScheduleCapabilityException implements Exception {
   const ScheduleCapabilityException(this.message);
   final String message;
@@ -324,8 +308,8 @@ class ScheduleValidationException implements Exception {
   String toString() => message;
 }
 
-/// All terminal invite states intentionally collapse to one public reason so
-/// callers cannot probe token existence, revocation, usage, or group state.
+/// 호출자가 토큰 존재, 취소, 사용량, 그룹 상태를 탐색하지 못하도록 모든 최종 초대
+/// 상태를 의도적으로 하나의 공개 사유로 합친다.
 enum InviteUnavailableReason { invalidOrExpired }
 
 class InviteUnavailableException implements Exception {
@@ -340,11 +324,10 @@ class InviteUnavailableException implements Exception {
   String toString() => message;
 }
 
-/// The only invite oracle state exposed distinctly is a server-side rate
-/// limit.  [retryAfter] is optional and never includes token material.
-/// Raised when the actor-local invite preview/join budget is exhausted.  The
-/// longer name is the canonical API; the typedef below preserves the original
-/// spelling used by older screens and test doubles.
+/// 별도로 노출하는 유일한 초대 판정 상태는 서버 측 속도 제한이다. [retryAfter]는
+/// 선택 사항이며 토큰 자료를 포함하지 않는다. 행위자 로컬 초대 미리보기/참여 예산을
+/// 소진했을 때 발생한다. 긴 이름이 표준 API이고 아래 typedef는 이전 화면 및 테스트
+/// 대역에서 사용한 원래 표기를 보존한다.
 class InviteRateLimitedException implements Exception {
   const InviteRateLimitedException({this.retryAfter})
     : message = '초대 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.';
@@ -356,23 +339,21 @@ class InviteRateLimitedException implements Exception {
   String toString() => message;
 }
 
-/// Backwards-compatible spelling retained for existing callers.  A typedef
-/// (rather than a subclass) keeps `isA<InviteRateLimitException>()` and
-/// `isA<InviteRateLimitedException>()` equivalent at runtime.
+/// 기존 호출자를 위해 유지한 하위 호환 표기다. 하위 클래스 대신 typedef를 사용해
+/// `isA<InviteRateLimitException>()`과 `isA<InviteRateLimitedException>()`이
+/// 런타임에서 동등하게 유지된다.
 typedef InviteRateLimitException = InviteRateLimitedException;
 
-/// The join RPC has committed membership, but the follow-up group projection
-/// could not be read.  Callers must not retry the bearer token: membership is
-/// already authoritative on the server.  The message is fixed and contains no
-/// transport details or invite material.
+/// 참여 RPC가 멤버십을 커밋했지만 후속 그룹 프로젝션을 읽지 못했다. 멤버십은 이미
+/// 서버에서 확정되었으므로 호출자는 전달자 토큰을 다시 시도하면 안 된다. 메시지는
+/// 고정되어 있으며 전송 세부 정보나 초대 자료가 없다.
 class InviteJoinCommittedException extends ScheduleConflictException {
   const InviteJoinCommittedException()
     : super('그룹 참여는 완료되었지만 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.');
 }
 
-/// A create response arrived after its originating auth/group context was
-/// invalidated.  The raw one-shot token is deliberately discarded instead of
-/// returning it to a stale caller.
+/// 생성 응답이 시작된 인증/그룹 컨텍스트가 무효화된 뒤 도착했다. 오래된 호출자에게
+/// 반환하지 않고 원시 일회용 토큰을 의도적으로 버린다.
 class InviteOperationStaleException extends ScheduleConflictException {
   const InviteOperationStaleException()
     : super('초대 코드 생성 결과가 더 이상 유효하지 않습니다. 다시 시도해 주세요.');
@@ -383,9 +364,8 @@ final RegExp _inviteUuidPattern = RegExp(
   r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
 );
 
-/// Lifecycle state for one Supabase invalidation channel. Capturing this
-/// object in callbacks lets a failed/retired channel be removed without ever
-/// clearing or tearing down a newer channel that has replaced it.
+/// Supabase 무효화 채널 하나의 수명 주기 상태다. 이 객체를 콜백에서 포착하면
+/// 실패했거나 폐기된 채널을 제거할 때 이를 대체한 새 채널을 지우거나 해제하지 않는다.
 class _EventInvalidationChannelState {
   _EventInvalidationChannelState(this.channel);
 
@@ -431,19 +411,16 @@ class LocalScheduleRepository
     _seed(seedMembers);
   }
 
-  /// Subclasses used as legacy test doubles may override a few methods while
-  /// still inheriting this adapter.  Keep their old full-stream controller
-  /// path unless they explicitly opt into bounded reads; the concrete local
-  /// adapter itself remains the production-capable implementation.
+  /// 기존 테스트 대역으로 사용하는 하위 클래스는 이 어댑터를 상속하면서 일부 메서드를
+  /// 재정의할 수 있다. 제한된 읽기를 명시적으로 선택하지 않았다면 이전 전체 스트림
+  /// 컨트롤러 경로를 유지한다. 구체적인 로컬 어댑터 자체는 프로덕션 지원 구현으로 남는다.
   bool get useBoundedEventRangeReads => runtimeType == LocalScheduleRepository;
 
-  /// Whether mutation responses must echo the exact persisted participant set.
-  /// The concrete local adapter and configuration-blocked adapter are strict;
-  /// old Local subclasses used as partial test doubles predate participant
-  /// responses and may opt into the historical creator-default normalization.
-  /// This compatibility bit is only for omitted-member create responses; an
-  /// explicit participant list still requires [EventMemberAssignmentCapability]
-  /// and is never silently accepted by a legacy adapter.
+  /// 변경 응답이 저장된 정확한 참여자 집합을 되돌려 줘야 하는지 나타낸다. 구체적인 로컬
+  /// 어댑터와 설정 차단 어댑터는 엄격하다. 부분 테스트 대역으로 사용하는 이전 로컬
+  /// 하위 클래스는 참여자 응답보다 먼저 만들어져 과거의 작성자 기본 정규화를 선택할 수 있다.
+  /// 이 호환 비트는 멤버가 생략된 생성 응답에만 적용한다. 명시적인 참여자 목록에는 여전히
+  /// [EventMemberAssignmentCapability]이 필요하며 레거시 어댑터가 조용히 허용하지 않는다.
   bool get requireExactEventMutationResults =>
       runtimeType == LocalScheduleRepository;
 
@@ -479,11 +456,10 @@ class LocalScheduleRepository
   static String _seriesSegmentsKey(String groupId, String eventId) =>
       '$groupId|$eventId';
 
-  /// Records one real invite attempt in an actor-scoped sliding-hour ledger.
-  /// The ledgers intentionally contain timestamps only: bearer tokens never
-  /// become part of rate-limit state.  At the limit, the request is rejected
-  /// without adding a timestamp, matching the database RPC's lockout
-  /// semantics.
+  /// 행위자 범위 시간 단위 슬라이딩 원장에 실제 초대 시도 하나를 기록한다. 원장에는
+  /// 의도적으로 타임스탬프만 들어가며 전달자 토큰은 속도 제한 상태의 일부가 되지 않는다.
+  /// 한도에 도달하면 타임스탬프를 추가하지 않고 요청을 거부해 데이터베이스 RPC의 잠금
+  /// 의미와 맞춘다.
   bool _recordInviteAttempt({
     required Map<String, List<DateTime>> ledger,
     required String actorId,
@@ -505,9 +481,8 @@ class LocalScheduleRepository
   }
 
   String _generateInviteToken() {
-    // Random.secure is used by default because this value is a bearer token.
-    // The bounded retry also guarantees progress if an injected deterministic
-    // source happens to collide with a token already held by this adapter.
+    // 이 값은 전달자 토큰이므로 기본적으로 Random.secure를 사용한다. 주입한 결정론적
+    // 생성원이 이 어댑터에 이미 있는 토큰과 충돌해도 제한된 재시도로 진행을 보장한다.
     for (var attempt = 0; attempt < 64; attempt++) {
       final token = String.fromCharCodes(
         List<int>.generate(
@@ -671,11 +646,10 @@ class LocalScheduleRepository
         const ScheduleValidationException('로그인 세션을 다시 확인해 주세요.'),
       );
     }
-    // Keep the requester gate in the stream transformation itself so it is
-    // reevaluated for every realtime emission (membership deactivation and
-    // archive both emit through [watchEvents]). Calling the legacy method via
-    // dynamic dispatch also preserves compatibility with existing local test
-    // doubles that override only `watchEvents`.
+    // 요청자 가드를 스트림 변환 자체에 두어 실시간 방출마다 다시 평가한다.
+    // 멤버십 비활성화와 보관은 모두 [watchEvents]를 통해 내보낸다. 동적 디스패치로
+    // 기존 메서드를 호출하면 `watchEvents`만 재정의하는 기존 로컬 테스트 대역과의
+    // 호환성도 유지된다.
     return watchEvents(groupId).map(
       (incoming) => _isActiveMember(groupId, userId)
           ? List<PlannerEvent>.unmodifiable(incoming)
@@ -787,8 +761,8 @@ class LocalScheduleRepository
         ? EventRangeCursor(
             startsAtUtc: pageEvents.last.startAt.toUtc(),
             eventId: pageEvents.last.id,
-            // Search always emits the complete v2 tuple, including the
-            // explicit `single` key for non-recurring events.
+            // 검색은 반복되지 않는 일정의 명시적 `single` 키를 포함해 항상 완전한
+            // v2 튜플을 내보낸다.
             occurrenceKey: pageEvents.last.occurrenceKey,
           )
         : null;
@@ -909,10 +883,9 @@ class LocalScheduleRepository
     );
     scheduleMicrotask(() {
       final group = _groups[groupId];
-      // A manually seeded/legacy test double may expose a group through its
-      // own `groups` list without registering it in this in-memory adapter.
-      // There is no lifecycle fact to publish for an unknown id; reserve the
-      // null marker for a known group whose membership has become unusable.
+      // 수동으로 초기화한 기존 테스트 대역은 이 메모리 어댑터에 등록하지 않고 자체
+      // `groups` 목록을 통해 그룹을 노출할 수 있다. 알 수 없는 ID에 공개할 수명 주기
+      // 사실은 없다. `null` 표시는 멤버십을 사용할 수 없게 된 알려진 그룹에만 사용한다.
       if (group == null) return;
       controller.add(_isActiveMember(groupId, userId) ? group : null);
     });
@@ -1035,9 +1008,8 @@ class LocalScheduleRepository
     final byId = event.id.compareTo(cursor.eventId);
     if (byId > 0) return true;
     if (byId < 0) return false;
-    // A v1 cursor intentionally has no occurrence component and therefore
-    // cannot resume a repeated projection for the same anchor.  v2 compares
-    // the complete tuple exactly.
+    // v1 커서에는 의도적으로 발생 구성 요소가 없어 같은 기준점의 반복 프로젝션을
+    // 재개할 수 없다. v2는 완전한 튜플을 정확히 비교한다.
     return cursor.occurrenceKey.isNotEmpty &&
         event.occurrenceKey.compareTo(cursor.occurrenceKey) > 0;
   }
@@ -1068,12 +1040,10 @@ class LocalScheduleRepository
         result.add(event);
       }
     }
-    // Keep track of identities emitted by the arithmetic schedule walk. An
-    // occurrence override may move its effective start into this range while
-    // its scheduled start is outside the bounded look-behind (or even years
-    // away). Discover such rows from the sparse override index before the
-    // final overlap filter instead of requiring the schedule walk to find the
-    // original occurrence first.
+    // 산술 일정 순회가 내보낸 신원을 추적한다. 발생 항목 재정의는 예약 시작이 제한된
+    // 과거 조회 범위 밖이거나 수년 떨어져 있어도 실제 시작을 이 범위 안으로 옮길 수 있다.
+    // 일정 순회가 원래 발생 항목을 먼저 찾도록 요구하지 말고 최종 겹침 필터 전에
+    // 희소 재정의 인덱스에서 이런 행을 찾는다.
     final emittedIdentities = <String>{
       for (final event in result) event.identityKey,
     };
@@ -1225,8 +1195,8 @@ class LocalScheduleRepository
       isActive: false,
       removedAt: DateTime.now().toUtc(),
     );
-    // Membership removal uses current-assignment semantics: an inactive user
-    // must not remain on events and rejoining must not resurrect old rows.
+    // 멤버십 제거에는 현재 배정 의미를 적용한다. 비활성 사용자가 일정에 남아서는 안 되고,
+    // 다시 가입해도 이전 행이 되살아나면 안 된다.
     _pruneEventMemberAssignments(groupId, actorId);
     _emit(groupId);
     _emitGroupLifecycle(groupId);
@@ -1254,8 +1224,8 @@ class LocalScheduleRepository
     if (newOwnerIndex < 0) {
       throw const ScheduleConflictException('새 소유자는 활성 멤버여야 합니다.');
     }
-    // Update the group owner and all membership roles in one synchronous
-    // critical section so there is never a state with two owners (or none).
+    // 하나의 동기 임계 구역에서 그룹 소유자와 모든 멤버십 역할을 갱신해 소유자가
+    // 둘이거나 하나도 없는 상태가 절대 생기지 않게 한다.
     for (var index = 0; index < list.length; index++) {
       final member = list[index];
       list[index] = member.copyWith(isOwner: member.id == newOwnerId);
@@ -1285,8 +1255,8 @@ class LocalScheduleRepository
       archivedAt: now,
       deletedAt: now,
     );
-    // A terminal archive also makes all outstanding invite lookups and event
-    // streams empty without deleting historical records.
+    // 최종 보관은 과거 레코드를 삭제하지 않으면서 대기 중인 모든 초대 조회와 일정
+    // 스트림도 비운다.
     _emit(groupId);
     _emitGroupLifecycle(groupId);
     return group.version + 1;
@@ -1336,8 +1306,8 @@ class LocalScheduleRepository
         throw const InviteUnavailableException.invalidOrExpired();
       }
     } else if (normalized == normalizeInviteCode('family')) {
-      // The local demo's hand-written code is intentionally available for
-      // manual fallback.  It is not emitted by the strict share-link builder.
+      // 수동 대체 입력을 위해 로컬 데모의 직접 작성 코드를 의도적으로 사용할 수 있게 한다.
+      // 엄격한 공유 링크 빌더가 이 코드를 내보내지는 않는다.
       group = _groups['demo-group'];
       expiresAt = DateTime.utc(9999, 12, 31, 23, 59, 59);
       if (group == null || group.isArchived) {
@@ -1387,18 +1357,17 @@ class LocalScheduleRepository
               )
               .firstOrNull
         : _groups[matchingInvite.groupId];
-    // Missing, archived, revoked, expired, and exhausted invites deliberately
-    // collapse to one terminal reason.  This keeps Local parity with the
-    // Supabase preview/join oracle and avoids a token/group existence probe.
+    // 누락, 보관, 취소, 만료, 소진된 초대는 의도적으로 하나의 최종 사유로 합친다.
+    // 이렇게 하면 로컬 구현이 Supabase 미리보기/참여 판정과 동등하게 동작하고 토큰/그룹
+    // 존재 여부 탐색을 막는다.
     if (group == null || group.isArchived) {
       throw const InviteUnavailableException.invalidOrExpired();
     }
     final current = _members[group.id] ?? <PlannerMember>[];
     final existingIndex = current.indexWhere((member) => member.id == userId);
-    // Acceptance is idempotent for an already-active member.  The server
-    // oracle may have returned this hint even after token expiry/revocation;
-    // re-check the live membership before applying invite validity or usage
-    // limits and never consume another use in this branch.
+    // 이미 활성 멤버를 수락하는 동작은 멱등이다. 토큰이 만료/취소된 뒤에도 서버
+    // 판정기가 이 참고 정보를 반환했을 수 있다. 초대 유효성이나 사용량 한도를 적용하기 전에
+    // 활성 멤버십을 다시 확인하고 이 분기에서는 사용 횟수를 추가로 소비하지 않는다.
     if (existingIndex >= 0 && current[existingIndex].isActive) {
       return group;
     }
@@ -1422,8 +1391,8 @@ class LocalScheduleRepository
       );
       _members[group.id] = current;
     } else if (!current[existingIndex].isActive) {
-      // Joining again reactivates an existing membership, mirroring the
-      // transactional Supabase RPC rather than leaving the user filtered out.
+      // 다시 가입하면 기존 멤버십을 재활성화한다. 사용자가 필터링된 채 남지 않게 하고
+      // 트랜잭션 방식의 Supabase RPC와 같은 동작을 한다.
       current[existingIndex] = current[existingIndex].copyWith(
         isActive: true,
         clearRemovedAt: true,
@@ -1596,8 +1565,8 @@ class LocalScheduleRepository
     );
     list[index] = updated;
     if (!isActive) {
-      // Advance affected event versions so an in-flight editor cannot restore
-      // an assignment after moderation completes.
+      // 운영 조치가 끝난 뒤 진행 중인 편집기가 배정을 복원하지 못하도록 영향받은 일정의
+      // 버전을 증가시킨다.
       _pruneEventMemberAssignments(groupId, userId);
     }
     _emit(groupId);
@@ -1656,9 +1625,8 @@ class LocalScheduleRepository
     final memberIds = _normalizeEventMemberIds(
       groupId,
       normalizedDraft.memberIds,
-      // Recurring series always include their creator in the canonical
-      // series-wide assignment, even when the caller supplied an explicit
-      // list.  This mirrors the create RPC's creator invariant.
+      // 호출자가 명시적 목록을 제공했어도 반복 시리즈의 표준 시리즈 전체 배정에는 항상
+      // 작성자를 포함한다. 이는 생성 RPC의 작성자 불변 조건과 같다.
       defaultCreatorId: userId,
     );
     final id = 'event-${DateTime.now().microsecondsSinceEpoch}-${_counter++}';
@@ -1691,8 +1659,8 @@ class LocalScheduleRepository
         )
         .add(_LocalRecurrenceSegment(template: event, ordinalOffset: 0));
     _emit(groupId);
-    // The first occurrence is the useful result of a create RPC.  Keep the
-    // series anchor in the backing list while returning the materialized row.
+    // 첫 발생분이 생성 RPC의 유용한 결과다. 기반 목록에는 시리즈 기준점을 유지하고
+    // 구체화된 행을 반환한다.
     final firstRange = EventRange(
       startUtc: event.startAt.subtract(const Duration(days: 1)),
       endUtc: event.startAt.add(const Duration(days: 367)),
@@ -1745,8 +1713,8 @@ class LocalScheduleRepository
     if (!isRecurringIdentity && !convertsSingletonToRecurring) {
       throw const ScheduleConflictException('반복 일정 항목을 확인해 주세요.');
     }
-    // A series anchor (the singleton key) is only editable as an all-scope
-    // conversion/update.  Per-occurrence edits must carry an ordinal key.
+    // 시리즈 기준점인 단일 키는 전체 범위 변환/갱신으로만 편집할 수 있다.
+    // 발생분별 편집에는 순번 키가 있어야 한다.
     if (keyIsSingle &&
         !convertsSingletonToRecurring &&
         !convertsRecurringToSingleton) {
@@ -1805,11 +1773,10 @@ class LocalScheduleRepository
         eventId: event.id,
         occurrenceKey: event.occurrenceKey,
         seriesVersion: expectedSeriesVersion,
-        // The occurrence version is meaningful only for a `this` override.
-        // Future/all operate on the parent series and therefore return the
-        // scope-wide zero even when the request is an idempotent no-op.  This
-        // keeps the local adapter byte-for-byte compatible with the receipt
-        // contract enforced by the Supabase parser.
+        // 발생분 버전은 `this` 재정의에만 의미가 있다. `future`/`all`은 상위 시리즈를
+        // 대상으로 하므로 요청이 멱등 무동작이어도 범위 전체의 0을 반환한다.
+        // 그러면 로컬 어댑터가 Supabase 파서가 강제하는 처리 결과 계약과 바이트
+        // 단위로 호환된다.
         occurrenceVersion: scope == EventEditScope.thisOccurrence
             ? expectedOccurrenceVersion
             : 0,
@@ -1873,8 +1840,8 @@ class LocalScheduleRepository
               occurrenceKey: 'single',
               occurrenceIndex: 0,
               isOccurrence: false,
-              // The all-scope draft becomes the new series anchor (or singleton
-              // instant). Do not retain the pre-edit scheduled wall timestamp.
+              // 전체 범위 초안은 새 시리즈 기준점 또는 단일 시각이 된다. 편집 전
+              // 예약 현지 타임스탬프를 유지하지 않는다.
               clearScheduledStartsAt: true,
               seriesId: base.seriesId,
             );
@@ -1965,11 +1932,9 @@ class LocalScheduleRepository
         );
       case EventEditScope.future:
         if (event.occurrenceIndex == 0) {
-          // Ordinal zero is the persisted series anchor. Removing only the
-          // recurrence segment would make the materializer fall back to that
-          // still-live anchor and resurrect the deleted first occurrence.
-          // Tombstone the anchor itself before clearing sparse state so every
-          // read path remains deletion-safe.
+          // 순번 0은 저장된 시리즈 기준점이다. 반복 구간만 제거하면 구체화 로직이
+          // 아직 살아 있는 기준점으로 대체해 삭제된 첫 발생분을 되살린다. 희소 상태를
+          // 지우기 전에 기준점 자체를 삭제 표시 처리하여 모든 읽기 경로를 삭제에 안전하게 한다.
           list[baseIndex] = base.copyWith(
             deletedAt: now,
             version: nextSeriesVersion,
@@ -2073,17 +2038,15 @@ class LocalScheduleRepository
         : ordinal - inheritedSegment.ordinalOffset;
     segments.removeWhere((segment) => segment.ordinalOffset >= ordinal);
     if (segments.isNotEmpty && ordinal > 0) {
-      // A prior future edit may already have created several segments. Close
-      // the segment immediately preceding this split; shortening only the
-      // original anchor would leave an older later segment extending through
-      // the new boundary and would materialize duplicate occurrences.
+      // 이전 `future` 편집이 이미 여러 구간을 만들었을 수 있다. 이 분할 바로 앞의
+      // 구간을 닫는다. 원래 기준점만 줄이면 이전의 후속 구간이 새 경계를 지나
+      // 계속 이어져 중복 발생분을 구체화한다.
       final lastIndex = segments.length - 1;
       final prior = segments[lastIndex];
       final oldRule = prior.template.recurrenceRule!;
-      // A future edit/delete closes the prior segment at the target ordinal
-      // regardless of whether the original rule was never/count/until.  A
-      // plain never/until rule left intact would resurrect occurrences after
-      // the requested split.
+      // `future` 편집/삭제는 원래 규칙이 `never`/`count`/`until` 중 무엇이든 대상 순번에서
+      // 이전 구간을 닫는다. `never`/`until` 규칙을 그대로 두면 요청된 분할 뒤의 발생분이
+      // 되살아난다.
       final shortened = oldRule.copyWith(
         end: RecurrenceEnd.count,
         count: ordinal - prior.ordinalOffset,
@@ -2168,9 +2131,9 @@ class LocalScheduleRepository
     required int expectedVersion,
     String? actorId,
   }) async {
-    // Authorize against the caller/group before parsing mutable event fields;
-    // an inactive/outsider request must never learn whether its payload is
-    // otherwise well-formed, and archived groups are terminal write guards.
+    // 변경 가능한 일정 필드를 파싱하기 전에 호출자/그룹을 기준으로 권한을 확인한다.
+    // 비활성 사용자/외부인 요청이 페이로드의 다른 형식이 올바른지 알아서는 안 되며,
+    // 보관된 그룹은 최종 쓰기 보호 조건이다.
     _requireActiveMember(event.groupId, actorId ?? event.ownerId);
     final normalizedEvent = _normalizeEvent(event);
     final list = _events[normalizedEvent.groupId];
@@ -2294,9 +2257,8 @@ class LocalScheduleRepository
         '다른 사람이 이 일정을 변경했습니다. 최신 내용을 불러왔어요.',
       );
     }
-    // An empty replacement is intentional for legacy singleton events and
-    // differs from create's creator default. Recurring series are checked
-    // below and must retain their creator assignment.
+    // 빈 교체는 레거시 단일 일정에서 의도한 것이며 생성 시의 작성자 기본값과 다르다.
+    // 반복 시리즈는 아래에서 검사하며 작성자 배정을 유지해야 한다.
     final normalizedMemberIds = _normalizeEventMemberIds(
       existing.groupId,
       memberIds,
@@ -2307,9 +2269,8 @@ class LocalScheduleRepository
       throw const ScheduleValidationException('반복 일정 작성자는 멤버에서 제외할 수 없습니다.');
     }
     if (_sameMemberIdSet(existing.memberIds, normalizedMemberIds)) {
-      // Replacing with the canonical current set is an idempotent no-op.  Do
-      // not manufacture a version transition or realtime event for a write
-      // that changed no participant assignment.
+      // 표준 현재 집합으로 교체하는 것은 멱등 무동작이다. 참여자 배정을 바꾸지 않은
+      // 쓰기에 버전 전환이나 실시간 이벤트를 만들어 내지 않는다.
       return existing;
     }
     final updated = existing.copyWith(
@@ -2475,16 +2436,13 @@ class LocalScheduleRepository
     _validateDraft(draft);
     if (!draft.allDay) return draft;
     if (draft.allDayStartDate == null && draft.allDayEndDate == null) {
-      // Legacy rows may omit the date metadata, but their UTC instants still
-      // have to be the exact local-midnight boundaries for the event timezone.
-      // Derive dates in that timezone (UTC instants can fall on the previous
-      // device date for positive offsets), then canonicalize metadata.
-      // The original local adapter accepted non-UTC DateTime values for its
-      // UTC-default all-day draft. Preserve that narrow legacy input shape,
-      // but canonicalize the persisted instant to the same UTC midnight as
-      // the date metadata. Keeping the old wall-date interpretation while
-      // persisting the caller's local instant would make `all_day_start` and
-      // `starts_at` disagree (for example on a KST device).
+      // 레거시 행은 날짜 메타데이터를 생략할 수 있지만 UTC 시각은 일정 시간대에서 정확한
+      // 현지 자정 경계여야 한다. 해당 시간대에서 날짜를 유도한 뒤 메타데이터를 표준화한다.
+      // 양의 오프셋에서는 UTC 시각이 기기 날짜의 전날일 수 있다. 기존 로컬 어댑터는 UTC
+      // 기본 종일 초안에 비 UTC DateTime 값을 허용했다. 이 좁은 레거시 입력 형식은
+      // 유지하되 저장 시각을 날짜 메타데이터와 같은 UTC 자정으로 표준화한다. 이전 현지
+      // 날짜 해석을 유지하면서 호출자의 로컬 시각을 저장하면 `all_day_start`와
+      // `starts_at`이 서로 달라진다(예: KST 기기).
       final legacyLocalUtc =
           draft.timezone == 'UTC' && !draft.startAt.isUtc && !draft.endAt.isUtc;
       final startDate = legacyLocalUtc
@@ -2534,9 +2492,9 @@ class LocalScheduleRepository
     }
     final canonicalStart = wallTimeToUtc(startDate, draft.timezone);
     final canonicalEnd = wallTimeToUtc(endDate, draft.timezone);
-    // Rows with explicit metadata must agree with the persisted UTC
-    // boundaries. Metadata-less legacy drafts are accepted and canonicalized
-    // to local-midnight UTC so new writes have one unambiguous representation.
+    // 명시적 메타데이터가 있는 행은 저장된 UTC 경계와 일치해야 한다. 메타데이터가 없는
+    // 레거시 초안은 허용하고 현지 자정 UTC로 표준화하여 새 쓰기가 모호하지 않은 하나의
+    // 표현을 갖게 한다.
     if (draft.allDayStartDate != null &&
         !_sameInstant(draft.startAt, canonicalStart)) {
       throw const FormatException('종일 일정 시작 날짜와 시간이 일치하지 않습니다.');
@@ -2660,11 +2618,9 @@ class LocalScheduleRepository
     return ownerId == userId && membership?.isActive == true;
   }
 
-  /// Canonicalizes and validates a participant list against the current
-  /// active memberships.  [defaultCreatorId] is used only for new-event
-  /// creation. When supplied, the creator is always included in the returned
-  /// canonical series assignment; callers that intentionally clear an
-  /// existing assignment omit this argument.
+  /// 현재 활성 멤버십을 기준으로 참여자 목록을 표준화하고 검증한다. [defaultCreatorId]는
+  /// 새 일정 생성에만 사용한다. 제공되면 반환하는 표준 시리즈 배정에 작성자를 항상
+  /// 포함한다. 기존 배정을 의도적으로 지우는 호출자는 이 인수를 생략한다.
   List<String> _normalizeEventMemberIds(
     String groupId,
     Iterable<String> memberIds, {
@@ -2699,10 +2655,9 @@ class LocalScheduleRepository
     final now = DateTime.now().toUtc();
     for (var index = 0; index < list.length; index++) {
       final event = list[index];
-      // Membership pruning is current-assignment maintenance.  Deleted
-      // events are retained as history (and the remote database intentionally
-      // keeps their child rows), so never rewrite their participant IDs or
-      // versions during a later leave/deactivation.
+      // 멤버십 정리는 현재 배정을 유지하는 작업이다. 삭제된 일정은 기록으로 유지되고
+      // 원격 데이터베이스도 의도적으로 하위 행을 유지하므로, 이후 나가기/비활성화 때
+      // 참여자 ID나 버전을 다시 쓰지 않는다.
       if (event.isDeleted || _groups[groupId]?.isArchived == true) continue;
       if (!event.memberIds.contains(userId)) continue;
       list[index] = event.copyWith(
@@ -2731,12 +2686,10 @@ class LocalScheduleRepository
           );
         }
       }
-      // Occurrence overrides are full PlannerEvent snapshots in the local
-      // adapter. Keep their inherited series assignment and parent version
-      // in lockstep with the anchor/segments; otherwise a this-occurrence
-      // override can keep a deactivated participant and still pass a later
-      // participant-filtered materialization (unlike the SQL path, which
-      // derives every row's members from event_members).
+      // 발생분 재정의는 로컬 어댑터에서 완전한 PlannerEvent 스냅샷이다. 상속한
+      // 시리즈 배정과 상위 버전을 기준점/구간과 맞춘다. 그렇지 않으면 이번 발생분
+      // 재정의가 비활성 참여자를 유지한 채 이후 참여자 필터가 적용된 구체화 과정을
+      // 통과할 수 있다. 모든 행의 멤버를 event_members에서 유도하는 SQL 경로와 다르다.
       _syncSeriesOverrideMembers(
         groupId,
         updated.seriesId,
@@ -2745,8 +2698,8 @@ class LocalScheduleRepository
         updatedAt: updated.updatedAt,
       );
     }
-    // The caller emits the membership/lifecycle changes after this helper so
-    // all event rows are delivered in one coherent snapshot.
+    // 모든 일정 행이 하나의 일관된 스냅샷으로 전달되도록 호출자가 이 도우미 뒤에
+    // 멤버십/수명 주기 변경을 내보낸다.
   }
 
   void _requireActiveMember(String groupId, String userId) {
@@ -2790,10 +2743,11 @@ class LocalScheduleRepository
                 utcToWallTime(draft.startAt, draft.timezone),
           )
         : dateOnly(utcToWallTime(draft.startAt, draft.timezone));
+    final firstOccurrenceDate = recurrenceFirstOccurrenceDate(anchorDate, rule);
     if (rule.end == RecurrenceEnd.until &&
         (rule.untilDate == null ||
-            dateOnly(rule.untilDate!).isBefore(anchorDate))) {
-      throw const FormatException('반복 종료 날짜는 시작 날짜 이후여야 합니다.');
+            dateOnly(rule.untilDate!).isBefore(firstOccurrenceDate))) {
+      throw const FormatException('반복 종료 날짜는 첫 반복 날짜와 같거나 이후여야 합니다.');
     }
     final duration = draft.allDay
         ? civilDateOnly(
@@ -2804,11 +2758,10 @@ class LocalScheduleRepository
                   utcToWallTime(draft.startAt, draft.timezone),
             ),
           )
-        // SQL validates a timed recurrence's maximum length in the event's
-        // IANA wall clock (`at time zone`), not as elapsed UTC seconds. A
-        // civil 366-day span crossing fall-back is 366 days + 1h in UTC,
-        // while one crossing spring-forward is 366 days - 1h. Use UTC-tagged
-        // civil tuples so this check is deterministic on every device.
+        // SQL은 시간 지정 반복의 최대 길이를 경과 UTC 초가 아니라 일정의 IANA 현지
+        // 시각(`at time zone`)으로 검증한다. 시계 되돌림을 지나는 민간력 366일은 UTC에서
+        // 366일+1시간이고 시계 앞당김을 지나면 366일-1시간이다. 모든 기기에서 이
+        // 검사가 결정론적으로 동작하도록 UTC 태그가 붙은 민간력 튜플을 사용한다.
         : utcToCivilWallTimePrecise(draft.endAt, draft.timezone).difference(
             utcToCivilWallTimePrecise(draft.startAt, draft.timezone),
           );
@@ -3078,17 +3031,15 @@ class SupabaseScheduleRepository
         EventByIdReadCapability,
         EventOccurrenceReadCapability,
         InvitePreviewCapability {
-  /// Current authenticated actor used by authenticated-only capabilities.
-  /// Kept as a small overridable seam so transport tests can provide a
-  /// matching session without manufacturing a signed JWT; production code
-  /// always reads the Supabase auth client.
+  /// 인증 전용 기능이 사용하는 현재 인증 행위자다. 전송 테스트에서 서명된 JWT를
+  /// 만들지 않고 일치하는 세션을 제공할 수 있도록 재정의 가능한 작은 접점으로 둔다.
+  /// 프로덕션 코드는 항상 Supabase 인증 클라이언트를 읽는다.
   String? get currentSessionUserId => _client.auth.currentUser?.id;
 
-  /// [lifecyclePollInterval] is deliberately bounded to a conservative
-  /// default for production (15 seconds).  Tests may inject a shorter clock
-  /// interval when exercising the authoritative recheck path; the app uses
-  /// the default and therefore never relies on a realtime row notification
-  /// for membership/archive revocation.
+  /// [lifecyclePollInterval]은 프로덕션에서 보수적인 기본값인 15초로 의도적으로
+  /// 제한한다. 신뢰할 수 있는 재확인 경로를 테스트할 때는 더 짧은 시계 간격을
+  /// 주입할 수 있다. 앱은 기본값을 사용하므로 멤버십/보관 취소에 실시간 행 알림만
+  /// 의존하지 않는다.
   SupabaseScheduleRepository(
     this._client, {
     Duration lifecyclePollInterval = const Duration(seconds: 15),
@@ -3097,7 +3048,7 @@ class SupabaseScheduleRepository
       throw ArgumentError.value(
         lifecyclePollInterval,
         'lifecyclePollInterval',
-        'must be positive',
+        '0보다 커야 합니다',
       );
     }
   }
@@ -3107,9 +3058,10 @@ class SupabaseScheduleRepository
 
   @override
   Future<List<PlannerGroup>> groupsForUser(String userId) async {
-    // Legacy projection contract: select( 'id,name,description,timezone,version,memberships!inner(user_id,is_active)',
-    // and the bounded join projection select('id,name,description,timezone,version') remain
-    // documented here while the live projection adds lifecycle/owner fields.
+    // 기존 프로젝션 계약: select( 'id,name,description,timezone,version,memberships!inner(user_id,is_active)',
+    // 제한된
+    // 조인 프로젝션 select('id,name,description,timezone,version')은 활성 프로젝션에
+    // 수명 주기/소유자 필드가 추가되어도 여기 계속 문서화한다.
     final rows = await _client
         .from('groups')
         .select(
@@ -3163,9 +3115,9 @@ class SupabaseScheduleRepository
     return _watchEventsWithMembers(groupId);
   }
 
-  /// Parent event stream seam used by the legacy member-merge path. Keeping
-  /// this as an overridable method lets deterministic tests feed realtime rows
-  /// without a live websocket; production callers use the Supabase stream.
+  /// 기존 멤버 병합 경로가 사용하는 상위 일정 스트림 접점이다. 재정의 가능한
+  /// 메서드로 두면 결정론적 테스트가 실제 WebSocket 없이 실시간 행을 제공할 수 있다.
+  /// 프로덕션 호출자는 Supabase 스트림을 사용한다.
   Stream<List<Map<String, dynamic>>> eventRowsStream(String groupId) {
     return _client
         .from('events')
@@ -3186,9 +3138,9 @@ class SupabaseScheduleRepository
       throw const ScheduleValidationException('로그인 세션과 그룹을 확인해 주세요.');
     }
     _validateRemoteRangeShape(range, limit);
-    // The v2 RPC is the default production calendar path.  Do not issue a
-    // request with a missing or mismatched auth context: the local user id is
-    // only a routing hint and must agree with the current Supabase session.
+    // v2 RPC가 기본 프로덕션 달력 경로다. 인증 컨텍스트가 없거나 일치하지 않으면
+    // 요청을 보내지 않는다. 로컬 사용자 ID는 라우팅 힌트일 뿐이며 현재 Supabase 세션과
+    // 일치해야 한다.
     _requireCurrentRemoteUser(userId);
     final normalizedParticipant = participantId?.trim();
     if (participantId != null && normalizedParticipant!.isEmpty) {
@@ -3280,9 +3232,9 @@ class SupabaseScheduleRepository
               !event.note.toLowerCase().contains(foldedQuery))) {
         throw const ScheduleConflictException('검색 결과 응답을 확인할 수 없습니다.');
       }
-      // Search cursors are always strict v2 tuples. The range parser accepts
-      // v1 cursors for backwards compatibility, so enforce the stronger
-      // search contract here before returning the page to callers.
+      // 검색 커서는 항상 엄격한 v2 튜플이다. 범위 파서는 하위 호환성을 위해 v1
+      // 커서를 허용하므로 호출자에게 페이지를 반환하기 전에 여기서 더 강한 검색
+      // 계약을 적용한다.
       if (page.nextCursor != null && page.nextCursor!.occurrenceKey.isEmpty) {
         throw const ScheduleConflictException('검색 결과 커서를 확인할 수 없습니다.');
       }
@@ -3417,8 +3369,7 @@ class SupabaseScheduleRepository
       try {
         await _client.removeChannel(candidate);
       } catch (_) {
-        // Best-effort cleanup; the next generation remains guarded by the
-        // cancelled/reconnect flags below.
+        // 가능한 범위에서 정리한다. 다음 세대는 아래의 취소/재연결 플래그로 계속 보호한다.
       } finally {
         channelRemovalInFlight -= 1;
       }
@@ -3444,9 +3395,9 @@ class SupabaseScheduleRepository
     Future<void> retireFailedChannel(
       _EventInvalidationChannelState state,
     ) async {
-      // Mark before awaiting removal: SDKs may report `closed` synchronously
-      // as part of removeChannel, and that callback must not schedule a second
-      // reconnect or remove a newer channel.
+      // 제거를 기다리기 전에 표시한다. SDK가 removeChannel의 일부로 `closed`를 동기적으로
+      // 보고할 수 있으며, 그 콜백이 두 번째 재연결을 예약하거나 더 새 채널을
+      // 제거해서는 안 된다.
       state.closing = true;
       await removeChannel(state.channel);
       if (!cancelled && !controller.isClosed && active == null) {
@@ -3469,14 +3420,12 @@ class SupabaseScheduleRepository
               column: 'group_id',
               value: groupId,
             ),
-            // Parent event version changes are the Feature5 participant
-            // signal. Keep the invalidation payload change-only and do
-            // not expose descriptions or participant rows.
+            // 상위 일정 버전 변경은 기능 5의 참여자 신호다. 무효화 페이로드는 변경
+            // 전용으로 유지하고 설명이나 참여자 행을 노출하지 않는다.
             select: const <String>['id', 'group_id', 'version', 'deleted_at'],
             callback: (_) {
-              // A retired SDK channel can still deliver one queued payload
-              // (or even rejoin itself).  Only the currently registered
-              // generation may invalidate the controller.
+              // 폐기된 SDK 채널도 대기열의 페이로드 하나를 전달하거나 스스로 다시
+              // 참여할 수 있다. 현재 등록된 세대만 컨트롤러를 무효화할 수 있다.
               if (!cancelled &&
                   !controller.isClosed &&
                   !state.closing &&
@@ -3516,9 +3465,8 @@ class SupabaseScheduleRepository
           if (status == RealtimeSubscribeStatus.subscribed) {
             if (state.subscribedHandled) return;
             state.subscribedHandled = true;
-            // A successful re-subscription is itself a bounded recovery
-            // signal: an event mutation could have happened while the old
-            // socket was down, so force the controller to refetch once.
+            // 성공한 재구독 자체가 제한된 복구 신호다. 이전 소켓이 끊긴 동안 일정
+            // 변경이 발생했을 수 있으므로 컨트롤러가 한 번 다시 가져오게 한다.
             if (hasSubscribed) controller.add(null);
             hasSubscribed = true;
             currentChannelSubscribed = true;
@@ -3529,8 +3477,8 @@ class SupabaseScheduleRepository
               status == RealtimeSubscribeStatus.closed) {
             if (state.failureHandled) return;
             state.failureHandled = true;
-            // Capture identity before clearing active: a callback from an old
-            // channel must never reset the subscription state of a newer one.
+            // `active`를 지우기 전에 식별 정보를 포착한다. 이전 채널의 콜백이 더 새
+            // 채널의 구독 상태를 재설정해서는 안 된다.
             final isCurrent = identical(active, state);
             if (isCurrent) {
               active = null;
@@ -3576,9 +3524,8 @@ class SupabaseScheduleRepository
     controller = StreamController<void>.broadcast(
       onListen: () {
         if (cancelled) return;
-        // One active channel at a time.  A bounded retry plus the periodic
-        // fallback repairs a dropped/missed socket without an unbounded
-        // reconnect loop or duplicate subscriptions.
+        // 한 번에 활성 채널 하나만 둔다. 제한된 재시도와 주기적 대체 동작으로 제한
+        // 없는 재연결 루프나 중복 구독 없이 끊기거나 놓친 소켓을 복구한다.
         recoveryTimer ??= Timer.periodic(const Duration(seconds: 15), (_) {
           if (!cancelled && (active == null || !currentChannelSubscribed)) {
             scheduleReconnect();
@@ -3591,10 +3538,9 @@ class SupabaseScheduleRepository
     return controller.stream;
   }
 
-  /// Rebuilds an immutable event snapshot whenever the parent events stream
-  /// changes.  Participant rows intentionally have no realtime publication;
-  /// every participant mutation bumps the parent event version, which is the
-  /// signal that schedules this batch child read.
+  /// 상위 일정 스트림이 바뀔 때마다 불변 일정 스냅샷을 다시 만든다. 참여자 행은
+  /// 의도적으로 실시간 발행이 없다. 모든 참여자 변경이 상위 일정 버전을
+  /// 증가시키며, 이 신호가 일괄 하위 읽기를 예약한다.
   Stream<List<PlannerEvent>> _watchEventsWithMembers(String groupId) {
     late final StreamController<List<PlannerEvent>> controller;
     StreamSubscription<List<Map<String, dynamic>>>? subscription;
@@ -3618,10 +3564,9 @@ class SupabaseScheduleRepository
           if (id is! String || id.trim().isEmpty || !seen.add(id)) {
             throw StateError('일정 응답을 확인할 수 없습니다.');
           }
-          // The parent realtime projection normally omits event_members.  It
-          // must still carry a complete, strictly validated event payload;
-          // otherwise _eventFromRow could normalize malformed timestamps or
-          // inverted ranges before the child assignment read completes.
+          // 상위 실시간 프로젝션은 보통 event_members를 생략한다. 그래도 완전하고
+          // 엄격히 검증된 일정 페이로드를 포함해야 한다. 그렇지 않으면 하위 배정 읽기가
+          // 끝나기 전에 _eventFromRow가 잘못된 타임스탬프나 뒤집힌 범위를 정규화할 수 있다.
           if (!_hasCompleteEventFields(row, requireMemberIds: false)) {
             throw StateError('일정 응답을 확인할 수 없습니다.');
           }
@@ -3633,8 +3578,8 @@ class SupabaseScheduleRepository
         for (final row in eventRows) {
           final id = row['id'] as String;
           final parsed = memberRows[id];
-          // A successful child query always creates a map entry, including an
-          // explicit empty assignment.  Do not fabricate a creator here.
+          // 성공한 하위 쿼리는 명시적인 빈 배정을 포함해 항상 맵 항목을 만든다.
+          // 여기서 작성자를 꾸며 내지 않는다.
           if (parsed == null) {
             throw StateError('일정 멤버 응답을 확인할 수 없습니다.');
           }
@@ -3648,14 +3593,13 @@ class SupabaseScheduleRepository
         latestGood = List<PlannerEvent>.unmodifiable(merged);
         if (!controller.isClosed) controller.add(latestGood!);
       } catch (error, stack) {
-        // Keep the last successful snapshot on a child read/parse failure;
-        // emitting an empty list would look like a privacy revocation.
+        // 하위 읽기/파싱 실패 시 마지막 성공 스냅샷을 유지한다. 빈 목록을 내보내면
+        // 개인정보 보호 권한 철회처럼 보인다.
         if (!cancelled && token == generation && !controller.isClosed) {
           controller.addError(error, stack);
-          // Child rows are not part of the realtime publication, so a
-          // transient REST failure would otherwise leave this parent snapshot
-          // stale forever. Retry the exact generation after a short delay;
-          // any newer parent snapshot or cancellation invalidates this work.
+          // 하위 행은 실시간 발행의 일부가 아니므로, 그렇지 않으면 일시적인
+          // REST 실패로 이 상위 스냅샷이 영구히 오래된 상태로 남는다. 잠시 후 정확한
+          // 세대를 재시도한다. 더 새 상위 스냅샷이나 취소는 이 작업을 무효화한다.
           retryTimer = Timer(const Duration(milliseconds: 250), () {
             if (!cancelled && token == generation && !controller.isClosed) {
               unawaited(refresh(rows));
@@ -3676,8 +3620,7 @@ class SupabaseScheduleRepository
         try {
           await current.cancel();
         } catch (_) {
-          // Best-effort cancellation keeps a stale stream from blocking a
-          // newer group selection.
+          // 가능한 범위에서 취소하여 오래된 스트림이 더 새 그룹 선택을 막지 않게 한다.
         }
       }
     }
@@ -3746,9 +3689,9 @@ class SupabaseScheduleRepository
     };
   }
 
-  /// Child assignment read seam paired with [eventRowsStream].  The concrete
-  /// implementation performs one ordered batch query; test doubles may
-  /// override it to exercise realtime merge and malformed-row handling.
+  /// [eventRowsStream]과 짝을 이루는 하위 배정 읽기 접점이다. 구체적인 구현은 정렬된
+  /// 일괄 조회 하나를 수행한다. 테스트 대역은 실시간 병합과 잘못된 행 처리를
+  /// 실행하도록 이를 재정의할 수 있다.
   Future<Map<String, List<String>>> eventMemberRows(
     Iterable<String> eventIds,
   ) => _readEventMemberRows(eventIds);
@@ -3760,11 +3703,10 @@ class SupabaseScheduleRepository
         const ScheduleValidationException('로그인 세션을 다시 확인해 주세요.'),
       );
     }
-    // The membership check is intentionally repeated on every membership or
-    // group signal and by a bounded timer.  A Supabase stream filtered by RLS
-    // can retain a row when another client deactivates that membership, so a
-    // first successful check is not an authorization guarantee for the rest
-    // of the stream lifetime.
+    // 모든 멤버십 또는 그룹 신호와 제한된 타이머마다 멤버십 검사를 의도적으로 반복한다.
+    // RLS로 필터링된 Supabase 스트림은 다른 클라이언트가 해당 멤버십을 비활성화해도 행을
+    // 유지할 수 있다. 따라서 처음 검사에 성공했다고 스트림의 남은 수명 동안 권한이
+    // 보장되는 것은 아니다.
     return _watchRemoteEventsForUser(userId, groupId);
   }
 
@@ -3778,10 +3720,9 @@ class SupabaseScheduleRepository
     return _watchRemoteGroupLifecycle(userId, groupId);
   }
 
-  /// Authoritatively resolves the current requester/group relationship.  The
-  /// memberships query deliberately includes inactive rows when RLS allows
-  /// them; the stream callbacks still trigger this read even when Postgres
-  /// Changes omits an update that no longer satisfies an RLS policy.
+  /// 현재 요청자/그룹 관계를 신뢰할 수 있게 확인한다. RLS가 허용할 때 `memberships`
+  /// 조회는 비활성 행도 의도적으로 포함한다. Postgres Changes가 더는 RLS 정책을
+  /// 만족하지 않는 갱신을 생략해도 스트림 콜백은 이 읽기를 실행한다.
   Future<PlannerGroup?> _readUsableGroup(String userId, String groupId) async {
     final Object? membership = await _client
         .from('memberships')
@@ -3789,10 +3730,9 @@ class SupabaseScheduleRepository
         .eq('group_id', groupId)
         .eq('user_id', userId)
         .maybeSingle();
-    // A missing row or an explicit inactive/removed marker is an
-    // authoritative membership loss.  A partial/malformed row is not: keep
-    // the last-known state and retry instead of turning an ambiguous response
-    // into a privacy tombstone.
+    // 누락된 행이나 명시적인 비활성/제거 표시는 확정된 멤버십 상실이다. 일부만 있거나
+    // 잘못된 행은 그렇지 않다. 모호한 응답을 개인정보 보호 삭제 표시로 바꾸지 말고 마지막으로
+    // 알려진 상태를 유지한 채 재시도한다.
     if (membership == null) return null;
     if (membership is! Map) {
       throw StateError('멤버십 상태 응답을 확인할 수 없습니다.');
@@ -3821,17 +3761,15 @@ class SupabaseScheduleRepository
       throw StateError('그룹 상태 응답을 확인할 수 없습니다.');
     }
     final groupRow = row.cast<String, dynamic>();
-    // A lifecycle update is terminal as soon as deleted_at is non-null.  Do
-    // not rely on the model fallback fields to infer this marker.  A
-    // successful absent/archived response is a loss, while a malformed or
-    // partial response remains last-known until a later retry succeeds.
+    // deleted_at이 `null`이 아닌 즉시 수명 주기 갱신은 최종 상태다. 이 표시를 유도할 때
+    // 모델 대체 필드에 의존하지 않는다. 성공한 부재/보관 응답은 상실을 뜻하지만 잘못되거나
+    // 일부만 있는 응답은 이후 재시도가 성공할 때까지 마지막으로 알려진 상태를 유지한다.
     if (!groupRow.containsKey('deleted_at') || !_hasGroupFields(groupRow)) {
       throw StateError('그룹 상태 응답을 확인할 수 없습니다.');
     }
-    // The query is scoped by the requested id, but a malformed adapter or
-    // cross-group response must never be accepted as the selected lifecycle
-    // row.  Treat the mismatch as a transient malformed read so callers keep
-    // their last-known state and retry rather than replacing it.
+    // 조회는 요청된 ID로 범위가 제한되지만 잘못된 어댑터나 다른 그룹 응답을 선택한
+    // 수명 주기 행으로 허용해서는 안 된다. 불일치는 일시적인 잘못된 읽기로 처리하여
+    // 호출자가 상태를 교체하지 않고 마지막으로 알려진 값을 유지한 채 재시도하게 한다.
     if (groupRow['id'] != groupId) {
       throw StateError('그룹 상태 응답을 확인할 수 없습니다.');
     }
@@ -3877,10 +3815,9 @@ class SupabaseScheduleRepository
     }
   }
 
-  /// Builds a requester-scoped event stream with independent subscriptions to
-  /// events, memberships, and groups.  Every signal only schedules an
-  /// authoritative REST read; the timer covers the case where an RLS policy
-  /// hides the membership/group update from Postgres Changes altogether.
+  /// 일정, 멤버십, 그룹을 독립적으로 구독하는 요청자 범위 일정 스트림을 만든다. 모든
+  /// 신호는 신뢰할 수 있는 REST 읽기만 예약한다. RLS 정책이 멤버십/그룹 갱신을
+  /// Postgres Changes에서 완전히 숨기는 경우는 타이머가 처리한다.
   Stream<List<PlannerEvent>> _watchRemoteEventsForUser(
     String userId,
     String groupId,
@@ -3919,18 +3856,16 @@ class SupabaseScheduleRepository
         if (!usable) {
           emitEmpty();
         } else if (latestEvents != null && !controller.isClosed) {
-          // The events stream may deliver its initial snapshot before the
-          // first membership/group read completes.  Replay that buffered
-          // snapshot once authorization is established instead of leaving a
-          // permanently empty calendar until the next event mutation.
+          // 첫 멤버십/그룹 읽기가 끝나기 전에 일정 스트림이 초기 스냅샷을 전달할 수
+          // 있다. 다음 일정 변경까지 달력을 영구히 비워 두지 말고 권한이 확인되면 버퍼에 담긴
+          // 스냅샷을 다시 전달한다.
           controller.add(latestEvents!);
         }
       } catch (error, stack) {
-        // A failed authoritative read is not proof that membership was lost.
-        // Keep the last-known authorization/events state and let the bounded
-        // timer (or a queued realtime signal) retry.  Only a successful read
-        // that resolves to an absent/inactive membership emits the privacy
-        // clearing empty snapshot below.
+        // 신뢰할 수 있는 읽기가 실패했다고 멤버십 상실이 증명된 것은 아니다. 마지막으로
+        // 알려진 권한/일정 상태를 유지하고 제한된 타이머 또는 대기열에 든 실시간 신호가
+        // 재시도하게 한다. 성공한 읽기에서 멤버십이 없거나 비활성으로 확인된 경우에만
+        // 아래의 개인정보 보호 삭제용 빈 스냅샷을 내보낸다.
         if (!cancelled && !controller.isClosed) {
           controller.addError(error, stack);
         }
@@ -3944,10 +3879,9 @@ class SupabaseScheduleRepository
     }
 
     void signalError(Object error, StackTrace stack) {
-      // Channel errors are transient transport diagnostics, not lifecycle
-      // facts.  Preserve the last-known event authorization and rely on the
-      // authoritative timer/realtime retry instead of tombstoning a healthy
-      // group after one websocket failure.
+      // 채널 오류는 일시적인 전송 진단 정보이지 수명 주기 사실이 아니다. WebSocket이
+      // 한 번 실패한 뒤 정상 그룹을 툼스톤 처리하지 말고, 마지막으로 알려진 일정 권한을
+      // 보존하며 신뢰할 수 있는 타이머/실시간 재시도에 의존한다.
       if (!cancelled && !controller.isClosed) {
         controller.addError(error, stack);
       }
@@ -3965,8 +3899,8 @@ class SupabaseScheduleRepository
         try {
           await subscription.cancel();
         } catch (_) {
-          // A failed realtime unsubscribe must not leak the stream
-          // controller or prevent selection changes from completing.
+          // 실시간 구독 해제 실패가 스트림 컨트롤러를 누출하거나 선택 변경 완료를
+          // 막아서는 안 된다.
         }
       }
     }
@@ -3974,9 +3908,9 @@ class SupabaseScheduleRepository
     Future<void> setup() async {
       if (setupStarted || cancelled) return;
       setupStarted = true;
-      // Start the authoritative fallback before opening any realtime
-      // subscriptions. A synchronous `.stream()`/`.listen()` failure must
-      // not strand the watcher without its 15-second privacy recheck loop.
+      // 실시간 구독을 열기 전에 신뢰할 수 있는 대체 동작을 시작한다. 동기식
+      // `.stream()`/`.listen()` 실패 때문에 감시자가 15초 개인정보 보호 재확인 루프 없이
+      // 고립되어서는 안 된다.
       recheckTimer = Timer.periodic(
         _lifecyclePollInterval,
         (_) => unawaited(checkAuthoritatively()),
@@ -4019,8 +3953,8 @@ class SupabaseScheduleRepository
         await cancelAll();
         return;
       }
-      // Run one authoritative read even when channel setup failed. The timer
-      // above remains active so a later network recovery can restore state.
+      // 채널 설정이 실패해도 신뢰할 수 있는 읽기를 한 번 실행한다. 위 타이머는 계속
+      // 활성 상태이므로 나중에 네트워크가 복구되면 상태를 복원할 수 있다.
       await checkAuthoritatively();
     }
 
@@ -4031,11 +3965,10 @@ class SupabaseScheduleRepository
     return controller.stream;
   }
 
-  /// Builds the group lifecycle stream used to invalidate a selected group
-  /// when a remote client archives it or removes the requester.  The same
-  /// membership/group realtime signals and periodic authoritative fallback as
-  /// [_watchRemoteEventsForUser] are used here; cancelling this stream tears
-  /// down all three Supabase channels and the timer.
+  /// 원격 클라이언트가 선택한 그룹을 보관하거나 요청자를 제거할 때 해당 그룹을
+  /// 무효화하는 그룹 수명 주기 스트림을 만든다. [_watchRemoteEventsForUser]와 같은
+  /// 멤버십/그룹 실시간 신호 및 주기적인 신뢰 가능 대체 동작을 사용한다. 이 스트림을
+  /// 취소하면 Supabase 채널 세 개와 타이머를 모두 해제한다.
   Stream<PlannerGroup?> _watchRemoteGroupLifecycle(
     String userId,
     String groupId,
@@ -4071,9 +4004,9 @@ class SupabaseScheduleRepository
       try {
         emit(await _readUsableGroup(userId, groupId), force: forceEmit);
       } catch (error, stack) {
-        // A read error is not an authoritative membership/group loss. Keep
-        // the last-known lifecycle value and let the 15-second poll retry;
-        // only a successful read returning null emits a tombstone.
+        // 읽기 오류는 확정된 멤버십/그룹 상실이 아니다. 마지막으로 알려진 수명 주기
+        // 값을 유지하고 15초 폴링이 다시 시도하게 한다. 성공한 읽기에서 `null`을 반환할
+        // 때만 툼스톤을 내보낸다.
         if (!cancelled && !controller.isClosed) {
           controller.addError(error, stack);
         }
@@ -4089,10 +4022,9 @@ class SupabaseScheduleRepository
     }
 
     void signalError(Object error, StackTrace stack) {
-      // A realtime channel error is transport state, not proof that the
-      // selected group was archived or that this member was removed. The
-      // periodic authoritative recheck remains active and owns lifecycle
-      // loss emission.
+      // 실시간 채널 오류는 전송 상태이지 선택한 그룹이 보관되었거나 이 멤버가
+      // 제거되었다는 증명이 아니다. 주기적인 신뢰 가능 재확인은 계속 활성 상태이며
+      // 수명 주기 상실 방출을 담당한다.
       if (!cancelled && !controller.isClosed) {
         controller.addError(error, stack);
       }
@@ -4109,8 +4041,8 @@ class SupabaseScheduleRepository
         try {
           await subscription.cancel();
         } catch (_) {
-          // Keep cancellation best-effort; Supabase itself closes each stream
-          // channel when its subscription is cancelled.
+          // 취소는 가능한 범위에서 수행한다. 구독이 취소되면 Supabase가 각 스트림 채널을
+          // 직접 닫는다.
         }
       }
     }
@@ -4118,9 +4050,8 @@ class SupabaseScheduleRepository
     Future<void> setup() async {
       if (setupStarted || cancelled) return;
       setupStarted = true;
-      // Keep the privacy fallback alive independently of websocket setup. A
-      // synchronous stream construction failure must still get an immediate
-      // authoritative read and subsequent 15-second retries.
+      // WebSocket 설정과 별개로 개인정보 보호 대체 동작을 활성 상태로 유지한다. 동기식 스트림
+      // 생성 실패가 발생해도 즉시 신뢰 가능한 읽기와 이후 15초 간격 재시도를 수행해야 한다.
       recheckTimer = Timer.periodic(
         _lifecyclePollInterval,
         (_) => unawaited(checkAuthoritatively(forceEmit: true)),
@@ -4131,9 +4062,8 @@ class SupabaseScheduleRepository
             .stream(primaryKey: const <String>['group_id', 'user_id'])
             .eq('group_id', groupId)
             .listen(
-              // A different member's deactivation/removal must refresh the
-              // selected group's roster too.  The authoritative read remains
-              // requester-scoped; this signal only schedules that read.
+              // 다른 멤버의 비활성화/제거도 선택한 그룹 명단을 갱신해야 한다. 신뢰할 수
+              // 있는 읽기는 계속 요청자 범위로 제한되며 이 신호는 해당 읽기만 예약한다.
               (_) => unawaited(checkAuthoritatively(forceEmit: true)),
               onError: signalError,
             );
@@ -4211,9 +4141,8 @@ class SupabaseScheduleRepository
     LocalScheduleRepository._validateGroup(name);
     LocalScheduleRepository._validateGroupDescription(description);
     validateIanaTimezone(timezone);
-    // Supabase RPCs derive the actor from auth.uid(). Deliberately do not put
-    // actorId in this payload, even though the local adapter accepts it for
-    // deterministic authorization tests.
+    // Supabase RPC는 auth.uid()에서 행위자를 유도한다. 결정론적 권한 테스트를 위해 로컬
+    // 어댑터가 actorId를 허용하더라도 이 페이로드에는 의도적으로 넣지 않는다.
     final result = await _client.rpc<dynamic>(
       'update_group_if_version',
       params: <String, dynamic>{
@@ -4229,10 +4158,9 @@ class SupabaseScheduleRepository
       row,
       groupId: groupId,
       expectedVersion: expectedVersion,
-      // The SQL RPC derives the actor from auth.uid().  Verify that the
-      // returned composite row still belongs to the caller before exposing
-      // it to the controller; an omitted or mismatched owner marker is a
-      // conflict, never a successful edit.
+      // SQL RPC는 auth.uid()에서 행위자를 유도한다. 반환된 복합 행을 컨트롤러에
+      // 노출하기 전에 여전히 호출자 소유인지 확인한다. 소유자 표시가 없거나 일치하지
+      // 않으면 충돌이며 성공한 편집으로 처리하지 않는다.
       expectedOwnerId: actorId,
     )) {
       throw const ScheduleConflictException('그룹 편집 응답을 확인할 수 없습니다.');
@@ -4245,7 +4173,7 @@ class SupabaseScheduleRepository
     required String actorId,
     required String groupId,
   }) async {
-    // auth.uid() is the sole actor source on the wire.
+    // 전송 데이터에서 유일한 행위자 출처는 auth.uid()다.
     await _client.rpc<dynamic>(
       'leave_group',
       params: <String, dynamic>{'p_group_id': groupId},
@@ -4292,9 +4220,8 @@ class SupabaseScheduleRepository
         'p_expected_version': expectedVersion,
       },
     );
-    // The RPC returns the archived composite group row.  Require the exact
-    // target, terminal deletion marker, and one-step version transition; a
-    // scalar or a row for another group must never be interpreted as success.
+    // RPC는 보관된 복합 그룹 행을 반환한다. 정확한 대상, 최종 삭제 표시, 한 단계 버전
+    // 전환을 요구한다. 스칼라나 다른 그룹의 행을 성공으로 해석해서는 안 된다.
     final row = _strictSingleRpcMap(result);
     final returnedId = row?['id'];
     final returnedVersion = _intValueNullable(row?['version']);
@@ -4321,8 +4248,8 @@ class SupabaseScheduleRepository
     if (normalizedToken == null) {
       throw const InviteUnavailableException.invalidOrExpired();
     }
-    // The caller-provided id is only a stale-session guard.  It is never sent
-    // as an RPC parameter; the database derives auth.uid() from the session.
+    // 호출자가 제공한 ID는 오래된 세션 보호 조건일 뿐이다. RPC 매개변수로 보내지 않으며
+    // 데이터베이스가 세션에서 auth.uid()를 유도한다.
     final currentUserId = currentSessionUserId;
     if (currentUserId == null || currentUserId != userId) {
       throw const ScheduleAuthorizationException('로그인 세션을 다시 확인해 주세요.');
@@ -4347,9 +4274,9 @@ class SupabaseScheduleRepository
     if (userId.trim().isEmpty) {
       throw const ScheduleValidationException('로그인 세션을 다시 확인해 주세요.');
     }
-    // The local user id is only a stale-session guard.  The RPC derives the
-    // actor from auth.uid(), so a missing or mismatched SDK session must fail
-    // closed before any bearer token is sent over the wire.
+    // 로컬 사용자 ID는 오래된 세션 보호 조건일 뿐이다. RPC는 auth.uid()에서 행위자를
+    // 유도하므로 SDK 세션이 없거나 일치하지 않으면 전달자 토큰을 전송하기 전에
+    // 실패 시 차단해야 한다.
     final currentUserId = currentSessionUserId;
     if (currentUserId == null || currentUserId != userId) {
       throw const ScheduleAuthorizationException('로그인 세션을 다시 확인해 주세요.');
@@ -4388,9 +4315,8 @@ class SupabaseScheduleRepository
           .single();
       return _groupFromRow(group);
     } catch (_) {
-      // The RPC has already inserted/reactivated membership.  Never make the
-      // caller retry the bearer token merely because this projection read
-      // failed; expose a fixed refresh error instead.
+      // RPC가 이미 멤버십을 삽입/재활성화했다. 이 프로젝션 읽기가 실패했다는 이유만으로
+      // 호출자가 전달자 토큰을 다시 시도하게 하지 말고 고정된 새로 고침 오류를 노출한다.
       throw const InviteJoinCommittedException();
     }
   }
@@ -4515,9 +4441,9 @@ class SupabaseScheduleRepository
     final memberIds = normalizedDraft.hasExplicitMemberIds
         ? canonicalEventMemberIds(normalizedDraft.memberIds)
         : null;
-    // The old direct payload used `'color_value': draft.colorValue`; the RPC
-    // keeps the same value under its explicit p_color_value argument.
-    // Legacy mapping: 'color_value': draft.colorValue.
+    // 이전 직접 페이로드는 `'color_value': draft.colorValue`를 사용했다. RPC는 명시적인
+    // p_color_value 인수에 같은 값을 유지한다.
+    // 레거시 매핑: 'color_value': draft.colorValue.
     final result = await _client.rpc<dynamic>(
       'create_event_with_members',
       params: <String, dynamic>{
@@ -4535,9 +4461,8 @@ class SupabaseScheduleRepository
             ? _dateString(normalizedDraft.allDayEndDate!)
             : null,
         'p_color_value': normalizedDraft.colorValue,
-        // NULL lets the create RPC apply its creator default.  An explicit
-        // empty list must remain [] so callers can intentionally create an
-        // unassigned event.
+        // NULL이면 생성 RPC가 작성자 기본값을 적용한다. 호출자가 배정되지 않은 일정을
+        // 의도적으로 만들 수 있도록 명시적인 빈 목록은 []로 유지해야 한다.
         'p_member_ids': memberIds,
       },
     );
@@ -4610,11 +4535,9 @@ class SupabaseScheduleRepository
     return _eventFromRow(row, memberIds: parsedMembers);
   }
 
-  /// Validates the create RPC's first materialized occurrence as a complete,
-  /// canonical response.  The row is the only authoritative result of the
-  /// atomic event/rule/member write; accepting a partial or mismatched row
-  /// would leave the controller with a phantom series that cannot be safely
-  /// retried.
+  /// 생성 RPC가 처음 구체화한 발생분을 완전한 표준 응답으로 검증한다. 이 행이 원자적
+  /// 일정/규칙/멤버 쓰기의 유일하게 신뢰할 수 있는 결과다. 일부만 있거나 일치하지 않는
+  /// 행을 허용하면 컨트롤러에 안전하게 재시도할 수 없는 유령 시리즈가 남는다.
   bool _isStrictRecurringCreateRow(
     Map<String, dynamic> row, {
     required String groupId,
@@ -4641,13 +4564,11 @@ class SupabaseScheduleRepository
       userId,
     ]);
     final returnedMembers = _strictMemberIds(row['member_ids']);
-    // The first materialized row is not necessarily the raw event anchor:
-    // monthly rules may deliberately start on a different day (for example,
-    // a Jan 15 anchor with monthly_day=31 returns Jan 31), and timezone
-    // conversion can move a wall-clock boundary across a DST transition.
-    // Reconstruct the canonical ordinal-zero projection with the same bounded
-    // arithmetic used by the local adapter instead of comparing against the
-    // input anchor instants directly.
+    // 처음 구체화된 행이 반드시 원시 일정 기준점인 것은 아니다. 월간 규칙은 의도적으로
+    // 다른 날짜에 시작할 수 있고(예: 1월 15일 기준점에서 monthly_day=31이면 1월 31일
+    // 반환), 시간대 변환으로 현지 시각 경계가 DST 전환을 넘을 수 있다. 입력 기준 시각과
+    // 직접 비교하지 말고 로컬 어댑터와 같은 제한된 계산으로 표준 순번 0 프로젝션을
+    // 재구성한다.
     final expectedSeries = PlannerEvent(
       id: id is String ? id : 'invalid',
       groupId: groupId,
@@ -4779,11 +4700,9 @@ class SupabaseScheduleRepository
             ? _dateString(normalizedDraft.allDayEndDate!)
             : null,
         'p_color_value': normalizedDraft.colorValue,
-        // The all-scope RPC requires the complete participant set so member
-        // replacement is atomic with the body/rule write.  When the draft
-        // omits members, preserve the event's current series assignment.
-        // NULL is reserved for this/future scopes, where participant edits
-        // are rejected and the server inherits the existing rows.
+        // 전체 범위 RPC는 멤버 교체가 본문/규칙 쓰기와 원자적으로 이뤄지도록 완전한 참여자
+        // 집합을 요구한다. 초안에서 멤버를 생략하면 일정의 현재 시리즈 배정을 보존한다.
+        // NULL은 참여자 편집을 거부하고 서버가 기존 행을 상속하는 `this`/`future` 범위에만 쓴다.
         'p_member_ids': scope == EventEditScope.all
             ? canonicalEventMemberIds(
                 normalizedDraft.hasExplicitMemberIds
@@ -4944,9 +4863,9 @@ class SupabaseScheduleRepository
       throw const ScheduleConflictException('이 일정을 변경할 권한이 없습니다.');
     }
     final memberIds = canonicalEventMemberIds(normalizedEvent.memberIds);
-    // The old direct payload used `'color_value': event.colorValue`; the RPC
-    // keeps the same value under its explicit p_color_value argument.
-    // Legacy mapping: 'color_value': event.colorValue.
+    // 이전 직접 페이로드는 `'color_value': event.colorValue`를 사용했다. RPC는 명시적인
+    // p_color_value 인수에 같은 값을 유지한다.
+    // 기존 매핑: 'color_value': event.colorValue.
     final result = await _client.rpc<dynamic>(
       'update_event_with_members_if_version',
       params: <String, dynamic>{
@@ -4985,8 +4904,8 @@ class SupabaseScheduleRepository
     String? actorId,
   }) async {
     final normalizedMemberIds = canonicalEventMemberIds(memberIds);
-    // actorId is intentionally ignored: authorization belongs to auth.uid()
-    // inside the SECURITY DEFINER RPC, never to caller-provided identity.
+    // actorId는 의도적으로 무시한다. 권한은 호출자가 제공한 신원이 아니라 SECURITY
+    // DEFINER RPC 안의 auth.uid()에 속한다.
     final result = await _client.rpc<dynamic>(
       'replace_event_members_if_version',
       params: <String, dynamic>{
@@ -4996,8 +4915,8 @@ class SupabaseScheduleRepository
       },
     );
     final updated = _eventFromRpcResult(result, expectedEventId: eventId);
-    // The RPC is idempotent for an unchanged canonical set and returns the
-    // expected version in that case; a changed set advances exactly once.
+    // 변경되지 않은 표준 집합에는 RPC가 멱등이며 예상 버전을 반환한다.
+    // 변경된 집합은 정확히 한 번 증가한다.
     if (updated.version != expectedVersion &&
         updated.version != expectedVersion + 1) {
       throw const ScheduleConflictException('일정이 이미 변경되었거나 권한이 없습니다.');
@@ -5018,11 +4937,9 @@ class SupabaseScheduleRepository
         'p_expected_version': expectedVersion,
       },
     );
-    // `soft_delete_event_if_version` returns exactly one composite row.  Do
-    // not accept a scalar, an empty body, or an arbitrary first row from a
-    // multi-row response: treating any of those as success would make a
-    // caller believe the event was deleted when the server contract is
-    // actually ambiguous.
+    // `soft_delete_event_if_version`은 정확히 하나의 복합 행을 반환한다. 스칼라, 빈 본문,
+    // 여러 행 응답의 임의 첫 행을 허용하지 않는다. 이를 성공으로 처리하면 서버 계약이
+    // 실제로 모호한데도 호출자는 일정이 삭제되었다고 믿게 된다.
     final row = _strictSingleRpcMap(result);
     final deletedAt = row == null
         ? null
@@ -5184,12 +5101,10 @@ class SupabaseScheduleRepository
         return false;
       }
     }
-    // Every materialized row keeps the parent event id in all three identity
-    // columns. A recurring projection is always an occurrence with a
-    // non-single ordinal key and a valid rule; a singleton projection is the
-    // only legal `single` row and must not carry a recurrence rule. These
-    // checks prevent malformed rows from being merged under a colliding
-    // composite identity or from being edited through the wrong path.
+    // 구체화된 모든 행은 식별 열 세 개에 상위 일정 ID를 유지한다. 반복 프로젝션은
+    // 항상 `single`이 아닌 순번 키와 유효한 규칙이 있는 발생분이다. 단일 프로젝션은
+    // 유일하게 유효한 `single` 행이며 반복 규칙이 있으면 안 된다. 이 검사는 잘못된 행이
+    // 충돌하는 복합 식별 정보 아래 병합되거나 잘못된 경로에서 편집되는 것을 막는다.
     if (row['series_id'] != row['id'] ||
         occurrenceVersion > (_strictVersionValue(row['version']) ?? -1) ||
         (isOccurrence &&
@@ -5215,12 +5130,10 @@ class SupabaseScheduleRepository
     return true;
   }
 
-  /// Search rows are a fixed wire projection.  Search RPC responses must
-  /// include the complete occurrence shape emitted by the v1 RPC (including
-  /// singleton rows whose occurrence key is `single`); accepting the base
-  /// event shape here would lose the tuple component required for strict v2
-  /// keyset pagination.  Arbitrary/unknown keys are rejected at this
-  /// boundary.
+  /// 검색 행은 고정된 전송 형식 프로젝션이다. 검색 RPC 응답은 v1 RPC가 내보내는 완전한
+  /// 발생 형식을 포함해야 한다. 발생 키가 `single`인 단일 행도 포함한다. 여기서 기준
+  /// 일정 형식을 허용하면 엄격한 v2 키셋 페이지 구분에 필요한 튜플 구성 요소를 잃는다.
+  /// 임의의/알 수 없는 키는 이 경계에서 거부한다.
   static bool _hasExactEventRowKeys(Map<String, dynamic> row) {
     const baseKeys = <String>{
       'id',
@@ -5270,9 +5183,8 @@ class SupabaseScheduleRepository
     final startDate = _parseDate(start);
     final endDate = _parseDate(end);
     if (!allDay) {
-      // Timed rows must not carry stale date-only metadata from a previous
-      // all-day edit.  Treating that mixture as valid would let malformed RPC
-      // payloads leak into the editor with a different temporal meaning.
+      // 시간 지정 행에는 이전 종일 편집의 오래된 날짜 전용 메타데이터가 있으면 안 된다.
+      // 이 혼합을 유효하게 처리하면 잘못된 RPC 페이로드가 다른 시간 의미로 편집기에 들어간다.
       return start == null && end == null;
     }
     if (startDate == null || endDate == null || !endDate.isAfter(startDate)) {
@@ -5280,9 +5192,8 @@ class SupabaseScheduleRepository
     }
     final timezone = row['timezone'];
     if (timezone is! String || !isValidIanaTimezone(timezone)) return false;
-    // All-day timestamps are the exact UTC instants for the local date
-    // boundaries.  This catches rows that claim a date range but contain an
-    // arbitrary timed instant (including a non-midnight offset).
+    // 종일 타임스탬프는 현지 날짜 경계의 정확한 UTC 시각이다. 이를 통해 날짜 범위를
+    // 주장하면서 자정이 아닌 오프셋을 포함한 임의의 시간 지정 시각을 담은 행을 잡는다.
     final canonicalStart = wallTimeToUtc(startDate, timezone);
     final canonicalEnd = wallTimeToUtc(endDate, timezone);
     return startsAt == canonicalStart && endsAt == canonicalEnd;
@@ -5317,8 +5228,8 @@ class SupabaseScheduleRepository
   }
 
   static InvitePreview _invitePreviewFromRpcResult(Object? result) {
-    // `preview_invite` returns jsonb, i.e. one JSON object.  Unlike table RPC
-    // rows, a one-element array is not a valid response and must fail closed.
+    // `preview_invite`는 jsonb, 즉 JSON 객체 하나를 반환한다. 테이블 RPC 행과 달리
+    // 원소 하나짜리 배열은 유효한 응답이 아니며 실패 시 차단해야 한다.
     final row = _strictInvitePreviewMap(result);
     if (row == null || row['valid'] is! bool) {
       throw const ScheduleCapabilityException('초대 미리보기 응답을 확인할 수 없습니다.');
@@ -5416,8 +5327,8 @@ class SupabaseScheduleRepository
   }
 
   static bool _hasGroupFields(Map<String, dynamic> row) {
-    // Composite RPC/results and lifecycle reads should carry these fields. A
-    // partial object is rejected instead of fabricating a group from defaults.
+    // 복합 RPC/결과와 수명 주기 읽기에는 이 필드들이 있어야 한다. 기본값으로 그룹을
+    // 꾸며 내지 않고 일부만 있는 객체는 거부한다.
     return row['id'] is String &&
         (row['id'] as String).isNotEmpty &&
         row['owner_id'] is String &&
@@ -5504,9 +5415,9 @@ class SupabaseScheduleRepository
       if (hasMore != (nextCursor != null)) {
         throw const FormatException('일정 페이지 응답을 확인해 주세요.');
       }
-      // A true continuation flag is meaningful only when the server returned
-      // a complete requested page. Accepting a short page with has_more=true
-      // can make the client repeat a cursor forever or silently skip rows.
+      // `true` 연속 여부 플래그는 서버가 요청한 완전한 페이지를 반환했을 때만 의미가 있다.
+      // 짧은 페이지에서 `has_more=true`를 허용하면 클라이언트가 커서를 영구히 반복하거나
+      // 행을 조용히 건너뛸 수 있다.
       if (hasMore && rawEvents.length != limit) {
         throw const FormatException('일정 페이지 응답을 확인해 주세요.');
       }
@@ -5575,11 +5486,9 @@ class SupabaseScheduleRepository
     }
   }
 
-  /// Validates the complete active-group row returned by an optimistic group
-  /// RPC.  A successful HTTP/RPC response is not enough: an empty, multi-row,
-  /// partial, stale, cross-group, or archived row is converted to a safe
-  /// conflict rather than being accepted or refetched through a broader RLS
-  /// query.
+  /// 낙관적 그룹 RPC가 반환한 완전한 활성 그룹 행을 검증한다. 성공한 HTTP/RPC
+  /// 응답만으로는 충분하지 않다. 비어 있거나 여러 개, 일부만 있거나 오래됨, 다른 그룹,
+  /// 보관된 행은 허용하거나 더 넓은 RLS 쿼리로 다시 가져오지 않고 안전한 충돌로 바꾼다.
   static bool _isValidActiveGroupMutationRow(
     Map<String, dynamic>? row, {
     required String groupId,
@@ -5591,10 +5500,9 @@ class SupabaseScheduleRepository
     if (_intValueNullable(row['version']) != expectedVersion + 1) {
       return false;
     }
-    // The SQL contract names this column deleted_at.  Accept camelCase only
-    // for a hand-written adapter, but require an explicit null marker either
-    // way so an omitted/partial lifecycle field cannot be mistaken for an
-    // active group.
+    // SQL 계약에서 이 열 이름은 deleted_at이다. 직접 작성한 어댑터에만 camelCase를
+    // 허용하되 어느 쪽이든 명시적인 `null` 표시를 요구한다. 그래야 생략되거나 일부만 있는
+    // 수명 주기 필드를 활성 그룹으로 잘못 판단하지 않는다.
     final hasDeletedAt = row.containsKey('deleted_at');
     final hasDeletedCamel = row.containsKey('deletedAt');
     if (!hasDeletedAt && !hasDeletedCamel) return false;
@@ -5755,8 +5663,8 @@ class SupabaseScheduleRepository
       ids.sort();
       return List<String>.unmodifiable(ids);
     }
-    // Old event rows had no child projection.  Keep their creator-only
-    // interpretation, while explicit `member_ids: []` remains an empty set.
+    // 이전 일정 행에는 하위 프로젝션이 없었다. 작성자 전용 해석을 유지하되 명시적인
+    // `member_ids: []`는 빈 집합으로 남긴다.
     return List<String>.unmodifiable(<String>[ownerId]);
   }
 
@@ -5765,18 +5673,16 @@ class SupabaseScheduleRepository
   static DateTime? _dateTimeValue(Object? value) =>
       value == null ? null : DateTime.tryParse('$value')?.toUtc();
 
-  /// Parses a wire timestamp only when its offset/UTC marker is explicit.
-  /// DateTime.tryParse accepts timezone-less strings in the host's local
-  /// timezone, which would make an RPC response vary by device location.
+  /// 오프셋/UTC 표시가 명시된 전송 타임스탬프만 파싱한다. DateTime.tryParse는 시간대가
+  /// 없는 문자열을 호스트의 로컬 시간대로 허용하므로 RPC 응답이 기기 위치에 따라 달라진다.
   static DateTime? _strictDateTimeValue(Object? value) {
     return parseStrictExplicitOffsetTimestamp(value);
   }
 
-  /// Lifecycle columns on the v2 JSON projection are wire timestamps, not
-  /// already-typed Dart values. Require the explicit offset/Z shape there so
-  /// `_eventFromRow` cannot silently reinterpret a timezone-less value in the
-  /// device timezone (or fall back to a different timestamp). Legacy table
-  /// and realtime adapters keep their permissive parser for compatibility.
+  /// v2 JSON 프로젝션의 수명 주기 열은 이미 형식이 지정된 Dart 값이 아니라 전송
+  /// 타임스탬프다. 여기서는 명시적인 오프셋/Z 형식을 요구하여 `_eventFromRow`가 시간대
+  /// 없는 값을 기기 시간대로 조용히 재해석하거나 다른 타임스탬프로 대체하지 못하게 한다.
+  /// 기존 테이블 및 실시간 어댑터는 호환성을 위해 관대한 파서를 유지한다.
   static DateTime? _lifecycleTimestamp(Object? value, {required bool strict}) {
     if (strict && value is! String) return null;
     return strict ? _strictDateTimeValue(value) : _dateTimeValue(value);
@@ -5787,9 +5693,8 @@ class SupabaseScheduleRepository
   static int? _intValueNullable(Object? value) {
     if (value is int) return value;
     if (value is num) {
-      // RPC version/count fields are integral contract values.  Do not let
-      // `toInt()` truncate a fractional, NaN, or infinite JSON number into a
-      // value that can accidentally satisfy optimistic-concurrency checks.
+      // RPC 버전/개수 필드는 정수 계약 값이다. `toInt()`가 소수, NaN, 무한대 JSON
+      // 숫자를 잘라 낙관적 동시성 검사를 우연히 통과하는 값으로 만들지 못하게 한다.
       if (!value.isFinite || value != value.truncate()) return null;
       return value.toInt();
     }

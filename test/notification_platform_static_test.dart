@@ -39,7 +39,7 @@ void main() {
     mainSource = File('lib/main.dart').readAsStringSync();
   });
 
-  test('dependencies stay local-only and exactly pinned', () {
+  test('의존성이 로컬 전용이며 정확한 버전으로 고정된다', () {
     expect(
       pubspec,
       matches(
@@ -67,7 +67,7 @@ void main() {
     expect(pubspec, isNot(contains('firebase_messaging:')));
   });
 
-  test('Android manifest has only local scheduling permissions and receivers', () {
+  test('Android 매니페스트에 로컬 예약 권한과 receiver만 있다', () {
     expect(
       androidManifest,
       contains(
@@ -116,7 +116,7 @@ void main() {
     expect(strings, contains('moduly_reminders'));
   });
 
-  test('Apple local notifications do not add remote-push capabilities', () {
+  test('Apple 로컬 알림이 원격 푸시 기능을 추가하지 않는다', () {
     expect(iosAppDelegate, contains('import UserNotifications'));
     expect(
       iosAppDelegate,
@@ -143,42 +143,42 @@ void main() {
     }
   });
 
-  test('release builds retain the local notification icon resource', () {
+  test('릴리스 빌드가 로컬 알림 아이콘 리소스를 유지한다', () {
     final keep = File(
       'android/app/src/main/res/raw/keep.xml',
     ).readAsStringSync();
     expect(keep, contains('tools:keep="@drawable/ic_stat_moduly"'));
   });
 
-  test('web remains server-push unconfigured and has no Firebase worker', () {
+  test('웹은 서버 푸시 미설정 상태이며 Firebase 작업자가 없다', () {
     expect(webIndex, isNot(contains('firebase-messaging-sw.js')));
     expect(webIndex, isNot(contains('firebase.initializeApp')));
     expect(File('web/firebase-messaging-sw.js').existsSync(), isFalse);
   });
 
-  test('local demo never claims native delivery capability', () {
+  test('로컬 데모가 네이티브 전달 기능을 지원한다고 표시하지 않는다', () {
     expect(notificationBindings, contains('else if (client == null)'));
     expect(
       notificationBindings,
       contains('state: NotificationCapabilityState.unconfigured'),
     );
-    expect(notificationBindings, contains('UUID-backed auth fence'));
+    expect(notificationBindings, contains('UUID 기반 인증 경계'));
   });
 
-  test('bootstrap loads the complete timezone alias dataset', () {
+  test('부트스트랩이 완전한 시간대 별칭 데이터셋을 불러온다', () {
     expect(
       mainSource,
       contains("package:timezone/data/latest_all.dart' as tzdata"),
     );
   });
 
-  test('README documents local limits and future provider blockers', () {
-    expect(readme, contains('Local reminders (Feature 3)'));
+  test('README가 로컬 제한과 향후 공급자 차단 요인을 설명한다', () {
+    expect(readme, contains('로컬 알림(기능 3)'));
     expect(readme, contains('inexactAllowWhileIdle'));
     expect(readme, contains('60 days'));
     expect(readme, contains('48'));
     expect(readme, contains('unconfigured'));
-    expect(readme, contains('at-least-once'));
+    expect(readme, contains('최소 한 번'));
     expect(readme, contains('APNs'));
     expect(readme, contains('VAPID'));
     expect(readme, contains('cron'));

@@ -9,18 +9,14 @@ void main() {
     final file = File(
       'supabase/migrations/20260907130000_skip_orphan_membership_audit.sql',
     );
-    expect(
-      file.existsSync(),
-      isTrue,
-      reason: 'The account-deletion audit cascade migration is required',
-    );
+    expect(file.existsSync(), isTrue, reason: '계정 삭제 감사 연쇄 처리 마이그레이션이 필요하다');
     migration = file.readAsStringSync().toLowerCase().replaceAll(
       RegExp(r'\s+'),
       ' ',
     );
   });
 
-  test('skips only audit rows whose group was already deleted', () {
+  test('이미 그룹이 삭제된 감사 행만 건너뛴다', () {
     final guard = migration.indexOf('if v_group_id is not null');
     final auditInsert = migration.indexOf('insert into public.audit_logs');
     expect(guard, greaterThanOrEqualTo(0));
@@ -34,7 +30,7 @@ void main() {
     expect(migration, isNot(contains('pg_trigger_depth')));
   });
 
-  test('retains trigger security and the minimal audit payload', () {
+  test('트리거 보안과 최소 감사 페이로드를 유지한다', () {
     expect(migration, contains('security definer'));
     expect(migration, contains('set search_path = public, auth, extensions'));
     expect(migration, contains('jsonb_build_object(\'version\', v_version)'));
