@@ -14,6 +14,7 @@ import 'package:moduly/repositories/auth_repository.dart';
 import 'package:moduly/repositories/schedule_repository.dart';
 import 'package:moduly/screens/event_editor_screen.dart';
 import 'package:moduly/state/app_state.dart';
+import 'package:moduly/state/notification_state.dart';
 
 const _user = PlannerUser(id: 'user-1', email: 'user@example.com');
 const _group = PlannerGroup(
@@ -95,6 +96,285 @@ class _MemberFailureRepository extends LocalScheduleRepository {
     watchStarted = true;
     return Stream<List<PlannerEvent>>.value(const <PlannerEvent>[]);
   }
+}
+
+class _RefreshGatedRecurringRepository extends LocalScheduleRepository {
+  final Completer<EventRangePage> refresh = Completer<EventRangePage>();
+  int refreshCalls = 0;
+
+  @override
+  bool get useBoundedEventRangeReads => true;
+
+  @override
+  Future<PlannerEvent> createRecurringEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  ) async => PlannerEvent(
+    id: 'refresh-gated-series',
+    groupId: groupId,
+    title: draft.title,
+    startAt: draft.startAt,
+    endAt: draft.endAt,
+    ownerId: userId,
+    memberIds: <String>[userId],
+    timezone: draft.timezone,
+    recurrenceRule: draft.recurrence,
+    occurrenceKey: occurrenceKeyForIndex(0),
+    isOccurrence: true,
+  );
+
+  @override
+  Future<EventRangePage> eventsForRange({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    EventRangeCursor? cursor,
+    int limit = 100,
+    String? participantId,
+  }) {
+    refreshCalls += 1;
+    return refresh.future;
+  }
+}
+
+class _LegacyRecurringRefreshRepository extends LocalScheduleRepository {
+  late PlannerEvent created;
+
+  @override
+  bool get useBoundedEventRangeReads => false;
+
+  @override
+  Future<List<PlannerGroup>> groupsForUser(String userId) async =>
+      userId == _user.id
+      ? const <PlannerGroup>[_group]
+      : const <PlannerGroup>[];
+
+  @override
+  Future<List<PlannerMember>> membersForGroup(String groupId) async =>
+      groupId == _group.id
+      ? const <PlannerMember>[
+          PlannerMember(
+            id: 'user-1',
+            name: 'User',
+            email: 'user@example.com',
+            isOwner: true,
+          ),
+        ]
+      : const <PlannerMember>[];
+
+  @override
+  Stream<List<PlannerEvent>> watchEventsForUser(
+    String userId,
+    String groupId,
+  ) => Stream<List<PlannerEvent>>.value(<PlannerEvent>[created]);
+
+  @override
+  Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId) =>
+      Stream<PlannerGroup?>.value(_group);
+
+  @override
+  Future<PlannerEvent> createRecurringEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  ) async {
+    created = PlannerEvent(
+      id: 'legacy-created-series',
+      groupId: groupId,
+      title: draft.title,
+      startAt: draft.startAt,
+      endAt: draft.endAt,
+      ownerId: userId,
+      memberIds: <String>[userId],
+      timezone: draft.timezone,
+      recurrenceRule: draft.recurrence,
+      occurrenceKey: occurrenceKeyForIndex(0),
+      isOccurrence: true,
+    );
+    return created;
+  }
+}
+
+class _MalformedRecurringCreateRepository extends LocalScheduleRepository {
+  @override
+  bool get useBoundedEventRangeReads => true;
+
+  @override
+  Future<PlannerEvent> createRecurringEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  ) async => PlannerEvent(
+    id: 'malformed-recurring-series',
+    groupId: groupId,
+    title: draft.title,
+    startAt: draft.startAt,
+    endAt: draft.endAt,
+    ownerId: userId,
+    memberIds: <String>[userId],
+    timezone: draft.timezone,
+    version: 99,
+    recurrenceRule: draft.recurrence,
+    occurrenceKey: occurrenceKeyForIndex(0),
+    isOccurrence: true,
+  );
+
+  @override
+  Future<EventRangePage> eventsForRange({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    EventRangeCursor? cursor,
+    int limit = 100,
+    String? participantId,
+  }) async => EventRangePage.empty();
+}
+
+class _ConcurrentLegacyRefreshRepository extends LocalScheduleRepository {
+  final Completer<void> groupReadStarted = Completer<void>();
+  final Completer<List<PlannerGroup>> groupRead =
+      Completer<List<PlannerGroup>>();
+  final Completer<void> singleCreateStarted = Completer<void>();
+  final Completer<PlannerEvent> singleCreate = Completer<PlannerEvent>();
+
+  @override
+  bool get useBoundedEventRangeReads => false;
+
+  @override
+  Future<PlannerEvent> createRecurringEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  ) async => PlannerEvent(
+    id: 'concurrent-series',
+    groupId: groupId,
+    title: draft.title,
+    startAt: draft.startAt,
+    endAt: draft.endAt,
+    ownerId: userId,
+    memberIds: <String>[userId],
+    timezone: draft.timezone,
+    recurrenceRule: draft.recurrence,
+    occurrenceKey: occurrenceKeyForIndex(0),
+    isOccurrence: true,
+  );
+
+  @override
+  Future<PlannerEvent> createEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  ) {
+    if (!singleCreateStarted.isCompleted) singleCreateStarted.complete();
+    return singleCreate.future;
+  }
+
+  @override
+  Future<List<PlannerGroup>> groupsForUser(String userId) {
+    if (!groupReadStarted.isCompleted) groupReadStarted.complete();
+    return groupRead.future;
+  }
+
+  @override
+  Future<List<PlannerMember>> membersForGroup(String groupId) async =>
+      const <PlannerMember>[
+        PlannerMember(
+          id: 'user-1',
+          name: 'User',
+          email: 'user@example.com',
+          isOwner: true,
+        ),
+      ];
+
+  @override
+  Future<List<InviteCode>> inviteCodesForGroup(String groupId) async =>
+      const <InviteCode>[];
+
+  @override
+  Stream<List<PlannerEvent>> watchEventsForUser(
+    String userId,
+    String groupId,
+  ) => const Stream<List<PlannerEvent>>.empty();
+
+  @override
+  Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId) =>
+      const Stream<PlannerGroup?>.empty();
+}
+
+class _QueuedRangeRefreshRepository extends LocalScheduleRepository {
+  final Completer<void> firstReadStarted = Completer<void>();
+  final Completer<void> secondReadStarted = Completer<void>();
+  final Completer<EventRangePage> firstRead = Completer<EventRangePage>();
+  final Completer<EventRangePage> secondRead = Completer<EventRangePage>();
+  int readCalls = 0;
+
+  @override
+  bool get useBoundedEventRangeReads => true;
+
+  @override
+  Future<EventRangePage> eventsForRange({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    EventRangeCursor? cursor,
+    int limit = 100,
+    String? participantId,
+  }) {
+    readCalls += 1;
+    if (readCalls == 1) {
+      firstReadStarted.complete();
+      return firstRead.future;
+    }
+    secondReadStarted.complete();
+    return secondRead.future;
+  }
+
+  @override
+  Future<RecurrenceMutationReceipt> updateEventOccurrence({
+    required PlannerEvent event,
+    required EventDraft draft,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+    String? actorId,
+  }) async => RecurrenceMutationReceipt(
+    groupId: event.groupId,
+    eventId: event.id,
+    occurrenceKey: event.occurrenceKey,
+    seriesVersion: expectedSeriesVersion + 1,
+    occurrenceVersion: scope == EventEditScope.thisOccurrence
+        ? expectedOccurrenceVersion + 1
+        : 0,
+    scope: scope,
+  );
+}
+
+class _FailingNotificationSink implements NotificationInvalidationSink {
+  _FailingNotificationSink({this.throwSynchronously = false});
+
+  final bool throwSynchronously;
+
+  @override
+  Future<void> onEventChanged({String? eventId, String? groupId}) {
+    if (throwSynchronously) throw StateError('sync notification failure');
+    return Future<void>.error(StateError('async notification failure'));
+  }
+
+  @override
+  Future<void> cancelForGroup(String groupId) async {}
+
+  @override
+  Future<void> onAuthenticated(String userId) async {}
+
+  @override
+  Future<void> onMembershipChanged({String? eventId, String? groupId}) async {}
+
+  @override
+  Future<void> onSignedOut() async {}
+
+  @override
+  Future<void> reconcile({DateTime? nowUtc}) async {}
 }
 
 class _RecordingRpcTransport extends http.BaseClient {
@@ -181,7 +461,7 @@ void main() {
       controller.user = _user;
       controller.selectedGroup = _group;
 
-      await controller.saveEvent(
+      final result = await controller.saveEvent(
         draft: EventDraft(
           title: 'Created remotely',
           startAt: DateTime.utc(2026, 8, 14, 16),
@@ -190,6 +470,10 @@ void main() {
       );
 
       expect(repository.created, isNotNull);
+      expect(result, isA<EventSaveSnapshot>());
+      final saved = (result! as EventSaveSnapshot).event;
+      expect(saved.id, repository.created!.id);
+      expect(saved, controller.events.single);
       expect(
         controller.events.map((event) => event.id),
         contains(repository.created!.id),
@@ -220,7 +504,7 @@ void main() {
     );
     controller.events = <PlannerEvent>[existing];
 
-    await controller.saveEvent(
+    final result = await controller.saveEvent(
       existing: existing,
       draft: EventDraft(
         title: 'After',
@@ -232,8 +516,56 @@ void main() {
 
     expect(repository.updated?.title, 'After');
     expect(repository.updated?.version, 5);
+    expect(result, isA<EventSaveSnapshot>());
+    final saved = (result! as EventSaveSnapshot).event;
+    expect(saved.id, repository.updated!.id);
+    expect(saved.version, repository.updated!.version);
+    expect(saved, controller.events.single);
     expect(controller.events.single.title, 'After');
     expect(controller.events.single.version, 5);
+  });
+
+  test('알림 부수 효과의 동기·비동기 오류가 저장 결과 밖으로 새지 않는다', () async {
+    for (final synchronous in <bool>[true, false]) {
+      final repository = _SilentCreateRepository();
+      final auth = _CurrentAuth();
+      final uncaught = <Object>[];
+      final controller = PlannerController(
+        auth: auth,
+        repository: repository,
+        notifications: _FailingNotificationSink(
+          throwSynchronously: synchronous,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      controller.user = _user;
+      controller.selectedGroup = _group;
+
+      EventSaveResult? result;
+      Object? saveError;
+      await (runZonedGuarded<Future<void>>(() async {
+            try {
+              result = await controller.saveEvent(
+                draft: EventDraft(
+                  title: 'Committed despite notification failure',
+                  startAt: DateTime.utc(2026, 8, 14, 16),
+                  endAt: DateTime.utc(2026, 8, 14, 17),
+                ),
+              );
+            } catch (error) {
+              saveError = error;
+            }
+            await Future<void>.delayed(Duration.zero);
+          }, (error, _) => uncaught.add(error)) ??
+          Future<void>.value());
+
+      expect(saveError, isNull, reason: 'synchronous=$synchronous');
+      expect(result, isA<EventSaveSnapshot>());
+      expect(uncaught, isEmpty, reason: 'synchronous=$synchronous');
+      expect(controller.events.single.id, repository.created!.id);
+      controller.dispose();
+      auth.dispose();
+    }
   });
 
   test(
@@ -329,7 +661,7 @@ void main() {
         count: 2,
       );
 
-      await controller.saveEvent(
+      final recurringResult = await controller.saveEvent(
         existing: single,
         draft: EventDraft(
           title: single.title,
@@ -340,6 +672,12 @@ void main() {
           memberIds: single.memberIds,
         ),
       );
+      expect(recurringResult, isA<EventSaveReceipt>());
+      final recurringReceipt = (recurringResult! as EventSaveReceipt).receipt;
+      expect(recurringReceipt.eventId, single.id);
+      expect(recurringReceipt.occurrenceKey, 'single');
+      expect(recurringReceipt.scope, EventEditScope.all);
+      expect(recurringReceipt.changed, isTrue);
       var rows = (await repository.eventsForRange(
         userId: demo.id,
         groupId: group.id,
@@ -353,7 +691,7 @@ void main() {
 
       final occurrence = rows.first;
       controller.events = <PlannerEvent>[occurrence];
-      await controller.saveEvent(
+      final singletonResult = await controller.saveEvent(
         existing: occurrence,
         draft: EventDraft(
           title: 'converted back',
@@ -363,6 +701,12 @@ void main() {
           memberIds: occurrence.memberIds,
         ),
       );
+      expect(singletonResult, isA<EventSaveReceipt>());
+      final singletonReceipt = (singletonResult! as EventSaveReceipt).receipt;
+      expect(singletonReceipt.eventId, occurrence.id);
+      expect(singletonReceipt.occurrenceKey, occurrence.occurrenceKey);
+      expect(singletonReceipt.scope, EventEditScope.all);
+      expect(singletonReceipt.changed, isTrue);
       rows = (await repository.eventsForRange(
         userId: demo.id,
         groupId: group.id,
@@ -375,6 +719,258 @@ void main() {
       expect(rows.single.title, 'converted back');
     },
   );
+
+  test('반복 저장 후 새로고침 중 그룹이 바뀌면 오래된 성공 결과를 반환하지 않는다', () async {
+    final repository = _RefreshGatedRecurringRepository();
+    final auth = _CurrentAuth();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await Future<void>.delayed(Duration.zero);
+    controller.user = _user;
+    controller.selectedGroup = _group;
+    controller.selectedEventRange = EventRange(
+      startUtc: DateTime.utc(2026, 8, 1),
+      endUtc: DateTime.utc(2026, 9, 1),
+      viewTimezone: 'UTC',
+    );
+
+    final saving = controller.saveEvent(
+      draft: EventDraft(
+        title: 'Recurring stale result',
+        startAt: DateTime.utc(2026, 8, 14, 16),
+        endAt: DateTime.utc(2026, 8, 14, 17),
+        recurrence: RecurrenceRule(
+          frequency: RecurrenceFrequency.daily,
+          end: RecurrenceEnd.count,
+          count: 2,
+        ),
+      ),
+    );
+    while (repository.refreshCalls == 0) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    controller.selectedGroup = const PlannerGroup(
+      id: 'different-group',
+      name: 'Different',
+      timezone: 'UTC',
+    );
+    repository.refresh.complete(EventRangePage.empty());
+
+    expect(await saving, isNull);
+  });
+
+  test('레거시 새로고침 자체는 반복 생성의 typed snapshot을 무효화하지 않는다', () async {
+    final repository = _LegacyRecurringRefreshRepository();
+    final auth = _CurrentAuth(currentUser: null);
+    final controller = PlannerController(auth: auth, repository: repository)
+      ..user = _user
+      ..groups = const <PlannerGroup>[_group]
+      ..selectedGroup = _group;
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+
+    final result = await controller.saveEvent(
+      draft: EventDraft(
+        title: 'Legacy recurring create',
+        startAt: DateTime.utc(2026, 9, 8, 9),
+        endAt: DateTime.utc(2026, 9, 8, 10),
+        recurrence: RecurrenceRule(
+          frequency: RecurrenceFrequency.daily,
+          end: RecurrenceEnd.count,
+          count: 2,
+        ),
+      ),
+    );
+
+    expect(result, isA<EventSaveSnapshot>());
+    expect((result! as EventSaveSnapshot).event.id, repository.created.id);
+    expect(controller.selectedGroup?.id, _group.id);
+  });
+
+  test('반복 생성의 비정상 버전을 typed snapshot으로 신뢰하지 않는다', () async {
+    final repository = _MalformedRecurringCreateRepository();
+    final auth = _CurrentAuth(currentUser: null);
+    final controller = PlannerController(auth: auth, repository: repository)
+      ..user = _user
+      ..selectedGroup = _group
+      ..selectedEventRange = EventRange(
+        startUtc: DateTime.utc(2026, 9, 1),
+        endUtc: DateTime.utc(2026, 10, 1),
+        viewTimezone: 'UTC',
+      );
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+
+    await expectLater(
+      controller.saveEvent(
+        draft: EventDraft(
+          title: 'Malformed version',
+          startAt: DateTime.utc(2026, 9, 8, 9),
+          endAt: DateTime.utc(2026, 9, 8, 10),
+          recurrence: RecurrenceRule(
+            frequency: RecurrenceFrequency.daily,
+            end: RecurrenceEnd.count,
+            count: 2,
+          ),
+        ),
+      ),
+      throwsA(isA<ScheduleConflictException>()),
+    );
+    expect(controller.events, isEmpty);
+  });
+
+  test('레거시 새로고침 중 시작한 같은 그룹 저장의 typed 결과를 무효화하지 않는다', () async {
+    final repository = _ConcurrentLegacyRefreshRepository();
+    final auth = _CurrentAuth(currentUser: null);
+    final controller = PlannerController(auth: auth, repository: repository)
+      ..user = _user
+      ..groups = const <PlannerGroup>[_group]
+      ..selectedGroup = _group;
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+
+    final firstSave = controller.saveEvent(
+      draft: EventDraft(
+        title: 'First recurring save',
+        startAt: DateTime.utc(2026, 9, 8, 9),
+        endAt: DateTime.utc(2026, 9, 8, 10),
+        recurrence: RecurrenceRule(
+          frequency: RecurrenceFrequency.daily,
+          end: RecurrenceEnd.count,
+          count: 2,
+        ),
+      ),
+    );
+    await repository.groupReadStarted.future;
+
+    final secondSave = controller.saveEvent(
+      draft: EventDraft(
+        title: 'Second single save',
+        startAt: DateTime.utc(2026, 9, 8, 11),
+        endAt: DateTime.utc(2026, 9, 8, 12),
+      ),
+    );
+    await repository.singleCreateStarted.future;
+    repository.groupRead.complete(const <PlannerGroup>[_group]);
+    expect(await firstSave, isNull);
+
+    repository.singleCreate.complete(
+      PlannerEvent(
+        id: 'second-single',
+        groupId: _group.id,
+        title: 'Second single save',
+        startAt: DateTime.utc(2026, 9, 8, 11),
+        endAt: DateTime.utc(2026, 9, 8, 12),
+        ownerId: _user.id,
+        memberIds: const <String>['user-1'],
+        timezone: 'UTC',
+      ),
+    );
+
+    final secondResult = await secondSave;
+    expect(secondResult, isA<EventSaveSnapshot>());
+    expect((secondResult! as EventSaveSnapshot).event.id, 'second-single');
+  });
+
+  test('진행 중인 범위 조회 뒤 반복 저장은 queued authoritative refresh까지 기다린다', () async {
+    final repository = _QueuedRangeRefreshRepository();
+    final auth = _CurrentAuth(currentUser: null);
+    final rule = RecurrenceRule(
+      frequency: RecurrenceFrequency.daily,
+      end: RecurrenceEnd.count,
+      count: 2,
+    );
+    final existing = PlannerEvent(
+      id: 'queued-series',
+      seriesId: 'queued-series',
+      groupId: _group.id,
+      title: 'Before queued refresh',
+      startAt: DateTime.utc(2026, 9, 8, 9),
+      endAt: DateTime.utc(2026, 9, 8, 10),
+      ownerId: _user.id,
+      memberIds: const <String>['user-1'],
+      timezone: 'UTC',
+      occurrenceKey: occurrenceKeyForIndex(0),
+      occurrenceIndex: 0,
+      occurrenceVersion: 0,
+      isOccurrence: true,
+      recurrenceRule: rule,
+    );
+    final refreshed = existing.copyWith(
+      title: 'After queued refresh',
+      version: 2,
+      updatedAt: DateTime.utc(2026, 9, 8, 12),
+    );
+    final range = EventRange(
+      startUtc: DateTime.utc(2026, 9, 1),
+      endUtc: DateTime.utc(2026, 10, 1),
+      viewTimezone: 'UTC',
+    );
+    final controller = PlannerController(auth: auth, repository: repository)
+      ..user = _user
+      ..selectedGroup = _group
+      ..selectedEventRange = range
+      ..events = <PlannerEvent>[existing];
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+
+    final initialRefresh = controller.refreshSelectedEventRange(force: true);
+    await repository.firstReadStarted.future;
+    var saveCompleted = false;
+    final saving = controller
+        .saveEvent(
+          existing: existing,
+          draft: EventDraft(
+            title: refreshed.title,
+            startAt: existing.startAt,
+            endAt: existing.endAt,
+            timezone: existing.timezone,
+            recurrence: rule,
+            memberIds: existing.memberIds,
+          ),
+          scope: EventEditScope.all,
+        )
+        .whenComplete(() => saveCompleted = true);
+    await Future<void>.delayed(Duration.zero);
+
+    final completedBeforeQueuedRefresh = saveCompleted;
+    repository.firstRead.complete(
+      EventRangePage(
+        events: <PlannerEvent>[existing],
+        nextCursor: null,
+        hasMore: false,
+      ),
+    );
+    await repository.secondReadStarted.future;
+    final completedWhileQueuedRefresh = saveCompleted;
+
+    repository.secondRead.complete(
+      EventRangePage(
+        events: <PlannerEvent>[refreshed],
+        nextCursor: null,
+        hasMore: false,
+      ),
+    );
+    await initialRefresh;
+    final result = await saving;
+
+    expect(completedBeforeQueuedRefresh, isFalse);
+    expect(completedWhileQueuedRefresh, isFalse);
+    expect(result, isA<EventSaveReceipt>());
+    expect(controller.events.single.version, 2);
+    expect(controller.events.single.title, refreshed.title);
+  });
 
   test(
     'saveEvent routes recurring member-only changes through assignment capability',

@@ -130,7 +130,7 @@ class HomeScreen extends ConsumerWidget {
             ),
             if (controller.isOffline)
               Text(
-                '오프라인 · 마지막으로 저장된 일정',
+                '동기화 문제 · 새로고침이 필요해요',
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: scheme.onSurfaceVariant,
                 ),

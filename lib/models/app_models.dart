@@ -1037,6 +1037,30 @@ class PlannerEvent {
   ]);
 }
 
+/// Preserves the exact result committed by an event mutation.
+///
+/// Single-row writes return a validated event snapshot, while recurring scope
+/// writes return a commit receipt. Keeping them as distinct result types avoids
+/// reconstructing mutation identity from a refreshed projection.
+@immutable
+sealed class EventSaveResult {
+  const EventSaveResult();
+}
+
+@immutable
+final class EventSaveSnapshot extends EventSaveResult {
+  const EventSaveSnapshot(this.event);
+
+  final PlannerEvent event;
+}
+
+@immutable
+final class EventSaveReceipt extends EventSaveResult {
+  const EventSaveReceipt(this.receipt);
+
+  final RecurrenceMutationReceipt receipt;
+}
+
 @immutable
 class EventDraft {
   EventDraft({

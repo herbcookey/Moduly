@@ -11,6 +11,30 @@ import '../models/notification_models.dart';
 import '../state/notification_state.dart';
 import 'notification_settings_screen.dart';
 
+enum _DataSyncStatus { localPreview, connecting, syncing, synced, issue }
+
+_DataSyncStatus _dataSyncStatus({
+  required PlannerController controller,
+  required bool configured,
+  required bool ready,
+  required bool initializationFailed,
+}) {
+  if (!configured) return _DataSyncStatus.localPreview;
+  if (initializationFailed || controller.isOffline) {
+    return _DataSyncStatus.issue;
+  }
+  if (!ready) return _DataSyncStatus.connecting;
+  if (controller.isLoading ||
+      controller.isSaving ||
+      controller.isLoadingEvents ||
+      controller.isLoadingMoreEvents ||
+      controller.isSearching ||
+      controller.isLoadingMoreSearch) {
+    return _DataSyncStatus.syncing;
+  }
+  return _DataSyncStatus.synced;
+}
+
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
@@ -20,6 +44,12 @@ class SettingsScreen extends ConsumerWidget {
     final config = ref.watch(appConfigProvider);
     final supabaseError = ref.watch(supabaseInitializationErrorProvider);
     final supabaseReady = ref.watch(supabaseReadyProvider);
+    final syncStatus = _dataSyncStatus(
+      controller: controller,
+      configured: config.hasSupabase,
+      ready: supabaseReady,
+      initializationFailed: supabaseError != null,
+    );
     final user = controller.user;
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
@@ -77,15 +107,6 @@ class SettingsScreen extends ConsumerWidget {
                 ),
               ),
             ),
-          ] else if (config.hasSupabase && !supabaseReady) ...<Widget>[
-            const SizedBox(height: 12),
-            const Card(
-              child: ListTile(
-                leading: Icon(Icons.info_outline),
-                title: Text('오프라인 미리보기'),
-                subtitle: Text('Supabase가 설정되지 않아 로컬 데이터로 실행 중입니다.'),
-              ),
-            ),
           ],
           const SizedBox(height: 20),
           Text(
@@ -122,6 +143,29 @@ class SettingsScreen extends ConsumerWidget {
               ],
             ),
           ),
+          if (controller.appearancePreferencesError case final message?)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(
+                children: <Widget>[
+                  Icon(Icons.error_outline, size: 18, color: scheme.error),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(message, style: TextStyle(color: scheme.error)),
+                  ),
+                  if (message == '화면 설정을 저장하지 못했어요.')
+                    TextButton(
+                      onPressed: controller.retryAppearancePreferencesSave,
+                      child: const Text('다시 저장'),
+                    )
+                  else if (message == '화면 설정을 불러오지 못했어요.')
+                    TextButton(
+                      onPressed: controller.retryAppearancePreferencesLoad,
+                      child: const Text('다시 불러오기'),
+                    ),
+                ],
+              ),
+            ),
           const SizedBox(height: 20),
           Text(
             '알림',
@@ -201,17 +245,28 @@ class SettingsScreen extends ConsumerWidget {
             child: Column(
               children: <Widget>[
                 ListTile(
-                  leading: Icon(
-                    controller.isOffline
-                        ? Icons.cloud_off_outlined
-                        : Icons.cloud_done_outlined,
-                  ),
-                  title: Text(controller.isOffline ? '오프라인 모드' : '동기화 중'),
-                  subtitle: Text(
-                    controller.isOffline
-                        ? '연결되면 변경사항을 동기화해요.'
-                        : '모든 멤버와 최신 상태를 유지해요.',
-                  ),
+                  leading: Icon(switch (syncStatus) {
+                    _DataSyncStatus.localPreview => Icons.storage_outlined,
+                    _DataSyncStatus.connecting => Icons.cloud_queue_outlined,
+                    _DataSyncStatus.syncing => Icons.sync,
+                    _DataSyncStatus.synced => Icons.cloud_done_outlined,
+                    _DataSyncStatus.issue => Icons.sync_problem_outlined,
+                  }),
+                  title: Text(switch (syncStatus) {
+                    _DataSyncStatus.localPreview => '로컬 미리보기',
+                    _DataSyncStatus.connecting => '연결 준비 중',
+                    _DataSyncStatus.syncing => '동기화 중',
+                    _DataSyncStatus.synced => '동기화됨',
+                    _DataSyncStatus.issue => '동기화 문제',
+                  }),
+                  subtitle: Text(switch (syncStatus) {
+                    _DataSyncStatus.localPreview =>
+                      '이 기기의 데모 데이터로 실행 중이며 서버와 동기화하지 않아요.',
+                    _DataSyncStatus.connecting => '원격 데이터 연결을 준비하고 있어요.',
+                    _DataSyncStatus.syncing => '원격 데이터를 주고받고 있어요.',
+                    _DataSyncStatus.synced => '원격 데이터 연결이 정상적으로 준비됐어요.',
+                    _DataSyncStatus.issue => '데이터를 새로고침해 다시 확인해 주세요.',
+                  }),
                 ),
                 const Divider(height: 1),
                 ListTile(

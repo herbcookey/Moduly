@@ -903,14 +903,16 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     }
     var reminderDisabledByMembership = false;
     try {
-      await controller.saveEvent(
+      final saveResult = await controller.saveEvent(
         existing: existingDraft,
         draft: draft,
         scope: scope,
       );
-      final savedEvent = existing == null
-          ? _findCreatedEvent(controller, draft)
-          : _findUpdatedEvent(controller, existing);
+      // Authentication or group selection may change while the mutation is
+      // in flight. Do not report success or write a reminder for a stale
+      // result that the controller intentionally discarded.
+      if (saveResult == null) return;
+      final savedEvent = _eventForSaveResult(controller, saveResult);
       if (savedEvent != null) {
         if (currentUserId != null &&
             !savedEvent.memberIds.contains(currentUserId)) {
@@ -1033,28 +1035,26 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     _notificationDraftVersion = selected.version;
   }
 
-  PlannerEvent? _findCreatedEvent(
+  PlannerEvent? _eventForSaveResult(
     PlannerController controller,
-    EventDraft draft,
+    EventSaveResult result,
   ) {
-    final groupId = controller.selectedGroup?.id;
-    final ownerId = controller.user?.id;
-    if (groupId == null || ownerId == null) return null;
-    final matches =
+    return switch (result) {
+      EventSaveSnapshot(:final event) => event,
+      EventSaveReceipt(:final receipt) =>
         controller.events
             .where(
               (event) =>
-                  event.groupId == groupId &&
-                  event.ownerId == ownerId &&
-                  event.title == draft.title &&
-                  event.startAt == draft.startAt.toUtc() &&
-                  event.endAt == draft.endAt.toUtc() &&
-                  event.allDay == draft.allDay &&
+                  event.groupId == receipt.groupId &&
+                  event.seriesId == receipt.eventId &&
+                  event.occurrenceKey == receipt.occurrenceKey &&
+                  event.version == receipt.seriesVersion &&
+                  (receipt.scope != EventEditScope.thisOccurrence ||
+                      event.occurrenceVersion == receipt.occurrenceVersion) &&
                   !event.isDeleted,
             )
-            .toList()
-          ..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
-    return matches.firstOrNull;
+            .firstOrNull,
+    };
   }
 
   PlannerEvent? _findUpdatedEvent(
@@ -1075,7 +1075,7 @@ class _EventEditorScreenState extends ConsumerState<EventEditorScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('참여자는 저장했지만 알림 설정을 저장하지 못했어요. 최신 일정을 불러온 뒤 다시 시도해 주세요.'),
+        content: Text('일정은 저장했지만 알림 설정을 저장하지 못했어요. 최신 일정을 불러온 뒤 다시 시도해 주세요.'),
       ),
     );
   }

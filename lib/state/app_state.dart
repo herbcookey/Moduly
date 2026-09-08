@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../core/appearance_preferences.dart';
 import '../core/config/app_config.dart';
 import '../core/invite_link.dart';
 import '../core/invite_code_utils.dart';
@@ -30,6 +31,10 @@ final supabaseInitializationErrorProvider = Provider<String?>((ref) => null);
 /// 진단 정보와 분리해 두면 디버그/프로필 빌드는 로컬 데모를 계속 사용할
 /// 수 있고, 릴리스 빌드는 컨트롤러나 로컬 저장소를 만들기 전에 차단된다.
 final releaseConfigurationErrorProvider = Provider<String?>((ref) => null);
+
+final appearancePreferencesStoreProvider = Provider<AppearancePreferencesStore>(
+  (ref) => SharedPreferencesAppearancePreferencesStore(),
+);
 
 /// 로컬 미리보기 어댑터를 선택할 수 있는지 나타낸다. main.dart가 일반
 /// 위젯 트리를 만들기 전에 릴리스 오류를 전달하며, 이 공급자는 추가
@@ -105,6 +110,7 @@ final plannerControllerProvider = ChangeNotifierProvider<PlannerController>((
   final controller = PlannerController(
     auth: ref.watch(authRepositoryProvider),
     repository: ref.watch(scheduleRepositoryProvider),
+    appearancePreferencesStore: ref.watch(appearancePreferencesStoreProvider),
     // The notification controller is an invalidation sink, not planner
     // input. Watching it would recreate PlannerController on every
     // permission/reconcile notify and feed an auth/bootstrap loop back into
@@ -124,6 +130,7 @@ class PlannerController extends ChangeNotifier {
     PendingInviteStore? pendingInviteStore,
     Duration pendingInviteTtl = const Duration(minutes: 30),
     Duration searchDebounce = const Duration(milliseconds: 300),
+    AppearancePreferencesStore? appearancePreferencesStore,
   }) : _auth = auth,
        _repository = repository,
        _notifications = notifications,
@@ -131,7 +138,9 @@ class PlannerController extends ChangeNotifier {
        _pendingInviteStore =
            pendingInviteStore ?? createDefaultPendingInviteStore(),
        _pendingInviteTtl = pendingInviteTtl,
-       _searchDebounce = searchDebounce {
+       _searchDebounce = searchDebounce,
+       _appearancePreferencesStore =
+           appearancePreferencesStore ?? MemoryAppearancePreferencesStore() {
     if (pendingInviteTtl <= Duration.zero) {
       throw ArgumentError.value(
         pendingInviteTtl,
@@ -155,6 +164,7 @@ class PlannerController extends ChangeNotifier {
       },
     );
     _pendingHydration = _hydratePendingInvite();
+    _appearancePreferencesHydration = _hydrateAppearancePreferences();
     unawaited(bootstrap());
   }
 
@@ -165,7 +175,35 @@ class PlannerController extends ChangeNotifier {
   final PendingInviteStore _pendingInviteStore;
   final Duration _pendingInviteTtl;
   final Duration _searchDebounce;
+  final AppearancePreferencesStore _appearancePreferencesStore;
   late final Future<void> _pendingHydration;
+  late final Future<void> _appearancePreferencesHydration;
+  Future<void> _appearancePreferencesWriteQueue = Future<void>.value();
+  int _appearancePreferencesRevision = 0;
+  bool _darkModeChangedDuringHydration = false;
+  bool _textScaleChangedDuringHydration = false;
+  bool _appearancePreferencesHydrated = false;
+  bool _appearancePreferencesLoadInFlight = false;
+  bool _appearancePreferencesWritePending = false;
+
+  Future<void> get appearancePreferencesReady =>
+      _appearancePreferencesHydration;
+
+  Future<void> settleAppearancePreferences() async {
+    await _appearancePreferencesHydration;
+    await _appearancePreferencesWriteQueue;
+  }
+
+  /// Notification reconciliation follows already-committed planner changes.
+  /// Neither a synchronous throw nor an asynchronously rejected future may
+  /// escape as an unhandled error or reverse the original mutation.
+  void _runNotificationSideEffect(
+    Future<void> Function(NotificationInvalidationSink notifications) operation,
+  ) {
+    final notifications = _notifications;
+    if (notifications == null) return;
+    Future<void>.sync(() => operation(notifications)).ignore();
+  }
 
   PlannerUser? user;
   List<PlannerGroup> groups = const <PlannerGroup>[];
@@ -205,6 +243,7 @@ class PlannerController extends ChangeNotifier {
   bool isOffline = false;
   bool darkMode = false;
   double textScale = 1;
+  String? appearancePreferencesError;
   String? errorMessage;
   AuthFlowState authFlowState = AuthFlowState.signedOut;
   String? pendingConfirmationEmail;
@@ -280,6 +319,8 @@ class PlannerController extends ChangeNotifier {
   bool _rangeLoadMoreInFlight = false;
   int? _rangeLoadMoreOwnerGeneration;
   bool _rangeRefreshQueued = false;
+  Completer<void>? _rangeQueuedRefreshCompleter;
+  final Set<Completer<void>> _rangeRefreshAwaiters = <Completer<void>>{};
   Timer? _rangeInvalidationTimer;
   String? _rangeKey;
   // Search is an independent projection from the selected calendar range.
@@ -503,7 +544,9 @@ class PlannerController extends ChangeNotifier {
         user = existing;
         authFlowState = AuthFlowState.signedIn;
         _bindPendingInviteToUser(existing.id);
-        unawaited(_notifications?.onAuthenticated(existing.id));
+        _runNotificationSideEffect(
+          (notifications) => notifications.onAuthenticated(existing!.id),
+        );
         await loadGroups();
       } else {
         authFlowState = AuthFlowState.signedOut;
@@ -813,7 +856,10 @@ class PlannerController extends ChangeNotifier {
       if (!groups.any((candidate) => candidate.id == joined.id)) {
         groups = <PlannerGroup>[...groups, joined];
       }
-      unawaited(_notifications?.onMembershipChanged(groupId: joined.id));
+      _runNotificationSideEffect(
+        (notifications) =>
+            notifications.onMembershipChanged(groupId: joined.id),
+      );
       try {
         await selectGroup(joined.id);
       } catch (error) {
@@ -1779,7 +1825,9 @@ class PlannerController extends ChangeNotifier {
     authFlowState = AuthFlowState.signedIn;
     pendingConfirmationEmail = null;
     errorMessage = null;
-    unawaited(_notifications?.onAuthenticated(authenticated.id));
+    _runNotificationSideEffect(
+      (notifications) => notifications.onAuthenticated(authenticated.id),
+    );
     await loadGroups();
   }
 
@@ -1809,6 +1857,17 @@ class PlannerController extends ChangeNotifier {
     if (user?.id != userId) return false;
     if (groupId != null && selectedGroup?.id != groupId) return false;
     return true;
+  }
+
+  bool _isOperationGenerationCurrent(
+    int generation, {
+    required String userId,
+    required String groupId,
+  }) {
+    return !_disposed &&
+        _operationGeneration == generation &&
+        user?.id == userId &&
+        selectedGroup?.id == groupId;
   }
 
   void _startSaving(int operation) {
@@ -2119,7 +2178,7 @@ class PlannerController extends ChangeNotifier {
     // Notification state has its own serialized privacy boundary. Queue the
     // sign-out cancellation before clearing the planner identity so a stale
     // account cannot retain local reminders during account switches.
-    unawaited(_notifications?.onSignedOut());
+    _runNotificationSideEffect((notifications) => notifications.onSignedOut());
     if (invalidateOperation) {
       _operationToken++;
       _operationGeneration++;
@@ -2330,7 +2389,9 @@ class PlannerController extends ChangeNotifier {
     if (incoming == null || incoming.isArchived) {
       // Do not await before clearing state: a remote archive/null event must
       // immediately hide the group's private data and invalidate callbacks.
-      unawaited(_notifications?.cancelForGroup(groupId));
+      _runNotificationSideEffect(
+        (notifications) => notifications.cancelForGroup(groupId),
+      );
       final clear = _invalidateGroupScopedData(removeGroupId: groupId);
       await clear;
       return;
@@ -2499,10 +2560,12 @@ class PlannerController extends ChangeNotifier {
           .where((group) => !_terminalGroupTombstones.contains(group.id))
           .toList(growable: false);
       if (!_isCurrentPlannerContext(
-        operation,
-        userId: current.id,
-        selectedGroupId: selectedGroupId,
-      )) {
+            operation,
+            userId: current.id,
+            selectedGroupId: selectedGroupId,
+          ) ||
+          (preserveOperationGeneration &&
+              _operationGeneration != operationGeneration)) {
         return;
       }
       groups = List<PlannerGroup>.unmodifiable(fetchedGroups);
@@ -2704,6 +2767,7 @@ class PlannerController extends ChangeNotifier {
                 return;
               }
               streamFailed = true;
+              isOffline = true;
               errorMessage = _friendlyError(error);
               notifyListeners();
             },
@@ -2801,6 +2865,8 @@ class PlannerController extends ChangeNotifier {
               )) {
                 return;
               }
+              streamFailed = true;
+              isOffline = true;
               errorMessage = _friendlyError(error);
               notifyListeners();
             },
@@ -3185,7 +3251,9 @@ class PlannerController extends ChangeNotifier {
       // account's native reminders.  If A -> B completed while this RPC was
       // in flight, B's namespace must not be cancelled; B's own auth fence
       // performs any required old-account cleanup.
-      unawaited(_notifications?.cancelForGroup(groupId));
+      _runNotificationSideEffect(
+        (notifications) => notifications.cancelForGroup(groupId),
+      );
       // Invalidate synchronously before any reload/cancellation await. A
       // failing network reload must not resurrect the left group.  This is
       // intentionally performed even when another selection/auth operation
@@ -3349,7 +3417,9 @@ class PlannerController extends ChangeNotifier {
       }
       // Match leaveGroup's session fence: an old account's terminal RPC may
       // still settle after A -> B, but it must never purge B's native set.
-      unawaited(_notifications?.cancelForGroup(groupId));
+      _runNotificationSideEffect(
+        (notifications) => notifications.cancelForGroup(groupId),
+      );
       // Remove the archived group before awaiting stream cancellation or a
       // network reload. This terminal invalidation survives reload failures
       // and is applied even if a concurrent group switch made this callback
@@ -3735,7 +3805,9 @@ class PlannerController extends ChangeNotifier {
         return;
       }
       _setMembersSnapshot(refreshedMembers);
-      unawaited(_notifications?.onMembershipChanged(groupId: groupId));
+      _runNotificationSideEffect(
+        (notifications) => notifications.onMembershipChanged(groupId: groupId),
+      );
     } catch (error) {
       if (_isOperationCurrent(
         operation,
@@ -3864,12 +3936,22 @@ class PlannerController extends ChangeNotifier {
     isLoadingEvents = false;
     isLoadingMoreEvents = false;
     rangeError = null;
-    _rangeRefreshQueued = false;
+    _releaseQueuedRangeRefreshWaiters();
     _rangeRefreshInFlight = false;
     _rangeRefreshOwnerGeneration = null;
     _rangeLoadMoreInFlight = false;
     _rangeLoadMoreOwnerGeneration = null;
     if (clearRange) selectedEventRange = null;
+  }
+
+  void _releaseQueuedRangeRefreshWaiters() {
+    _rangeRefreshQueued = false;
+    _rangeQueuedRefreshCompleter = null;
+    final waiters = _rangeRefreshAwaiters.toList(growable: false);
+    _rangeRefreshAwaiters.clear();
+    for (final waiter in waiters) {
+      if (!waiter.isCompleted) waiter.complete();
+    }
   }
 
   void _resetSearchState({bool clearQuery = true}) {
@@ -3964,7 +4046,7 @@ class PlannerController extends ChangeNotifier {
     // A new range supersedes any in-flight first-page/load-more request. Old
     // futures retain their captured generation and therefore cannot clear or
     // overwrite the flags owned by this new request.
-    _rangeRefreshQueued = false;
+    _releaseQueuedRangeRefreshWaiters();
     _rangeRefreshInFlight = false;
     _rangeRefreshOwnerGeneration = null;
     _rangeLoadMoreInFlight = false;
@@ -4127,6 +4209,9 @@ class PlannerController extends ChangeNotifier {
     if (current == null || group == null || range == null) return;
     if (_rangeRefreshInFlight) {
       _rangeRefreshQueued = true;
+      final completion = _rangeQueuedRefreshCompleter ??= Completer<void>();
+      _rangeRefreshAwaiters.add(completion);
+      await completion.future;
       return;
     }
     if (!force && events.isNotEmpty) return;
@@ -4209,7 +4294,8 @@ class PlannerController extends ChangeNotifier {
         notifyListeners();
       }
     } finally {
-      if (_rangeRefreshOwnerGeneration == rangeGeneration) {
+      final ownsRangeRefresh = _rangeRefreshOwnerGeneration == rangeGeneration;
+      if (ownsRangeRefresh) {
         _rangeRefreshInFlight = false;
         _rangeRefreshOwnerGeneration = null;
         isLoadingEvents = false;
@@ -4225,24 +4311,32 @@ class PlannerController extends ChangeNotifier {
           notifyListeners();
         }
       }
-      if (_rangeRefreshQueued && !_disposed) {
+      if (ownsRangeRefresh && _rangeRefreshQueued) {
         _rangeRefreshQueued = false;
-        if (_isCurrentRangeContext(
-          plannerRevision: _plannerRevision,
-          sessionGeneration: _plannerSessionGeneration,
-          rangeGeneration: _rangeGeneration,
-          userId: current.id,
-          groupId: group.id,
-          range: range,
-          rangeKey: _rangeKey ?? rangeKey,
-        )) {
-          unawaited(
-            _fetchRangeFirstPage(
+        final completion = _rangeQueuedRefreshCompleter;
+        _rangeQueuedRefreshCompleter = null;
+        try {
+          if (!_disposed &&
+              _isCurrentRangeContext(
+                plannerRevision: _plannerRevision,
+                sessionGeneration: _plannerSessionGeneration,
+                rangeGeneration: _rangeGeneration,
+                userId: current.id,
+                groupId: group.id,
+                range: range,
+                rangeKey: _rangeKey ?? rangeKey,
+              )) {
+            await _fetchRangeFirstPage(
               force: true,
               preserveCurrentEvents: true,
               advanceGeneration: true,
-            ),
-          );
+            );
+          }
+        } finally {
+          if (completion != null) {
+            _rangeRefreshAwaiters.remove(completion);
+            if (!completion.isCompleted) completion.complete();
+          }
         }
       }
     }
@@ -4980,7 +5074,7 @@ class PlannerController extends ChangeNotifier {
     }
   }
 
-  Future<void> saveEvent({
+  Future<EventSaveResult?> saveEvent({
     PlannerEvent? existing,
     required EventDraft draft,
     EventEditScope scope = EventEditScope.all,
@@ -4994,6 +5088,7 @@ class PlannerController extends ChangeNotifier {
       throw error;
     }
     final operation = _beginOperation();
+    final operationGeneration = _operationGeneration;
     final revision = _plannerRevision;
     final userId = current.id;
     final groupId = group.id;
@@ -5025,13 +5120,13 @@ class PlannerController extends ChangeNotifier {
             groupId: groupId,
             plannerRevision: revision,
           )) {
-            return;
+            return null;
           }
           final normalizedCreated = _validatedEventMutationResult(
             created,
             expectedGroupId: groupId,
             expectedOwnerId: userId,
-            expectedVersion: created.version,
+            expectedVersion: 1,
             requestedMemberIds: normalizedDraft.hasExplicitMemberIds
                 ? requestedMemberIds
                 : <String>[userId],
@@ -5041,7 +5136,14 @@ class PlannerController extends ChangeNotifier {
           notificationEventId = created.id;
           notificationMutationCommitted = true;
           await refreshSelectedEventRange(force: true);
-          return;
+          if (!_isOperationGenerationCurrent(
+            operationGeneration,
+            userId: userId,
+            groupId: groupId,
+          )) {
+            return null;
+          }
+          return EventSaveSnapshot(normalizedCreated);
         }
         // A capable adapter promises atomic event+participant creation.  A
         // legacy adapter may still create the default creator-only event only
@@ -5064,7 +5166,7 @@ class PlannerController extends ChangeNotifier {
           groupId: groupId,
           plannerRevision: revision,
         )) {
-          return;
+          return null;
         }
         final normalizedCreated = _validatedEventMutationResult(
           created,
@@ -5084,6 +5186,7 @@ class PlannerController extends ChangeNotifier {
         _upsertEvent(normalizedCreated);
         notificationEventId = created.id;
         notificationMutationCommitted = true;
+        return EventSaveSnapshot(normalizedCreated);
       } else {
         if (existing.groupId != groupId || existing.isDeleted) {
           throw const ScheduleConflictException('일정을 찾을 수 없습니다.');
@@ -5142,7 +5245,7 @@ class PlannerController extends ChangeNotifier {
               groupId: groupId,
               plannerRevision: revision,
             )) {
-              return;
+              return null;
             }
             _validateRecurringMemberReceipt(
               receipt,
@@ -5152,8 +5255,15 @@ class PlannerController extends ChangeNotifier {
             if (receipt.changed) {
               notificationMutationCommitted = true;
               await refreshSelectedEventRange(force: true);
+              if (!_isOperationGenerationCurrent(
+                operationGeneration,
+                userId: userId,
+                groupId: groupId,
+              )) {
+                return null;
+              }
             }
-            return;
+            return EventSaveReceipt(receipt);
           }
           final memberRepository = _repository;
           if (memberRepository is! EventMemberAssignmentCapability) {
@@ -5175,7 +5285,7 @@ class PlannerController extends ChangeNotifier {
             groupId: groupId,
             plannerRevision: revision,
           )) {
-            return;
+            return null;
           }
           final normalizedUpdated = _validatedEventMutationResult(
             updated,
@@ -5192,11 +5302,18 @@ class PlannerController extends ChangeNotifier {
               (existing.recurrenceRule != null ||
                   existing.occurrenceKey != 'single')) {
             await refreshSelectedEventRange(force: true);
+            if (!_isOperationGenerationCurrent(
+              operationGeneration,
+              userId: userId,
+              groupId: groupId,
+            )) {
+              return null;
+            }
           } else {
             _upsertEvent(normalizedUpdated);
           }
           notificationMutationCommitted = true;
-          return;
+          return EventSaveSnapshot(normalizedUpdated);
         }
         if (existing.ownerId != userId) {
           throw const ScheduleConflictException('이 일정은 작성자만 변경할 수 있습니다.');
@@ -5223,7 +5340,7 @@ class PlannerController extends ChangeNotifier {
             groupId: groupId,
             plannerRevision: revision,
           )) {
-            return;
+            return null;
           }
           if (receipt.groupId != groupId ||
               receipt.eventId != existing.id ||
@@ -5245,8 +5362,15 @@ class PlannerController extends ChangeNotifier {
           if (receipt.changed) {
             notificationMutationCommitted = true;
             await refreshSelectedEventRange(force: true);
+            if (!_isOperationGenerationCurrent(
+              operationGeneration,
+              userId: userId,
+              groupId: groupId,
+            )) {
+              return null;
+            }
           }
-          return;
+          return EventSaveReceipt(receipt);
         }
         final existingMemberIds = canonicalEventMemberIds(existing.memberIds);
         final legacyMembersChanged = !_sameMemberIdSet(
@@ -5280,19 +5404,19 @@ class PlannerController extends ChangeNotifier {
           groupId: groupId,
           plannerRevision: revision,
         )) {
-          return;
+          return null;
         }
-        _upsertEvent(
-          _validatedEventMutationResult(
-            updated,
-            expectedEventId: existing.id,
-            expectedGroupId: groupId,
-            expectedOwnerId: existing.ownerId,
-            expectedVersion: existing.version + 1,
-            requestedMemberIds: existingRequestedMemberIds,
-          ),
+        final normalizedUpdated = _validatedEventMutationResult(
+          updated,
+          expectedEventId: existing.id,
+          expectedGroupId: groupId,
+          expectedOwnerId: existing.ownerId,
+          expectedVersion: existing.version + 1,
+          requestedMemberIds: existingRequestedMemberIds,
         );
+        _upsertEvent(normalizedUpdated);
         notificationMutationCommitted = true;
+        return EventSaveSnapshot(normalizedUpdated);
       }
     } catch (error) {
       if (_isOperationCurrent(
@@ -5306,8 +5430,8 @@ class PlannerController extends ChangeNotifier {
       rethrow;
     } finally {
       if (notificationMutationCommitted) {
-        unawaited(
-          _notifications?.onEventChanged(
+        _runNotificationSideEffect(
+          (notifications) => notifications.onEventChanged(
             eventId: notificationEventId,
             groupId: groupId,
           ),
@@ -5405,8 +5529,8 @@ class PlannerController extends ChangeNotifier {
         );
         if (receipt.changed) {
           await refreshSelectedEventRange(force: true);
-          unawaited(
-            _notifications?.onMembershipChanged(
+          _runNotificationSideEffect(
+            (notifications) => notifications.onMembershipChanged(
               eventId: event.id,
               groupId: groupId,
             ),
@@ -5442,8 +5566,8 @@ class PlannerController extends ChangeNotifier {
       } else {
         _upsertEvent(normalizedUpdated);
       }
-      unawaited(
-        _notifications?.onMembershipChanged(
+      _runNotificationSideEffect(
+        (notifications) => notifications.onMembershipChanged(
           eventId: event.id,
           groupId: groupId,
         ),
@@ -5720,8 +5844,8 @@ class PlannerController extends ChangeNotifier {
       rethrow;
     } finally {
       if (notificationDeletionCommitted) {
-        unawaited(
-          _notifications?.onEventChanged(
+        _runNotificationSideEffect(
+          (notifications) => notifications.onEventChanged(
             eventId: event.id,
             groupId: event.groupId,
           ),
@@ -5731,14 +5855,114 @@ class PlannerController extends ChangeNotifier {
     }
   }
 
+  Future<void> _hydrateAppearancePreferences() async {
+    if (_appearancePreferencesLoadInFlight || _disposed) return;
+    _appearancePreferencesLoadInFlight = true;
+    try {
+      final loaded = await _appearancePreferencesStore.load();
+      if (_disposed) return;
+      final darkModeWasChanged = _darkModeChangedDuringHydration;
+      final textScaleWasChanged = _textScaleChangedDuringHydration;
+      if (loaded != null) {
+        final scale = loaded.textScale;
+        if (!scale.isFinite ||
+            scale < AppearancePreferences.minTextScale ||
+            scale > AppearancePreferences.maxTextScale) {
+          throw const FormatException('화면 설정을 확인해 주세요.');
+        }
+        if (!darkModeWasChanged) darkMode = loaded.darkMode;
+        if (!textScaleWasChanged) textScale = scale;
+      }
+      _appearancePreferencesHydrated = true;
+      appearancePreferencesError = null;
+      notifyListeners();
+      // Merge changes made while the initial read was pending and persist one
+      // authoritative snapshot instead of briefly overwriting untouched data.
+      if (_appearancePreferencesWritePending) {
+        _appearancePreferencesWritePending = false;
+        _persistAppearancePreferences();
+      }
+    } catch (_) {
+      if (_disposed) return;
+      _appearancePreferencesHydrated = false;
+      appearancePreferencesError = '화면 설정을 불러오지 못했어요.';
+      notifyListeners();
+    } finally {
+      _appearancePreferencesLoadInFlight = false;
+    }
+  }
+
+  void _persistAppearancePreferences() {
+    if (!_appearancePreferencesHydrated) {
+      _appearancePreferencesWritePending = true;
+      return;
+    }
+    final revision = _appearancePreferencesRevision;
+    final snapshot = AppearancePreferences(
+      darkMode: darkMode,
+      textScale: textScale,
+    );
+    final write = _appearancePreferencesWriteQueue.then(
+      (_) => _appearancePreferencesStore.save(snapshot),
+    );
+    // Consume a failed write so later slider changes still reach storage.
+    // Only the latest UI revision is allowed to update the visible status.
+    _appearancePreferencesWriteQueue = write.then<void>(
+      (_) {
+        if (_disposed || revision != _appearancePreferencesRevision) return;
+        if (appearancePreferencesError != null) {
+          appearancePreferencesError = null;
+          notifyListeners();
+        }
+      },
+      onError: (Object _, StackTrace stack) {
+        if (_disposed || revision != _appearancePreferencesRevision) return;
+        appearancePreferencesError = '화면 설정을 저장하지 못했어요.';
+        notifyListeners();
+      },
+    );
+  }
+
   void toggleDarkMode(bool value) {
+    _appearancePreferencesRevision += 1;
+    _darkModeChangedDuringHydration = true;
     darkMode = value;
+    if (_appearancePreferencesHydrated) appearancePreferencesError = null;
     notifyListeners();
+    _persistAppearancePreferences();
   }
 
   void setTextScale(double value) {
-    textScale = value.clamp(0.9, 1.25);
+    if (!value.isFinite) return;
+    _appearancePreferencesRevision += 1;
+    _textScaleChangedDuringHydration = true;
+    textScale = value
+        .clamp(
+          AppearancePreferences.minTextScale,
+          AppearancePreferences.maxTextScale,
+        )
+        .toDouble();
+    if (_appearancePreferencesHydrated) appearancePreferencesError = null;
     notifyListeners();
+    _persistAppearancePreferences();
+  }
+
+  void retryAppearancePreferencesSave() {
+    if (!_appearancePreferencesHydrated) {
+      unawaited(retryAppearancePreferencesLoad());
+      return;
+    }
+    _appearancePreferencesRevision += 1;
+    appearancePreferencesError = null;
+    notifyListeners();
+    _persistAppearancePreferences();
+  }
+
+  Future<void> retryAppearancePreferencesLoad() async {
+    if (_disposed || _appearancePreferencesLoadInFlight) return;
+    appearancePreferencesError = null;
+    notifyListeners();
+    await _hydrateAppearancePreferences();
   }
 
   void clearError() {

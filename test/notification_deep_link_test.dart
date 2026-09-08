@@ -101,8 +101,11 @@ PlannerController _planner(_Auth auth, _Schedule schedule) {
 
 Widget _app(
   PlannerController planner,
-  FlutterLocalNotificationScheduler scheduler,
-) {
+  FlutterLocalNotificationScheduler scheduler, {
+  NotificationController? notifications,
+  Future<void>? schedulerReady,
+  bool supplySchedulerReady = true,
+}) {
   final router = GoRouter(
     initialLocation: '/home',
     routes: <RouteBase>[
@@ -117,9 +120,11 @@ Widget _app(
       ),
     ],
   );
-  final notificationController = NotificationController(
-    repository: ConfigurationBlockedNotificationRepository('test'),
-  );
+  final notificationController =
+      notifications ??
+      NotificationController(
+        repository: ConfigurationBlockedNotificationRepository('test'),
+      );
   return ProviderScope(
     overrides: <Override>[
       plannerControllerProvider.overrideWith((ref) => planner),
@@ -132,11 +137,46 @@ Widget _app(
       routerConfig: router,
       builder: (context, child) => NotificationLifecycleBinding(
         router: router,
-        schedulerReady: Future<void>.value(),
+        schedulerReady: supplySchedulerReady
+            ? schedulerReady ?? Future<void>.value()
+            : null,
         child: child ?? const SizedBox.shrink(),
       ),
     ),
   );
+}
+
+class _FailingResumeNotificationController extends NotificationController {
+  _FailingResumeNotificationController()
+    : super(repository: ConfigurationBlockedNotificationRepository('test'));
+
+  @override
+  Future<void> onResume() =>
+      Future<void>.error(StateError('resume notification failure'));
+}
+
+class _RecordingNotificationController extends NotificationController {
+  _RecordingNotificationController()
+    : super(repository: ConfigurationBlockedNotificationRepository('test'));
+
+  final List<String> authenticatedUsers = <String>[];
+
+  @override
+  Future<void> onAuthenticated(String userId) async {
+    authenticatedUsers.add(userId);
+  }
+}
+
+class _SynchronouslyFailingScheduler extends FlutterLocalNotificationScheduler {
+  _SynchronouslyFailingScheduler() : super(supportedPlatformOverride: true);
+
+  int initializeCalls = 0;
+
+  @override
+  Future<bool> initialize() {
+    initializeCalls += 1;
+    throw StateError('synchronous scheduler initialization failure');
+  }
 }
 
 NotificationPayload _payload(String eventId) =>
@@ -147,6 +187,125 @@ Future<void> _settle(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets(
+    'synchronous platform-ready errors do not escape lifecycle callbacks',
+    (tester) async {
+      final auth = _Auth();
+      final schedule = _Schedule();
+      final planner = _planner(auth, schedule);
+      final scheduler = _SynchronouslyFailingScheduler();
+      addTearDown(auth.dispose);
+
+      await tester.pumpWidget(
+        _app(planner, scheduler, supplySchedulerReady: false),
+      );
+      await tester.pump();
+
+      expect(scheduler.initializeCalls, greaterThanOrEqualTo(2));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('planner identity sync retries after platform-ready failure', (
+    tester,
+  ) async {
+    final auth = _Auth();
+    final schedule = _Schedule();
+    final planner = _planner(auth, schedule);
+    final firstInitialization = Completer<bool>();
+    var initializeCalls = 0;
+    final scheduler = FlutterLocalNotificationScheduler(
+      supportedPlatformOverride: true,
+      initializeOverride: () {
+        initializeCalls += 1;
+        if (initializeCalls == 1) return firstInitialization.future;
+        return Future<bool>.value(true);
+      },
+    );
+    final notifications = _RecordingNotificationController();
+    addTearDown(auth.dispose);
+
+    await tester.pumpWidget(
+      _app(
+        planner,
+        scheduler,
+        notifications: notifications,
+        supplySchedulerReady: false,
+      ),
+    );
+    await tester.pump();
+    expect(initializeCalls, 1);
+
+    planner.notifyListeners();
+    await tester.pump();
+    expect(initializeCalls, 1);
+
+    firstInitialization.completeError(
+      StateError('first scheduler initialization failure'),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(notifications.authenticatedUsers, isEmpty);
+    expect(tester.takeException(), isNull);
+
+    planner.notifyListeners();
+    await tester.pump();
+    await tester.pump();
+
+    expect(initializeCalls, 2);
+    expect(notifications.authenticatedUsers, <String>[_user.id]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('async platform-ready errors do not escape lifecycle futures', (
+    tester,
+  ) async {
+    final auth = _Auth();
+    final schedule = _Schedule();
+    final planner = _planner(auth, schedule);
+    final scheduler = FlutterLocalNotificationScheduler(
+      supportedPlatformOverride: true,
+      initializeOverride: () async => true,
+    );
+    final schedulerReady = Completer<void>();
+    addTearDown(auth.dispose);
+
+    await tester.pumpWidget(
+      _app(planner, scheduler, schedulerReady: schedulerReady.future),
+    );
+    await tester.pump();
+    schedulerReady.completeError(
+      StateError('scheduler initialization failure'),
+    );
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('resume notification errors do not escape lifecycle callbacks', (
+    tester,
+  ) async {
+    final auth = _Auth();
+    final schedule = _Schedule();
+    final planner = _planner(auth, schedule);
+    final scheduler = FlutterLocalNotificationScheduler(
+      supportedPlatformOverride: true,
+      initializeOverride: () async => true,
+    );
+    final notifications = _FailingResumeNotificationController();
+    addTearDown(auth.dispose);
+
+    await tester.pumpWidget(
+      _app(planner, scheduler, notifications: notifications),
+    );
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('distinct warm taps each open after authoritative validation', (
     tester,
   ) async {

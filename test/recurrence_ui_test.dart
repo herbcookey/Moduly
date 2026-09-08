@@ -77,6 +77,25 @@ class _SingletonConversionRepository extends LocalScheduleRepository {
   int? replacementExpectedVersion;
 
   @override
+  Future<List<PlannerGroup>> groupsForUser(String userId) async =>
+      userId == _user.id
+      ? const <PlannerGroup>[_group]
+      : const <PlannerGroup>[];
+
+  @override
+  Future<List<PlannerMember>> membersForGroup(String groupId) async =>
+      groupId == _group.id
+      ? const <PlannerMember>[
+          PlannerMember(
+            id: _userId,
+            name: '반복 사용자',
+            email: 'recurrence@example.com',
+            isOwner: true,
+          ),
+        ]
+      : const <PlannerMember>[];
+
+  @override
   Future<RecurrenceMutationReceipt> updateEventOccurrence({
     required PlannerEvent event,
     required EventDraft draft,

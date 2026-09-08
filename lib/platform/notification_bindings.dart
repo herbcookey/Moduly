@@ -13,6 +13,10 @@ import '../state/notification_state.dart';
 import 'notification_id_registry.dart';
 import 'notification_local_scheduler.dart';
 
+void _runDetachedNotificationOperation(Future<void> Function() operation) {
+  Future<void>.sync(operation).ignore();
+}
+
 /// Creates the concrete notification providers at the app boundary. The core
 /// providers intentionally remain fail-closed so tests and other embedders can
 /// use the domain controller without importing a native plugin.
@@ -72,7 +76,7 @@ class _NotificationPlatformScopeState
       );
       // Start native setup while the app shell is being built. The lifecycle
       // binding awaits the same idempotent initialization before auth sync.
-      unawaited(concrete.initialize());
+      _runDetachedNotificationOperation(concrete.initialize);
     }
     _pushTokenSource = const UnconfiguredPushTokenSource();
   }
@@ -118,6 +122,9 @@ class _NotificationLifecycleBindingState
     with WidgetsBindingObserver {
   String? _lastUserId;
   bool _hasSyncedPlannerIdentity = false;
+  String? _inFlightUserId;
+  bool _identitySyncInFlight = false;
+  int _identitySyncGeneration = 0;
   int _plannerStateGeneration = 0;
   NotificationPayload? _pendingPayload;
   String? _pendingPayloadFingerprint;
@@ -141,7 +148,7 @@ class _NotificationLifecycleBindingState
     final scheduler = ref.read(localNotificationSchedulerProvider);
     if (scheduler is FlutterLocalNotificationScheduler) {
       scheduler.onPayload = _receivePayload;
-      unawaited(_consumeColdStart(scheduler));
+      _runDetachedNotificationOperation(() => _consumeColdStart(scheduler));
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_disposed) _syncPlanner(planner);
@@ -151,6 +158,9 @@ class _NotificationLifecycleBindingState
   @override
   void dispose() {
     _disposed = true;
+    _identitySyncGeneration += 1;
+    _identitySyncInFlight = false;
+    _inFlightUserId = null;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -159,7 +169,7 @@ class _NotificationLifecycleBindingState
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed || _disposed) return;
     final controller = ref.read(notificationControllerProvider);
-    unawaited(controller.onResume());
+    _runDetachedNotificationOperation(controller.onResume);
   }
 
   Future<void> _consumeColdStart(
@@ -192,29 +202,45 @@ class _NotificationLifecycleBindingState
   }
 
   void _syncPlanner(PlannerController planner) {
-    final notifications = ref.read(notificationControllerProvider);
+    if (_disposed) return;
     final active = planner.user?.id;
-    if (_hasSyncedPlannerIdentity && active == _lastUserId) return;
-    _hasSyncedPlannerIdentity = true;
-    _lastUserId = active;
-    final ready = _platformReady();
-    unawaited(
-      ready.then((_) async {
-        if (_disposed) return;
-        final latest = ref.read(plannerControllerProvider);
+    if (_identitySyncInFlight) {
+      if (active == _inFlightUserId) return;
+    } else if (_hasSyncedPlannerIdentity && active == _lastUserId) {
+      return;
+    }
+    final syncGeneration = ++_identitySyncGeneration;
+    _identitySyncInFlight = true;
+    _inFlightUserId = active;
+    _hasSyncedPlannerIdentity = false;
+    _runDetachedNotificationOperation(() async {
+      try {
+        await _platformReady();
+        if (_disposed || syncGeneration != _identitySyncGeneration) return;
+        var latest = ref.read(plannerControllerProvider);
         if (latest.user?.id != active) return;
+        final notifications = ref.read(notificationControllerProvider);
         if (active == null) {
           await notifications.onSignedOut();
         } else {
-          try {
-            await notifications.onAuthenticated(active);
-          } catch (_) {
-            // The controller exposes a generic status in the settings UI.
-          }
+          await notifications.onAuthenticated(active);
         }
-        _tryOpenPending(ref.read(plannerControllerProvider));
-      }),
-    );
+        if (_disposed || syncGeneration != _identitySyncGeneration) return;
+        latest = ref.read(plannerControllerProvider);
+        if (latest.user?.id != active) return;
+        _lastUserId = active;
+        _hasSyncedPlannerIdentity = true;
+        _tryOpenPending(latest);
+      } catch (_) {
+        // Notification setup/controller errors are exposed by notification
+        // state. Keep this identity unsynced so a later planner signal retries.
+      } finally {
+        if (syncGeneration == _identitySyncGeneration) {
+          _identitySyncInFlight = false;
+          _inFlightUserId = null;
+        }
+      }
+    });
   }
 
   Future<void> _platformReady() {
@@ -260,8 +286,8 @@ class _NotificationLifecycleBindingState
     final eventId = payload.eventId;
     final occurrenceKey = payload.occurrenceKey;
     final requestGeneration = _plannerStateGeneration;
-    unawaited(
-      planner
+    _runDetachedNotificationOperation(
+      () => planner
           .loadEventById(eventId, occurrenceKey: occurrenceKey)
           .then((event) {
             if (_disposed) return;

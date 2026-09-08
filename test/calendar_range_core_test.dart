@@ -159,6 +159,8 @@ class _RangeRepository extends LocalScheduleRepository {
   int eventByIdCalls = 0;
   final StreamController<void> invalidations =
       StreamController<void>.broadcast();
+  final StreamController<PlannerGroup?> groupLifecycle =
+      StreamController<PlannerGroup?>.broadcast();
 
   @override
   bool get useBoundedEventRangeReads => true;
@@ -186,6 +188,10 @@ class _RangeRepository extends LocalScheduleRepository {
   @override
   Stream<void> watchEventInvalidations(String userId, String groupId) =>
       invalidations.stream;
+
+  @override
+  Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId) =>
+      groupLifecycle.stream;
 
   @override
   Future<PlannerEvent?> eventById({
@@ -216,7 +222,10 @@ class _RangeRepository extends LocalScheduleRepository {
   Future<List<InviteCode>> inviteCodesForGroup(String groupId) =>
       Future<List<InviteCode>>.value(const <InviteCode>[]);
 
-  Future<void> close() => invalidations.close();
+  Future<void> close() async {
+    await invalidations.close();
+    await groupLifecycle.close();
+  }
 }
 
 class _LegacyEmptyCreateRepository extends LocalScheduleRepository {
@@ -1374,6 +1383,56 @@ void main() {
         expect(controller.isLoadingMoreEvents, isFalse);
       },
     );
+
+    test('구독 후 범위 무효화 오류가 즉시 연결 실패 상태를 반영한다', () async {
+      final repository = _RangeRepository(<EventRangePage>[]);
+      final controller = PlannerController(
+        auth: AuthRepository(),
+        repository: repository,
+      );
+      addTearDown(() async {
+        controller.dispose();
+        await repository.close();
+      });
+      await Future<void>.delayed(Duration.zero);
+      controller.user = _rangeUser;
+      controller.groups = const <PlannerGroup>[
+        PlannerGroup(id: 'group-1', name: 'Group', timezone: 'UTC'),
+      ];
+      await controller.selectGroup('group-1');
+      expect(controller.isOffline, isFalse);
+
+      repository.invalidations.addError(StateError('realtime disconnected'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.isOffline, isTrue);
+    });
+
+    test('구독 후 그룹 수명 주기 오류가 즉시 연결 실패 상태를 반영한다', () async {
+      final repository = _RangeRepository(<EventRangePage>[]);
+      final controller = PlannerController(
+        auth: AuthRepository(),
+        repository: repository,
+      );
+      addTearDown(() async {
+        controller.dispose();
+        await repository.close();
+      });
+      await Future<void>.delayed(Duration.zero);
+      controller.user = _rangeUser;
+      controller.groups = const <PlannerGroup>[
+        PlannerGroup(id: 'group-1', name: 'Group', timezone: 'UTC'),
+      ];
+      await controller.selectGroup('group-1');
+      expect(controller.isOffline, isFalse);
+
+      repository.groupLifecycle.addError(
+        StateError('group realtime disconnected'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.isOffline, isTrue);
+    });
 
     test(
       'debounced invalidation refetches once and queues during an active refresh',

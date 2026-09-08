@@ -31,7 +31,9 @@ Future<void> main() async {
   );
   // 디버그/프로필에서는 설정 없이 미리보기를 지원하지만, 릴리스에서는
   // 조용히 로컬 데모로 전환하면 안 된다. 아래에서 유효한 설정을 초기화한다.
-  var supabaseReady = !config.hasSupabase && releaseConfigurationError == null;
+  // 준비 상태는 실제 원격 SDK 초기화 성공만 뜻한다. 로컬 미리보기 허용 여부는
+  // 별도 공급자가 결정하므로 설정이 없다는 이유로 연결 완료로 표시하지 않는다.
+  var supabaseReady = false;
   String? supabaseError;
   try {
     await initializeBeforeInviteSource(

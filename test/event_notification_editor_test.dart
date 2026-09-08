@@ -87,6 +87,93 @@ class _Schedule extends LocalScheduleRepository {
   }
 }
 
+class _AmbiguousCreateSchedule extends _Schedule {
+  PlannerController? planner;
+  PlannerEvent? created;
+
+  @override
+  Future<PlannerEvent> createEvent(
+    String userId,
+    String groupId,
+    EventDraft draft,
+  ) async {
+    final memberIds = draft.hasExplicitMemberIds
+        ? draft.memberIds
+        : <String>[userId];
+    final shadow = PlannerEvent(
+      id: 'same-content-existing-event',
+      groupId: groupId,
+      title: draft.title,
+      note: draft.note,
+      startAt: draft.startAt,
+      endAt: draft.endAt,
+      ownerId: userId,
+      memberIds: memberIds,
+      allDay: draft.allDay,
+      timezone: draft.timezone,
+      updatedAt: DateTime.utc(9998),
+    );
+    planner!.events = <PlannerEvent>[...planner!.events, shadow];
+    created = PlannerEvent(
+      id: 'authoritative-created-event',
+      groupId: groupId,
+      title: draft.title,
+      note: draft.note,
+      startAt: draft.startAt,
+      endAt: draft.endAt,
+      ownerId: userId,
+      memberIds: memberIds,
+      allDay: draft.allDay,
+      timezone: draft.timezone,
+    );
+    return created!;
+  }
+}
+
+class _StaleReceiptSchedule extends _Schedule {
+  late PlannerEvent staleProjection;
+  EventEditScope? receivedScope;
+
+  @override
+  bool get useBoundedEventRangeReads => true;
+
+  @override
+  Future<RecurrenceMutationReceipt> updateEventOccurrence({
+    required PlannerEvent event,
+    required EventDraft draft,
+    required EventEditScope scope,
+    required int expectedSeriesVersion,
+    required int expectedOccurrenceVersion,
+    String? actorId,
+  }) async {
+    receivedScope = scope;
+    return RecurrenceMutationReceipt(
+      groupId: event.groupId,
+      eventId: event.id,
+      occurrenceKey: event.occurrenceKey,
+      seriesVersion: expectedSeriesVersion + 1,
+      occurrenceVersion: scope == EventEditScope.thisOccurrence
+          ? expectedOccurrenceVersion + 1
+          : 0,
+      scope: scope,
+    );
+  }
+
+  @override
+  Future<EventRangePage> eventsForRange({
+    required String userId,
+    required String groupId,
+    required EventRange range,
+    EventRangeCursor? cursor,
+    int limit = 100,
+    String? participantId,
+  }) async => EventRangePage(
+    events: <PlannerEvent>[staleProjection],
+    nextCursor: null,
+    hasMore: false,
+  );
+}
+
 class _NotificationRepository extends LocalNotificationRepository {
   _NotificationRepository({
     required ScheduleRepository schedule,
@@ -145,7 +232,7 @@ PlannerEvent _event({
 PlannerController _planner({
   required _Auth auth,
   required ScheduleRepository schedule,
-  required PlannerEvent event,
+  PlannerEvent? event,
   List<PlannerMember>? members,
 }) {
   final controller = PlannerController(auth: auth, repository: schedule);
@@ -163,7 +250,9 @@ PlannerController _planner({
           isActive: true,
         ),
       ];
-  controller.events = <PlannerEvent>[event];
+  controller.events = event == null
+      ? const <PlannerEvent>[]
+      : <PlannerEvent>[event];
   controller.isLoading = false;
   controller.authFlowState = AuthFlowState.signedIn;
   return controller;
@@ -183,17 +272,20 @@ Future<void> _scrollTo(WidgetTester tester, Finder target) async {
   fail('target did not become visible in editor viewport');
 }
 
-Widget _app(PlannerController planner, NotificationController notifications) =>
-    ProviderScope(
-      overrides: <Override>[
-        plannerControllerProvider.overrideWith((ref) => planner),
-        notificationControllerProvider.overrideWith((ref) => notifications),
-      ],
-      child: MaterialApp(
-        theme: ThemeData(useMaterial3: true),
-        home: const EventEditorScreen(eventId: 'notification-event'),
-      ),
-    );
+Widget _app(
+  PlannerController planner,
+  NotificationController notifications, {
+  String? eventId = 'notification-event',
+}) => ProviderScope(
+  overrides: <Override>[
+    plannerControllerProvider.overrideWith((ref) => planner),
+    notificationControllerProvider.overrideWith((ref) => notifications),
+  ],
+  child: MaterialApp(
+    theme: ThemeData(useMaterial3: true),
+    home: EventEditorScreen(eventId: eventId),
+  ),
+);
 
 NotificationController _notifications(_NotificationRepository repository) {
   final controller = NotificationController(repository: repository);
@@ -211,6 +303,95 @@ NotificationController _notifications(_NotificationRepository repository) {
 }
 
 void main() {
+  testWidgets(
+    'new-event reminder uses the committed result id instead of a same-content event',
+    (tester) async {
+      final auth = _Auth();
+      final schedule = _AmbiguousCreateSchedule();
+      final repository = _NotificationRepository(schedule: schedule);
+      final planner = _planner(auth: auth, schedule: schedule);
+      schedule.planner = planner;
+      final notifications = _notifications(repository);
+      addTearDown(auth.dispose);
+
+      await tester.pumpWidget(_app(planner, notifications, eventId: null));
+      await tester.pump();
+      await tester.pump();
+      await tester.enterText(find.byType(TextFormField).first, '같은 내용의 일정');
+      await _scrollTo(tester, find.text('내 알림', skipOffstage: false));
+      await tester.tap(find.widgetWithText(SwitchListTile, '내 알림'));
+      await tester.pump();
+      await tester.tap(find.widgetWithText(TextButton, '저장'));
+      await tester.pumpAndSettle();
+
+      expect(schedule.created, isNotNull);
+      expect(repository.preferenceWrites, 1);
+      expect(repository.lastSaved?.eventId, schedule.created!.id);
+      expect(repository.lastSaved?.eventVersion, schedule.created!.version);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'recurring reminder is not saved from a projection older than the receipt',
+    (tester) async {
+      final auth = _Auth();
+      final schedule = _StaleReceiptSchedule();
+      final rule = RecurrenceRule(
+        frequency: RecurrenceFrequency.daily,
+        end: RecurrenceEnd.count,
+        count: 2,
+      );
+      final event = PlannerEvent(
+        id: 'notification-event',
+        seriesId: 'notification-event',
+        groupId: _group.id,
+        title: '기존 반복 알림 일정',
+        startAt: DateTime.utc(2026, 9, 10, 9),
+        endAt: DateTime.utc(2026, 9, 10, 10),
+        ownerId: _user.id,
+        memberIds: const <String>['notification-editor-user'],
+        timezone: _group.timezone,
+        version: 3,
+        occurrenceKey: occurrenceKeyForIndex(0),
+        occurrenceIndex: 0,
+        occurrenceVersion: 2,
+        isOccurrence: true,
+        recurrenceRule: rule,
+      );
+      schedule.staleProjection = event;
+      final repository = _NotificationRepository(schedule: schedule);
+      final planner = _planner(auth: auth, schedule: schedule, event: event)
+        ..selectedEventRange = EventRange(
+          startUtc: DateTime.utc(2026, 9, 1),
+          endUtc: DateTime.utc(2026, 10, 1),
+          viewTimezone: 'UTC',
+        );
+      final notifications = _notifications(repository);
+      addTearDown(auth.dispose);
+
+      await tester.pumpWidget(_app(planner, notifications));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await _scrollTo(tester, find.text('내 알림', skipOffstage: false));
+      await tester.tap(find.widgetWithText(SwitchListTile, '내 알림'));
+      await tester.pump();
+      await tester.tap(find.widgetWithText(TextButton, '저장'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '저장'));
+      await tester.pumpAndSettle();
+
+      expect(schedule.receivedScope, EventEditScope.thisOccurrence);
+      expect(repository.preferenceWrites, 0);
+      expect(
+        find.text('일정은 저장했지만 알림 설정을 저장하지 못했어요. 최신 일정을 불러온 뒤 다시 시도해 주세요.'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets(
     'existing event reminder loads once and preserves its version on save',
     (tester) async {
