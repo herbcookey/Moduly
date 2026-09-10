@@ -529,15 +529,17 @@ class _MonthGridState extends State<_MonthGrid> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             const gap = 4.0;
-            const minCellWidth = 48.0;
             final availableWidth = constraints.maxWidth.isFinite
                 ? constraints.maxWidth
-                : minCellWidth * 7 + gap * 6;
-            final cellWidth = ((availableWidth - gap * 6) / 7).clamp(
-              minCellWidth,
-              double.infinity,
-            );
-            final gridWidth = cellWidth * 7 + gap * 6;
+                : MediaQuery.sizeOf(context).width;
+            // Keep all seven columns inside the sliver's viewport.  The old
+            // minimum width forced a 320px viewport to a 360px grid, which
+            // made the month view horizontally scrollable. Cells retain their
+            // existing tap and semantics behavior while their visual content
+            // is compacted for narrow screens.
+            final cellWidth = ((availableWidth - gap * 6) / 7)
+                .clamp(1.0, double.infinity)
+                .toDouble();
             final textScale = MediaQuery.textScalerOf(context).scale(1);
             final mainAxisExtent = availableWidth < 420
                 ? (textScale > 1.5 ? 112.0 : 76.0)
@@ -570,18 +572,15 @@ class _MonthGridState extends State<_MonthGrid> {
             return Semantics(
               container: true,
               label: '월간 일정 그리드',
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: SizedBox(
-                  width: gridWidth,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      _WeekdayHeader(cellWidth: cellWidth, gap: gap),
-                      const SizedBox(height: 8),
-                      Wrap(spacing: gap, runSpacing: gap, children: cells),
-                    ],
-                  ),
+              child: SizedBox(
+                width: availableWidth,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    _WeekdayHeader(cellWidth: cellWidth, gap: gap),
+                    const SizedBox(height: 8),
+                    Wrap(spacing: gap, runSpacing: gap, children: cells),
+                  ],
                 ),
               ),
             );
@@ -663,18 +662,30 @@ class _MonthCell extends StatelessWidget {
                 final compact =
                     constraints.maxWidth < 68 ||
                     MediaQuery.textScalerOf(context).scale(12) > 17;
+                final horizontalPadding = constraints.maxWidth < 68 ? 2.0 : 6.0;
+                final dateStyle = Theme.of(context).textTheme.labelLarge
+                    ?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: inMonth
+                          ? scheme.onSurface
+                          : scheme.onSurfaceVariant,
+                    );
                 return Padding(
-                  padding: const EdgeInsets.fromLTRB(6, 5, 6, 4),
+                  padding: EdgeInsets.fromLTRB(
+                    horizontalPadding,
+                    5,
+                    horizontalPadding,
+                    4,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Text(
-                        '${date.day}',
-                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                          fontWeight: FontWeight.w700,
-                          color: inMonth
-                              ? scheme.onSurface
-                              : scheme.onSurfaceVariant,
+                      SizedBox(
+                        width: double.infinity,
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.centerLeft,
+                          child: Text('${date.day}', style: dateStyle),
                         ),
                       ),
                       const SizedBox(height: 3),
@@ -682,16 +693,17 @@ class _MonthCell extends StatelessWidget {
                         const Spacer()
                       else if (compact)
                         ExcludeSemantics(
-                          child: Row(
+                          child: Wrap(
+                            spacing: 2,
+                            runSpacing: 2,
                             children: <Widget>[
                               ...events
                                   .take(3)
                                   .map(
-                                    (event) => Padding(
-                                      padding: const EdgeInsets.only(right: 3),
-                                      child: Container(
-                                        width: 8,
-                                        height: 8,
+                                    (event) => SizedBox(
+                                      width: 8,
+                                      height: 8,
+                                      child: DecoratedBox(
                                         decoration: BoxDecoration(
                                           shape: BoxShape.circle,
                                           color: colorFromValue(
@@ -702,25 +714,18 @@ class _MonthCell extends StatelessWidget {
                                     ),
                                   ),
                               if (events.length > 3)
-                                Flexible(
-                                  child: Text(
-                                    '+${events.length - 3}',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.labelSmall,
-                                  ),
+                                Text(
+                                  '+${events.length - 3}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context).textTheme.labelSmall,
                                 ),
                               if (events.length <= 2 &&
                                   events.any(_isRecurringEvent))
-                                Padding(
-                                  padding: const EdgeInsets.only(left: 2),
-                                  child: Icon(
-                                    Icons.repeat,
-                                    size: 14,
-                                    color: scheme.primary,
-                                  ),
+                                Icon(
+                                  Icons.repeat,
+                                  size: 14,
+                                  color: scheme.primary,
                                 ),
                             ],
                           ),

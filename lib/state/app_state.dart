@@ -91,17 +91,20 @@ enum AuthFlowState {
 /// 그룹 수명 주기 신호가 생성한 병합된 메타데이터 새로 고침 요청이다.
 /// 요청에 작업 컨텍스트를 함께 보관하면 디바운스 타이머가 실행되기 전에 선택,
 /// 신원 또는 플래너 리비전이 바뀌었을 때 지연된 구성원 목록 읽기를 안전하게
-/// 차단할 수 있다.
+/// 차단할 수 있다. 메타데이터 세대는 같은 작업 컨텍스트에서 더 새로운 수명 주기
+/// 재조회를 구분해 늦은 초기 읽기가 최신 스냅샷을 덮지 못하게 한다.
 class _GroupMetadataRefreshRequest {
   const _GroupMetadataRefreshRequest({
     required this.operation,
     required this.userId,
     required this.groupId,
+    required this.metadataGeneration,
   });
 
   final int operation;
   final String userId;
   final String groupId;
+  final int metadataGeneration;
 }
 
 final plannerControllerProvider = ChangeNotifierProvider<PlannerController>((
@@ -262,6 +265,10 @@ class PlannerController extends ChangeNotifier {
   _GroupMetadataRefreshRequest? _pendingGroupMetadataRefresh;
   bool _groupMetadataRefreshInFlight = false;
   int _groupMetadataRefreshToken = 0;
+  // 초기 selectGroup 메타데이터 읽기와 수명 주기 재조회는 같은 그룹/작업
+  // 컨텍스트를 공유할 수 있다. 이 세대 값은 작업 리비전보다 좁은 순서를 나타내어,
+  // 더 새로운 lifecycle 읽기가 완료된 뒤 늦게 도착한 초기 응답을 차단한다.
+  int _groupMetadataRefreshGeneration = 0;
   Future<void> _authEventQueue = Future<void>.value();
   int _authEventGeneration = 0;
   String? _queuedAuthIdentity;
@@ -2402,10 +2409,12 @@ class PlannerController extends ChangeNotifier {
     )) {
       return;
     }
+    final metadataGeneration = ++_groupMetadataRefreshGeneration;
     _pendingGroupMetadataRefresh = _GroupMetadataRefreshRequest(
       operation: operation,
       userId: userId,
       groupId: groupId,
+      metadataGeneration: metadataGeneration,
     );
     _armGroupMetadataRefreshTimer();
   }
@@ -2438,10 +2447,11 @@ class PlannerController extends ChangeNotifier {
       return;
     }
     if (!_isCurrentPlannerContext(
-      request.operation,
-      userId: request.userId,
-      groupId: request.groupId,
-    )) {
+          request.operation,
+          userId: request.userId,
+          groupId: request.groupId,
+        ) ||
+        request.metadataGeneration != _groupMetadataRefreshGeneration) {
       return;
     }
     _groupMetadataRefreshInFlight = true;
@@ -2450,6 +2460,7 @@ class PlannerController extends ChangeNotifier {
         operation: request.operation,
         userId: request.userId,
         groupId: request.groupId,
+        metadataGeneration: request.metadataGeneration,
       );
     } finally {
       _groupMetadataRefreshInFlight = false;
@@ -2466,12 +2477,14 @@ class PlannerController extends ChangeNotifier {
     _groupMetadataRefreshTimer = null;
     _pendingGroupMetadataRefresh = null;
     ++_groupMetadataRefreshToken;
+    ++_groupMetadataRefreshGeneration;
   }
 
   Future<void> _refreshGroupScopedMetadata({
     required int operation,
     required String userId,
     required String groupId,
+    required int metadataGeneration,
   }) async {
     List<PlannerMember>? nextMembers;
     List<InviteCode>? nextInvites;
@@ -2482,10 +2495,11 @@ class PlannerController extends ChangeNotifier {
       // 계속 사용할 수 있다.
     }
     if (!_isCurrentPlannerContext(
-      operation,
-      userId: userId,
-      groupId: groupId,
-    )) {
+          operation,
+          userId: userId,
+          groupId: groupId,
+        ) ||
+        metadataGeneration != _groupMetadataRefreshGeneration) {
       return;
     }
     try {
@@ -2495,10 +2509,11 @@ class PlannerController extends ChangeNotifier {
       // 마지막으로 표시된 값을 유지한다.
     }
     if (!_isCurrentPlannerContext(
-      operation,
-      userId: userId,
-      groupId: groupId,
-    )) {
+          operation,
+          userId: userId,
+          groupId: groupId,
+        ) ||
+        metadataGeneration != _groupMetadataRefreshGeneration) {
       return;
     }
     if (nextMembers != null) {
@@ -2618,6 +2633,7 @@ class PlannerController extends ChangeNotifier {
     _inviteOperation++;
     _inviteCodeInFlight = false;
     _cancelGroupMetadataRefresh();
+    final initialMetadataGeneration = _groupMetadataRefreshGeneration;
     final previousSubscription = _eventSubscription;
     _eventSubscription = null;
     final previousInvalidationSubscription = _eventInvalidationSubscription;
@@ -2867,10 +2883,40 @@ class PlannerController extends ChangeNotifier {
         return;
       }
 
+      // 멤버, 초대 및 첫 일정 페이지는 서로 독립된 읽기다. 각 Future를 먼저
+      // 시작해 느린 멤버 프로필 조회가 초대/일정 조회를 직렬로 막지 않게 한다.
+      // `Future.sync`는 사용자 지정 저장소가 Future를 반환하기 전에 동기적으로
+      // 예외를 던지는 경우까지 Future 오류로 감싸므로 아래의 방어적인 catch가
+      // 항상 처리할 수 있다. 각 Future에는 생성 직후 오류 handler를 연결한다.
+      // 한 읽기가 먼저 실패해도 다른 읽기를 await하기 전까지 Zone에 unhandled
+      // async 오류가 보고되지 않게 하면서, 기존 오류 표시/무시 정책은 유지한다.
+      final membersRead =
+          Future<List<PlannerMember>>.sync(
+            () => _repository.membersForGroup(group.id),
+          ).catchError((Object error, StackTrace stackTrace) {
+            metadataError ??= _friendlyError(error);
+            return const <PlannerMember>[];
+          });
+      final invitesRead =
+          Future<List<InviteCode>>.sync(
+            () => _repository.inviteCodesForGroup(group.id),
+          ).catchError((Object error, StackTrace stackTrace) {
+            return const <InviteCode>[];
+          });
+      final rangeRead =
+          _usesBoundedEventRangeReads &&
+              rangeCapability is BoundedEventRangeReadCapability
+          ? _fetchRangeFirstPage(
+              force: true,
+              preserveCurrentEvents: false,
+              advanceGeneration: false,
+            )
+          : null;
+
       List<PlannerMember> fetchedMembers = const <PlannerMember>[];
       List<InviteCode> fetchedInvites = const <InviteCode>[];
       try {
-        fetchedMembers = await _repository.membersForGroup(group.id);
+        fetchedMembers = await membersRead;
       } catch (error) {
         // 프로필/멤버십 조회 실패가 일정 스트림 시작을 막아서는 안 된다.
         // 실패는 표시하되 일정 데이터를 불러올 수 있다면 일정을 오프라인으로
@@ -2886,7 +2932,7 @@ class PlannerController extends ChangeNotifier {
         return;
       }
       try {
-        fetchedInvites = await _repository.inviteCodesForGroup(group.id);
+        fetchedInvites = await invitesRead;
       } catch (_) {
         // 초대 메타데이터는 소유자 전용이지만 일정 접근은 계속 가능하다.
         fetchedInvites = const <InviteCode>[];
@@ -2900,15 +2946,19 @@ class PlannerController extends ChangeNotifier {
         return;
       }
 
-      _setMembersSnapshot(fetchedMembers);
-      invites = List<InviteCode>.unmodifiable(fetchedInvites);
-      if (_usesBoundedEventRangeReads &&
-          rangeCapability is BoundedEventRangeReadCapability) {
-        await _fetchRangeFirstPage(
-          force: true,
-          preserveCurrentEvents: false,
-          advanceGeneration: false,
-        );
+      // lifecycle 이벤트가 초기 읽기 중 도착해 더 새로운 메타데이터 재조회를
+      // 예약했다면, 같은 operation/user/group 가드만으로는 충분하지 않다. 이때
+      // 초기 응답은 건너뛰고 최신 refresh 세대가 최종 스냅샷을 소유하게 한다.
+      if (initialMetadataGeneration == _groupMetadataRefreshGeneration) {
+        _setMembersSnapshot(fetchedMembers);
+        invites = List<InviteCode>.unmodifiable(fetchedInvites);
+      }
+      if (rangeRead != null) {
+        // 범위 읽기는 메타데이터와 동시에 시작했지만, 최종 로딩/오프라인
+        // 상태를 올바르게 계산하려면 여기서 완료를 기다린다. 범위 읽기 자체는
+        // 컨텍스트 가드를 갖고 있어 그동안 수명 주기 툼스톤이 도착해도 오래된
+        // 일정이 되살아나지 않는다.
+        await rangeRead;
         if (!_isCurrentPlannerContext(
           operation,
           userId: userId,

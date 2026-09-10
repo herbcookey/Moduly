@@ -315,7 +315,7 @@ class SettingsScreen extends ConsumerWidget {
           const SizedBox(height: 18),
           Center(
             child: Text(
-              'Moduly · 초기 버전',
+              'Moduly · 1.0.0',
               style: Theme.of(
                 context,
               ).textTheme.labelSmall?.copyWith(color: scheme.outline),

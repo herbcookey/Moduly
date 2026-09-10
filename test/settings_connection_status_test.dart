@@ -108,6 +108,10 @@ void main() {
     expect(find.text('로컬 미리보기', skipOffstage: false), findsOneWidget);
     expect(find.text('동기화 중', skipOffstage: false), findsNothing);
     expect(find.text('모든 멤버와 최신 상태를 유지해요.', skipOffstage: false), findsNothing);
+    await tester.drag(find.byType(ListView), const Offset(0, -2000));
+    await tester.pump();
+    expect(find.text('Moduly · 1.0.0'), findsOneWidget);
+    expect(find.text('Moduly · 초기 버전'), findsNothing);
   });
 
   testWidgets('원격 연결이 준비된 유휴 상태는 동기화 완료로 표시한다', (tester) async {

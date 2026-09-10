@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -118,8 +120,15 @@ class _GroupPickerScreenState extends ConsumerState<GroupPickerScreen> {
                     child: InkWell(
                       onTap: controller.isSaving
                           ? null
-                          : () async {
-                              await controller.selectGroup(group.id);
+                          : () {
+                              // 그룹 선택은 동기 상태(선택된 그룹/달력 범위)를 먼저
+                              // 설치한다. 네트워크 기반 멤버/일정 조회가 끝날 때까지
+                              // 화면 전환을 막지 않고 홈을 즉시 표시하되, 방어적으로
+                              // Future 오류를 소비해 위젯 콜백의 unhandled 오류를
+                              // 만들지 않는다. 상세 오류는 컨트롤러가 상태에 기록한다.
+                              unawaited(
+                                _settleGroupSelection(controller, group.id),
+                              );
                               if (context.mounted) context.go('/home');
                             },
                       child: Padding(
@@ -198,6 +207,19 @@ class _GroupPickerScreenState extends ConsumerState<GroupPickerScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _settleGroupSelection(
+    PlannerController controller,
+    String groupId,
+  ) async {
+    try {
+      await controller.selectGroup(groupId);
+    } catch (_) {
+      // PlannerController는 일반적으로 오류를 errorMessage에 기록한다. 선택
+      // 호출 계약이 바뀌거나 사용자 지정 저장소가 예외를 밖으로 전달하더라도
+      // 백그라운드 선택 Future가 위젯 트리에 unhandled 오류로 남지 않게 한다.
+    }
   }
 
   Future<void> _signOut() async {

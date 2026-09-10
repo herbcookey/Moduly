@@ -194,6 +194,43 @@ Finder _calendarCells() => find.byWidgetPredicate((widget) {
   return key is ValueKey<String> && key.value.startsWith('calendar-cell-');
 });
 
+Finder _monthGrid() => find.byWidgetPredicate(
+  (widget) => widget is Semantics && widget.properties.label == '월간 일정 그리드',
+);
+
+void _expectMonthGridFitsViewport(WidgetTester tester) {
+  final grid = _monthGrid();
+  expect(grid, findsOneWidget);
+  // The view-mode toolbar and period controls intentionally remain
+  // horizontally scrollable. The month grid itself must not introduce a
+  // horizontal scroll view.
+  expect(
+    find.descendant(of: grid, matching: find.byType(SingleChildScrollView)),
+    findsNothing,
+  );
+
+  final viewportWidth =
+      tester.view.physicalSize.width / tester.view.devicePixelRatio;
+  final gridRect = tester.getRect(grid);
+  expect(gridRect.left, greaterThanOrEqualTo(-0.01));
+  expect(gridRect.right, lessThanOrEqualTo(viewportWidth + 0.01));
+
+  // August 2026 starts on Monday, so these seven cells form the first row.
+  final firstRow = <Finder>[
+    _cell(2026, 7, 27),
+    _cell(2026, 7, 28),
+    _cell(2026, 7, 29),
+    _cell(2026, 7, 30),
+    _cell(2026, 7, 31),
+    _cell(2026, 8, 1),
+    _cell(2026, 8, 2),
+  ];
+  final rects = firstRow.map(tester.getRect).toList(growable: false);
+  expect(rects.map((rect) => rect.top).toSet(), hasLength(1));
+  expect(rects.first.left, greaterThanOrEqualTo(gridRect.left - 0.01));
+  expect(rects.last.right, lessThanOrEqualTo(gridRect.right + 0.01));
+}
+
 void _showMonth(PlannerController controller) {
   controller.calendarView = CalendarViewMode.month;
   controller.notifyListeners();
@@ -295,6 +332,7 @@ void main() {
     final firstColumnRect = tester.getRect(_cell(2026, 7, 27));
     expect(weekdayRect.left, closeTo(firstColumnRect.left, 0.001));
     expect(weekdayRect.width, closeTo(firstColumnRect.width, 0.001));
+    _expectMonthGridFitsViewport(tester);
 
     final target = _cell(2026, 8, 12);
     await tester.ensureVisible(target);
@@ -603,8 +641,9 @@ void main() {
       scrollable: find.byType(Scrollable).first,
     );
     final cellRect = tester.getRect(cell);
-    expect(cellRect.width, greaterThanOrEqualTo(48));
+    expect(cellRect.width, greaterThan(0));
     expect(cellRect.height, greaterThanOrEqualTo(48));
+    _expectMonthGridFitsViewport(tester);
     expect(find.bySemanticsLabel(RegExp('2026년 8월 10일')), findsOneWidget);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
     await tester.pump();

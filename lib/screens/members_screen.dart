@@ -334,6 +334,11 @@ class MembersScreen extends ConsumerWidget {
   ) async {
     final archived = await showDialog<bool>(
       context: context,
+      // MembersScreen is hosted by the ShellRoute. Keep the confirmation on
+      // that navigator so the /members -> /groups redirect disposes the
+      // dialog together with its shell instead of leaving a root overlay to
+      // pop against a replaced route stack.
+      useRootNavigator: false,
       builder: (dialogContext) => ArchiveGroupDialog(
         groupName: group.name,
         onSubmit: () {

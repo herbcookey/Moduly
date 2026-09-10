@@ -149,6 +149,10 @@ class _RangeRepository extends LocalScheduleRepository {
 
   final List<EventRangePage> pages;
   final List<EventRange> ranges = <EventRange>[];
+  bool rangeReadStarted = false;
+  Completer<EventRangePage>? rangeReadGate;
+  Completer<List<PlannerMember>>? membersReadGate;
+  Completer<List<InviteCode>>? invitesReadGate;
   Future<EventRangePage> Function(EventRange range)? responseForRange;
   Future<EventRangePage> Function(EventRange range, String? participantId)?
   responseForRangeWithParticipant;
@@ -174,7 +178,13 @@ class _RangeRepository extends LocalScheduleRepository {
     int limit = 100,
     String? participantId,
   }) async {
+    rangeReadStarted = true;
     ranges.add(range);
+    final gate = rangeReadGate;
+    if (gate != null) {
+      rangeReadGate = null;
+      return gate.future;
+    }
     final participantCallback = responseForRangeWithParticipant;
     if (participantCallback != null) {
       return participantCallback(range, participantId);
@@ -208,19 +218,25 @@ class _RangeRepository extends LocalScheduleRepository {
   }
 
   @override
-  Future<List<PlannerMember>> membersForGroup(String groupId) =>
-      Future<List<PlannerMember>>.value(const <PlannerMember>[
-        PlannerMember(
-          id: 'demo-user',
-          name: 'Demo',
-          email: 'demo@example.com',
-          isOwner: true,
-        ),
-      ]);
+  Future<List<PlannerMember>> membersForGroup(String groupId) {
+    final gate = membersReadGate;
+    if (gate != null) return gate.future;
+    return Future<List<PlannerMember>>.value(const <PlannerMember>[
+      PlannerMember(
+        id: 'demo-user',
+        name: 'Demo',
+        email: 'demo@example.com',
+        isOwner: true,
+      ),
+    ]);
+  }
 
   @override
-  Future<List<InviteCode>> inviteCodesForGroup(String groupId) =>
-      Future<List<InviteCode>>.value(const <InviteCode>[]);
+  Future<List<InviteCode>> inviteCodesForGroup(String groupId) {
+    final gate = invitesReadGate;
+    if (gate != null) return gate.future;
+    return Future<List<InviteCode>>.value(const <InviteCode>[]);
+  }
 
   Future<void> close() async {
     await invalidations.close();
@@ -993,6 +1009,42 @@ void main() {
   });
 
   group('PlannerController 범위 제한 상태', () {
+    test('그룹 선택이 멤버/초대 읽기와 첫 일정 페이지를 병렬로 시작한다', () async {
+      final rangeGate = Completer<EventRangePage>();
+      final repository = _RangeRepository(<EventRangePage>[])
+        ..membersReadGate = Completer<List<PlannerMember>>()
+        ..invitesReadGate = Completer<List<InviteCode>>()
+        ..rangeReadGate = rangeGate;
+      final controller = PlannerController(
+        auth: AuthRepository(),
+        repository: repository,
+      );
+      addTearDown(() async {
+        controller.dispose();
+        await repository.close();
+      });
+      await Future<void>.delayed(Duration.zero);
+      controller.user = _rangeUser;
+      final group = const PlannerGroup(
+        id: 'group-1',
+        name: 'Group',
+        timezone: 'UTC',
+      );
+      controller.groups = <PlannerGroup>[group];
+
+      final selection = controller.selectGroup(group.id);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(repository.rangeReadStarted, isTrue);
+      expect(repository.ranges, hasLength(1));
+
+      repository.membersReadGate!.complete(const <PlannerMember>[]);
+      repository.invitesReadGate!.complete(const <InviteCode>[]);
+      rangeGate.complete(EventRangePage.empty());
+      await selection;
+      expect(controller.selectedGroup?.id, group.id);
+    });
+
     test('선택 날짜를 바꾸면서 동일한 월 범위를 보존한다', () async {
       final event = _event(
         id: 'month-event',

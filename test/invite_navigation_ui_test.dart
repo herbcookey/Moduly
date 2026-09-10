@@ -76,6 +76,8 @@ class _InviteRepository extends LocalScheduleRepository {
   final bool joinCommittedFailure;
   int previewCalls = 0;
   int joinCalls = 0;
+  Completer<List<PlannerMember>>? membersGate;
+  bool membersReadStarted = false;
   InviteCode? _createdInvite;
 
   InvitePreview get _preview => InvitePreview(
@@ -94,8 +96,12 @@ class _InviteRepository extends LocalScheduleRepository {
       <PlannerGroup>[_inviteGroup];
 
   @override
-  Future<List<PlannerMember>> membersForGroup(String groupId) async =>
-      const <PlannerMember>[];
+  Future<List<PlannerMember>> membersForGroup(String groupId) {
+    membersReadStarted = true;
+    final gate = membersGate;
+    return gate?.future ??
+        Future<List<PlannerMember>>.value(const <PlannerMember>[]);
+  }
 
   @override
   Future<List<InviteCode>> inviteCodesForGroup(String groupId) async {
@@ -570,6 +576,24 @@ void main() {
     await tester.tap(find.text('닫기'));
     await tester.pumpAndSettle();
     expect(find.text('복사와 공유는 생성 직후에만 가능해요.'), findsOneWidget);
+  });
+
+  testWidgets('그룹 선택은 초기 메타데이터 읽기를 기다리지 않고 홈으로 이동한다', (tester) async {
+    final (router, repository) = await _pumpInviteApp(
+      tester,
+      user: _inviteUser,
+    );
+    final membersGate = Completer<List<PlannerMember>>();
+    repository.membersGate = membersGate;
+
+    await tester.tap(find.text('초대 테스트 그룹'));
+    await tester.pump();
+
+    expect(repository.membersReadStarted, isTrue);
+    expect(_routerLocation(router), '/home');
+
+    membersGate.complete(const <PlannerMember>[]);
+    await tester.pumpAndSettle();
   });
 
   testWidgets('좁은 화면의 큰 텍스트에서도 초대 컨트롤에 접근할 수 있다', (tester) async {

@@ -76,6 +76,9 @@ class _ControlledScheduleRepository extends LocalScheduleRepository {
       <String, Completer<List<PlannerMember>>>{};
   final Map<String, List<PlannerMember>> immediateMembers =
       <String, List<PlannerMember>>{};
+  Completer<List<InviteCode>>? inviteCodesLoad;
+  Object? inviteCodesError;
+  bool inviteCodesStarted = false;
   Completer<InviteCode>? inviteLoad;
   InviteCode? inviteResult;
   final List<Completer<PlannerGroup>> createGroupLoads =
@@ -140,6 +143,16 @@ class _ControlledScheduleRepository extends LocalScheduleRepository {
     return Future<List<PlannerMember>>.value(
       immediateMembers[groupId] ?? const <PlannerMember>[],
     );
+  }
+
+  @override
+  Future<List<InviteCode>> inviteCodesForGroup(String groupId) {
+    inviteCodesStarted = true;
+    final load = inviteCodesLoad;
+    if (load != null) return load.future;
+    final error = inviteCodesError;
+    if (error != null) return Future<List<InviteCode>>.error(error);
+    return super.inviteCodesForGroup(groupId);
   }
 
   @override
@@ -232,6 +245,49 @@ class _LifecycleControlledRepository extends LocalScheduleRepository {
   @override
   Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId) {
     lifecycleStarted = true;
+    return lifecycle.stream;
+  }
+
+  Future<void> close() => lifecycle.close();
+}
+
+/// 초기 선택 읽기와 수명 주기 재조회가 겹치는 순서를 재현한다. 첫 번째 멤버/초대
+/// Future(M1/I1)는 보류하고, lifecycle 신호 뒤 두 번째 쌍(M2/I2)을 먼저 완료시켜
+/// 늦은 초기 스냅샷이 최신 결과를 덮는지 검증할 수 있게 한다.
+class _MetadataRaceRepository extends LocalScheduleRepository {
+  _MetadataRaceRepository({
+    required this.memberReads,
+    required this.inviteReads,
+  });
+
+  final List<Future<List<PlannerMember>>> memberReads;
+  final List<Future<List<InviteCode>>> inviteReads;
+  final StreamController<PlannerGroup?> lifecycle =
+      StreamController<PlannerGroup?>.broadcast();
+  int memberReadCount = 0;
+  int inviteReadCount = 0;
+
+  @override
+  Future<List<PlannerMember>> membersForGroup(String groupId) {
+    final index = memberReadCount++;
+    if (index < memberReads.length) return memberReads[index];
+    return Future<List<PlannerMember>>.value(const <PlannerMember>[]);
+  }
+
+  @override
+  Future<List<InviteCode>> inviteCodesForGroup(String groupId) {
+    final index = inviteReadCount++;
+    if (index < inviteReads.length) return inviteReads[index];
+    return Future<List<InviteCode>>.value(const <InviteCode>[]);
+  }
+
+  @override
+  Stream<List<PlannerEvent>> watchEventsForUser(String userId, String groupId) {
+    return Stream<List<PlannerEvent>>.value(const <PlannerEvent>[]);
+  }
+
+  @override
+  Stream<PlannerGroup?> watchGroupLifecycle(String userId, String groupId) {
     return lifecycle.stream;
   }
 
@@ -388,6 +444,161 @@ void main() {
     expect(controller.selectedGroup?.id, _groupB.id);
     expect(controller.members.map((member) => member.id), <String>[_alice.id]);
     expect(controller.events, isEmpty);
+  });
+
+  test('selectGroup이 멤버와 초대 메타데이터 읽기를 병렬로 시작한다', () async {
+    final auth = _ControlledAuth();
+    final repository = _ControlledScheduleRepository()
+      ..inviteCodesLoad = Completer<List<InviteCode>>();
+    repository.memberLoads[_groupA.id] = Completer<List<PlannerMember>>();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_groupA];
+
+    final selection = controller.selectGroup(_groupA.id);
+    await Future<void>.delayed(Duration.zero);
+
+    // 멤버 REST 응답이 아직 대기 중이어도 독립적인 초대 읽기는 이미 시작된다.
+    expect(repository.inviteCodesStarted, isTrue);
+
+    repository.memberLoads[_groupA.id]!.complete(const <PlannerMember>[]);
+    repository.inviteCodesLoad!.complete(const <InviteCode>[]);
+    await selection;
+    expect(controller.selectedGroup?.id, _groupA.id);
+  });
+
+  test('대기 중인 멤버 읽기보다 초대 읽기가 먼저 실패해도 unhandled 오류가 없다', () async {
+    final auth = _ControlledAuth();
+    final memberLoad = Completer<List<PlannerMember>>();
+    final repository = _ControlledScheduleRepository()
+      ..memberLoads[_groupA.id] = memberLoad
+      ..inviteCodesError = StateError('invite unavailable');
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() {
+      controller.dispose();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_groupA];
+
+    final uncaught = <Object>[];
+    await runZonedGuarded(
+      () async {
+        final selection = controller.selectGroup(_groupA.id);
+        await Future<void>.delayed(Duration.zero);
+        expect(repository.inviteCodesStarted, isTrue);
+        memberLoad.complete(const <PlannerMember>[]);
+        await selection;
+      },
+      (error, stackTrace) {
+        uncaught.add(error);
+      },
+    );
+
+    expect(uncaught, isEmpty);
+    expect(controller.selectedGroup?.id, _groupA.id);
+    expect(controller.members, isEmpty);
+    expect(controller.invites, isEmpty);
+    expect(controller.errorMessage, isNull);
+  });
+
+  test('수명 주기 재조회가 초기 메타데이터의 늦은 응답을 덮어쓰지 못한다', () async {
+    final initialMembers = Completer<List<PlannerMember>>();
+    final initialInvites = Completer<List<InviteCode>>();
+    final refreshedMembers = Completer<List<PlannerMember>>();
+    final refreshedInvites = Completer<List<InviteCode>>();
+    final repository = _MetadataRaceRepository(
+      memberReads: <Future<List<PlannerMember>>>[
+        initialMembers.future,
+        refreshedMembers.future,
+      ],
+      inviteReads: <Future<List<InviteCode>>>[
+        initialInvites.future,
+        refreshedInvites.future,
+      ],
+    );
+    final auth = _ControlledAuth();
+    final controller = PlannerController(auth: auth, repository: repository);
+    addTearDown(() async {
+      controller.dispose();
+      await repository.close();
+      auth.dispose();
+    });
+    await _settleControllerBootstrap();
+    controller.user = _alice;
+    controller.groups = const <PlannerGroup>[_groupA];
+
+    final selection = controller.selectGroup(_groupA.id);
+    for (var attempt = 0; attempt < 5; attempt++) {
+      if (repository.memberReadCount == 1 && repository.inviteReadCount == 1) {
+        break;
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(repository.memberReadCount, 1);
+    expect(repository.inviteReadCount, 1);
+
+    final latestGroup = _groupA.copyWith(name: 'A 최신', version: 2);
+    repository.lifecycle.add(latestGroup);
+    for (var attempt = 0; attempt < 20; attempt++) {
+      if (repository.memberReadCount == 2) break;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(repository.memberReadCount, 2);
+    expect(repository.inviteReadCount, 1);
+
+    const latestMember = PlannerMember(
+      id: 'latest-member',
+      name: 'Latest member',
+      email: 'latest@example.com',
+    );
+    refreshedMembers.complete(const <PlannerMember>[latestMember]);
+    refreshedInvites.complete(<InviteCode>[
+      InviteCode(
+        id: 'latest-invite',
+        groupId: _groupA.id,
+        expiresAt: DateTime.utc(2030, 1, 2),
+        maxUses: 1,
+        usesCount: 0,
+        version: 1,
+      ),
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(controller.members.map((member) => member.id), <String>[
+      latestMember.id,
+    ]);
+    expect(controller.invites.map((invite) => invite.id), <String>[
+      'latest-invite',
+    ]);
+
+    // M1/I1이 더 늦게 완료되어도 수명 주기 재조회 결과를 덮지 못해야 한다.
+    initialMembers.complete(<PlannerMember>[_owner(_alice.id)]);
+    initialInvites.complete(<InviteCode>[
+      InviteCode(
+        id: 'initial-invite',
+        groupId: _groupA.id,
+        expiresAt: DateTime.utc(2030, 1, 2),
+        maxUses: 1,
+        usesCount: 0,
+        version: 1,
+      ),
+    ]);
+    await selection;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    expect(controller.selectedGroup?.name, latestGroup.name);
+    expect(controller.members.map((member) => member.id), <String>[
+      latestMember.id,
+    ]);
+    expect(controller.invites.map((invite) => invite.id), <String>[
+      'latest-invite',
+    ]);
   });
 
   test('메타데이터 읽기가 대기 중일 때 selectGroup이 수명 주기 감시를 시작한다', () async {
